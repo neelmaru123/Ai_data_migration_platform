@@ -1,5 +1,5 @@
 """
-PostgreSQL Database Connector Implementation
+MySQL / MariaDB Database Connector Implementation
 """
 
 import time
@@ -17,23 +17,23 @@ from app.modules.sources.sources_connectors.sources_connectors_base import (
 from app.modules.sources.sources_connectors.sources_connectors_factory import ConnectorFactory
 
 
-@ConnectorFactory.register("postgresql")
-@ConnectorFactory.register("postgres")
-class PostgreSQLConnector(BaseConnector):
-    """PostgreSQL Database Connector powered by SQLAlchemy asyncpg."""
+@ConnectorFactory.register("mysql")
+@ConnectorFactory.register("mariadb")
+class MySQLConnector(BaseConnector):
+    """MySQL Database Connector powered by SQLAlchemy aiomysql."""
 
     def _build_connection_string(self) -> str:
-        """Construct PostgreSQL asyncpg connection URI."""
+        """Construct MySQL aiomysql connection URI."""
         if "connection_string" in self.config and self.config["connection_string"]:
             return self.config["connection_string"]
 
-        user = self.config.get("username", "postgres")
+        user = self.config.get("username", "root")
         password = self.config.get("password", "")
         host = self.config.get("host", "localhost")
-        port = self.config.get("port", 5432)
-        database = self.config.get("database_name", "postgres")
+        port = self.config.get("port", 3306)
+        database = self.config.get("database_name", "mysql")
 
-        return f"postgresql+asyncpg://{user}:{password}@{host}:{port}/{database}"
+        return f"mysql+aiomysql://{user}:{password}@{host}:{port}/{database}"
 
     def _get_engine(self):
         """
@@ -54,8 +54,8 @@ class PostgreSQLConnector(BaseConnector):
 
         try:
             async with engine.connect() as conn:
-                res = await conn.execute(text("SELECT version();"))
-                version_str = res.scalar() or "PostgreSQL"
+                res = await conn.execute(text("SELECT VERSION();"))
+                version_str = res.scalar() or "MySQL"
                 latency = (time.perf_counter() - start_time) * 1000
 
                 return ConnectionHealthResult(
@@ -76,83 +76,83 @@ class PostgreSQLConnector(BaseConnector):
 
     async def introspect_schema(self) -> DatabaseMetadata:
         engine = self._get_engine()
+        db_name = self.config.get("database_name", "mysql")
 
         try:
             async with engine.connect() as conn:
-                ver_res = await conn.execute(text("SELECT version();"))
-                server_ver = ver_res.scalar() or "PostgreSQL"
+                ver_res = await conn.execute(text("SELECT VERSION();"))
+                server_ver = ver_res.scalar() or "MySQL"
 
+                # Enumerate visible schemas / databases (not just the connected db)
                 schema_query = text("""
-                    SELECT schema_name FROM information_schema.schemata
-                    WHERE schema_name NOT IN ('pg_catalog', 'information_schema')
-                    ORDER BY schema_name;
+                    SELECT SCHEMA_NAME
+                    FROM information_schema.SCHEMATA
+                    WHERE SCHEMA_NAME NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                    ORDER BY SCHEMA_NAME;
                 """)
                 schema_res = await conn.execute(schema_query)
                 schemas = [row[0] for row in schema_res.fetchall()]
 
                 table_query = text("""
-                    SELECT t.table_schema, t.table_name, t.table_type,
-                           COALESCE(c.reltuples::bigint, 0) AS estimated_rows
-                    FROM information_schema.tables t
-                    LEFT JOIN pg_class c
-                        ON c.relname = t.table_name
-                    LEFT JOIN pg_namespace n
-                        ON n.oid = c.relnamespace AND n.nspname = t.table_schema
-                    WHERE t.table_schema NOT IN ('pg_catalog', 'information_schema')
-                    ORDER BY t.table_schema, t.table_name;
+                    SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS
+                    FROM information_schema.TABLES
+                    WHERE TABLE_SCHEMA = :db_name
+                    ORDER BY TABLE_NAME;
                 """)
-                table_res = await conn.execute(table_query)
+                table_res = await conn.execute(table_query, {"db_name": db_name})
                 table_rows = table_res.fetchall()
 
                 column_query = text("""
-                    SELECT table_schema, table_name, column_name, data_type, udt_name, is_nullable,
-                           character_maximum_length, numeric_precision, numeric_scale, ordinal_position
-                    FROM information_schema.columns
-                    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-                    ORDER BY table_schema, table_name, ordinal_position;
+                    SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE,
+                           CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, ORDINAL_POSITION
+                    FROM information_schema.COLUMNS
+                    WHERE TABLE_SCHEMA = :db_name
+                    ORDER BY TABLE_NAME, ORDINAL_POSITION;
                 """)
-                column_res = await conn.execute(column_query)
+                column_res = await conn.execute(column_query, {"db_name": db_name})
                 col_rows = column_res.fetchall()
 
-                cols_by_table: Dict[tuple, List[ColumnMetadata]] = {}
+                cols_by_table: Dict[str, List[ColumnMetadata]] = {}
                 total_columns = 0
                 for c in col_rows:
-                    key = (c[0], c[1])
-                    if key not in cols_by_table:
-                        cols_by_table[key] = []
+                    t_name = c[0]
+                    if t_name not in cols_by_table:
+                        cols_by_table[t_name] = []
 
-                    cols_by_table[key].append(
+                    cols_by_table[t_name].append(
                         ColumnMetadata(
-                            name=c[2],
-                            data_type=c[3],
-                            native_type=c[4],
-                            nullable=(c[5].upper() == "YES"),
-                            max_length=c[6],
-                            numeric_precision=c[7],
-                            numeric_scale=c[8],
+                            name=c[1],
+                            data_type=c[2],
+                            native_type=c[3],
+                            nullable=(c[4].upper() == "YES"),
+                            max_length=c[5],
+                            numeric_precision=c[6],
+                            numeric_scale=c[7],
                         )
                     )
                     total_columns += 1
 
                 tables: List[TableMetadata] = []
                 for t in table_rows:
-                    s_name, t_name, t_type = t[0], t[1], t[2]
-                    # estimated_rows comes from pg_class.reltuples (planner stats) — no N+1 COUNT(*)
-                    row_cnt = max(0, t[3])
-                    col_list = cols_by_table.get((s_name, t_name), [])
+                    t_name, t_type, row_est = t[0], t[1], t[2]
+                    col_list = cols_by_table.get(t_name, [])
+
+                    # Note: TABLE_ROWS is an InnoDB planner estimate (may be off by ±50%).
+                    # It matches the "estimated_rows" semantic of our metadata model.
+                    estimated_rows = int(row_est) if row_est is not None else 0
 
                     tables.append(
                         TableMetadata(
-                            schema_name=s_name,
+                            schema_name=db_name,
                             table_name=t_name,
-                            table_type=t_type.lower(),
-                            estimated_rows=row_cnt,
+                            table_type="table" if "BASE" in t_type.upper() else "view",
+                            estimated_rows=estimated_rows,
                             columns=col_list,
                         )
                     )
 
                 return DatabaseMetadata(
-                    database_name=self.config.get("database_name", "postgres"),
+                    database_name=db_name,
                     server_version=str(server_ver),
                     schemas=schemas,
                     tables=tables,
@@ -169,7 +169,7 @@ class PostgreSQLConnector(BaseConnector):
 
         try:
             async with engine.connect() as conn:
-                stmt = text(f'SELECT * FROM "{schema_name}"."{table_name}" LIMIT :limit')
+                stmt = text(f"SELECT * FROM `{table_name}` LIMIT :limit")
                 res = await conn.execute(stmt, {"limit": limit})
                 keys = res.keys()
                 rows = res.fetchall()
@@ -184,9 +184,7 @@ class PostgreSQLConnector(BaseConnector):
 
         try:
             async with engine.connect() as conn:
-                result_stream = await conn.stream(
-                    text(f'SELECT * FROM "{schema_name}"."{table_name}"')
-                )
+                result_stream = await conn.stream(text(f"SELECT * FROM `{table_name}`"))
                 keys = result_stream.keys()
 
                 batch: List[Dict[str, Any]] = []

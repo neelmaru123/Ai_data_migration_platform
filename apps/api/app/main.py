@@ -7,6 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.logging import logger
 
+from app.modules.sources.sources_routes import router as sources_router
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version="0.1.0",
@@ -14,6 +16,9 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+
+# Register API Routers
+app.include_router(sources_router, prefix=settings.API_V1_STR)
 
 # CORS Middleware Setup
 app.add_middleware(
