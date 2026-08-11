@@ -51,7 +51,11 @@ This document maps entry points, call stack sequences, and module dependencies a
 
 ## 3. Impact & Delta Analysis
 
-- **[NEW]**: [`DECISIONS.md`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/DECISIONS.md) - Architecture decision records created.
-- **[NEW]**: [`EXECUTION_FLOW.md`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/EXECUTION_FLOW.md) - Runtime call stack and entry point map created.
-- **[MODIFIED]**: [.agents/skills/code-decision-flow-auditor/SKILL.md](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/.agents/skills/code-decision-flow-auditor/SKILL.md) - Installed decision auditing skill.
-- **[UNCHANGED]**: FastAPI entry point [`apps/api/app/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/main.py#L10) and Docker compose setup [`docker-compose.yml`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/docker-compose.yml).
+- **[NEW]**: [`apps/api/app/modules/users/users_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/users/users_models.py) - `User` model.
+- **[NEW]**: [`apps/api/app/modules/sources/sources_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_models.py) - `Connection` model.
+- **[NEW]**: [`apps/api/app/modules/profiler/profiler_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/profiler/profiler_models.py) - `MetadataSnapshot`, `MetadataSchema`, `MetadataTable`, `MetadataColumn`, `MetadataConstraint`, `MetadataRelationship` models.
+- **[NEW]**: [`apps/api/app/modules/transformation_plans/transformation_plans_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/transformation_plans/transformation_plans_models.py) - `MigrationPlan` model.
+- **[NEW]**: [`apps/api/app/modules/execution/execution_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution/execution_models.py) - `MigrationJob` and `MigrationError` models.
+- **[NEW]**: [`apps/api/alembic.ini`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic.ini), [`alembic/env.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic/env.py), [`alembic/versions/001_initial_control_plane_schema.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic/versions/001_initial_control_plane_schema.py) - Alembic migration environment and initial 11-table schema DDL script.
+- **[NEW]**: [`.env`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/.env) - Centralized single source of truth environment file containing `DATABASE_URL`, `REDIS_URL`, and app secrets.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py#L28-L32) - Updated Pydantic settings to dynamically fall back to `../.env` when executed within subdirectories.

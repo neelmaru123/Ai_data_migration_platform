@@ -39,6 +39,34 @@ Decoupled **Transformation Intent** (AI-generated JSON schema contract) from **T
 ### 4. Trade-offs & Future Considerations
 
 - **Trade-off**: Enforcing strict JSON schema contracts requires extra validation code compared to freeform script generation, but guarantees 100% execution safety.
-- **Future Considerations**:
+- Future Considerations:
   - Add **Alembic** schema versioning for platform PostgreSQL metadata tables.
   - Implement partition checkpointing (`last_processed_id`) in `migration_jobs` to support zero-loss resumable task execution after worker crashes.
+
+---
+
+## [2026-08-11] - Modular PostgreSQL Control Plane ORM Model Implementation
+
+### 1. Decision Summary
+Implemented all 11 SQLAlchemy 2.x typed ORM models co-located in their respective domain feature modules inside `apps/api/app/modules/` (`users`, `sources`, `profiler`, `transformation_plans`, `execution`).
+
+### 2. Why This Approach? (Rationale)
+- **Domain-Driven Design (DDD)**: Each module owns its specific ORM models, Pydantic schemas, and API routes.
+- **Cross-Dialect JSON Support**: Used `JSONB().with_variant(JSON, "sqlite")` to support both native PostgreSQL JSONB in production and SQLite in local fast integration tests.
+- **Strict Cascading Foreign Keys**: Defined `ON DELETE CASCADE` across all parent-child relationships for automated referential integrity.
+
+### 3. Trade-offs & Future Considerations
+- Module schemas (`_schemas.py`) and routes (`_routes.py`) will consume these models as API features are added.
+
+---
+
+## [2026-08-11] - Single Source of Truth for Environment Variables
+
+### 1. Decision Summary
+Removed redundant [`apps/api/.env`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/.env) file and centralized all environment configurations into the root [`.env`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/.env).
+
+### 2. Why This Approach? (Rationale)
+- **Eliminates Configuration Drift**: Ensures single source of truth across Docker Compose, Next.js frontend, API backend, workers, and migration scripts.
+- **Hierarchical Path Resolution**: Pydantic's `SettingsConfigDict(env_file=(".env", "../.env"))` automatically discovers the root `.env` file when API commands are run inside `apps/api/`.
+
+
