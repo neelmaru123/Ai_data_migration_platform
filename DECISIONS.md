@@ -107,3 +107,25 @@ Fixed 12 bugs across `sources_connectors` and `sources_loaders` identified in a 
 - Excel streaming via openpyxl row iterator means no Polars dtype inference during streaming — same trade-off.
 - Engine per-call pattern is intentionally stateless. For production, a connection pool manager at the service/application layer (not per-connector) would be more efficient.
 
+---
+
+## [2026-08-11] - User Module CRUD & HTTP-Only Cookie Authentication Architecture
+
+### 1. Decision Summary
+Implemented User domain CRUD operations and secure JWT Authentication System using HTTP-only cookies, token rotation (15-minute access token, 7-day refresh token), bcrypt password hashing, and authentication dependencies/middleware.
+
+### 2. Why This Approach? (Rationale)
+- **HTTP-Only Cookies for XSS Prevention**: Storing JWT access and refresh tokens in `httponly=True` cookies prevents JavaScript code on the client from accessing tokens directly, rendering XSS attacks ineffective for token theft.
+- **Short-Lived Access Token (15 Mins) & Long-Lived Refresh Token (7 Days)**: Minimizes blast radius if an access token is compromised while offering seamless UX via automatic refresh token rotation.
+- **Dedicated `/auth/refresh` Route with Token Rotation**: Calling `/auth/refresh` invalidates the previous refresh token payload and issues a new access token AND a new refresh token, resetting both HTTP-only cookies.
+- **Bcrypt Password Hashing**: Passwords are salted and hashed using `bcrypt.hashpw()` before saving into the database. Plaintext passwords are never stored or logged.
+- **Authorization Header Fallback**: Supports `Authorization: Bearer <token>` headers as a fallback so API clients (Postman, Swagger UI, Curl) can easily test protected endpoints alongside standard browser HTTP-only cookies.
+
+### 3. Alternatives Considered & Rejected
+- **Local Storage / Session Storage for JWT**: Rejected due to vulnerability to XSS attacks.
+- **Single Long-Lived Access Token**: Rejected due to security risk; if compromised, the token remains valid for days without revocation capability.
+- **Session-based DB sessions**: Rejected in favor of stateless JWT tokens to maintain stateless scalability across backend worker instances.
+
+### 4. Trade-offs & Future Considerations
+- CORS credentials must be enabled (`allow_credentials=True`) on frontend requests when transmitting cookies cross-origin.
+- For production multi-domain deployments, ensure `COOKIE_SECURE=True` (HTTPS) and `COOKIE_SAMESITE="lax"` or `"none"`.

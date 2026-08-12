@@ -2,7 +2,7 @@
 Core Settings Configuration
 """
 
-from typing import List
+from typing import List, Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +11,15 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     LOG_LEVEL: str = "INFO"
     SECRET_KEY: str = "default_secret_key_change_me_in_production"
+    JWT_SECRET_KEY: str = "default_jwt_secret_key_change_me_in_production"
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
+    COOKIE_SECURE: bool = False  # Set to True in production (HTTPS)
+    COOKIE_SAMESITE: Literal["lax", "none", "strict"] = "lax"
+    COOKIE_DOMAIN: str | None = None
+
     API_V1_STR: str = "/api/v1"
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres_password@localhost:5432/migration_platform"

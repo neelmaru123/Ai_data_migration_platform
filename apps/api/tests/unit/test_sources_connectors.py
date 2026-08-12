@@ -103,6 +103,7 @@ async def test_postgres_connector_live_local():
     # If local PostgreSQL Docker container is running, verify healthy output
     if res.is_healthy:
         assert res.latency_ms > 0
+        assert res.server_version is not None
         assert "PostgreSQL" in res.server_version
         assert res.database_name == "migration_platform"
 
