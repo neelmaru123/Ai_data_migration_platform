@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from app.modules.users.users_models import User
     from app.modules.profiler.profiler_models import MetadataSnapshot
     from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.agents.agents_models import Agent
 
 
 class Connection(Base):
@@ -29,6 +30,12 @@ class Connection(Base):
         ForeignKey("users.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
+    )
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     type: Mapped[str] = mapped_column(String(50), nullable=False)  # postgresql, mysql, mongodb, csv, excel, parquet
@@ -57,6 +64,7 @@ class Connection(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="connections")
+    agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="connections")
     snapshots: Mapped[List["MetadataSnapshot"]] = relationship(
         "MetadataSnapshot", back_populates="connection", cascade="all, delete-orphan"
     )

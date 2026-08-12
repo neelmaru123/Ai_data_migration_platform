@@ -9,6 +9,7 @@ from app.core.logging import logger
 
 from app.modules.sources.sources_routes import router as sources_router
 from app.modules.users.users_routes import router as users_router
+from app.modules.agents.agents_routes import router as agents_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -21,6 +22,7 @@ app = FastAPI(
 # Register API Routers
 app.include_router(sources_router, prefix=settings.API_V1_STR)
 app.include_router(users_router, prefix=settings.API_V1_STR)
+app.include_router(agents_router, prefix=settings.API_V1_STR)
 
 # CORS Middleware Setup
 app.add_middleware(

@@ -13,6 +13,7 @@ from app.core.db import Base
 if TYPE_CHECKING:
     from app.modules.sources.sources_models import Connection
     from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.agents.agents_models import Agent
 
 
 class User(Base):
@@ -42,6 +43,9 @@ class User(Base):
     # Relationships
     connections: Mapped[List["Connection"]] = relationship(
         "Connection", back_populates="user", cascade="all, delete-orphan"
+    )
+    agents: Mapped[List["Agent"]] = relationship(
+        "Agent", back_populates="user", cascade="all, delete-orphan"
     )
     migration_plans: Mapped[List["MigrationPlan"]] = relationship(
         "MigrationPlan", back_populates="user", cascade="all, delete-orphan"

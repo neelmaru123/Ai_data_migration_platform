@@ -1,6 +1,6 @@
 """
 Integration Test for Control Plane Database Models
-Validates ORM creation, relationships, JSONB handling, and cascading deletes across all 11 entities.
+Validates ORM creation, relationships, JSONB handling, and cascading deletes across all 12 entities (including Agent).
 """
 
 import pytest
@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 
 from app.core.db import Base
 from app.modules.users.users_models import User
+from app.modules.agents.agents_models import Agent
 from app.modules.sources.sources_models import Connection
 from app.modules.profiler.profiler_models import (
     MetadataSnapshot,
@@ -27,7 +28,7 @@ from app.modules.execution.execution_models import MigrationJob, MigrationError
 
 @pytest.mark.asyncio
 async def test_full_orm_entity_lifecycle():
-    """Test full ORM creation and relationship traversal for all 11 entities."""
+    """Test full ORM creation and relationship traversal for all 12 entities."""
     test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
 
     async with test_engine.begin() as conn:
@@ -46,9 +47,22 @@ async def test_full_orm_entity_lifecycle():
         await session.flush()
         assert user.id is not None
 
-        # 2. Connection
+        # 2. Agent
+        agent = Agent(
+            user_id=user.id,
+            name="Customer On-Prem Agent 01",
+            agent_identifier="agent-uuid-001",
+            status="online",
+            version="1.0.0",
+        )
+        session.add(agent)
+        await session.flush()
+        assert agent.id is not None
+
+        # 3. Connection
         connection = Connection(
             user_id=user.id,
+            agent_id=agent.id,
             name="Source Postgres DB",
             type="postgresql",
             role="source",
@@ -62,7 +76,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(connection)
         await session.flush()
 
-        # 3. Metadata Snapshot
+        # 4. Metadata Snapshot
         snapshot = MetadataSnapshot(
             connection_id=connection.id,
             version=1,
@@ -76,7 +90,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(snapshot)
         await session.flush()
 
-        # 4. Metadata Schema
+        # 5. Metadata Schema
         schema = MetadataSchema(
             snapshot_id=snapshot.id,
             schema_name="public",
@@ -84,7 +98,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(schema)
         await session.flush()
 
-        # 5. Metadata Table
+        # 6. Metadata Table
         table = MetadataTable(
             schema_id=schema.id,
             table_name="customers",
@@ -95,7 +109,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(table)
         await session.flush()
 
-        # 6. Metadata Columns
+        # 7. Metadata Columns
         col1 = MetadataColumn(
             table_id=table.id,
             column_name="id",
@@ -121,7 +135,7 @@ async def test_full_orm_entity_lifecycle():
         session.add_all([col1, col2])
         await session.flush()
 
-        # 7. Metadata Constraint
+        # 8. Metadata Constraint
         constraint = MetadataConstraint(
             table_id=table.id,
             constraint_name="pk_customers",
@@ -131,7 +145,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(constraint)
         await session.flush()
 
-        # 8. Metadata Relationship
+        # 9. Metadata Relationship
         meta_rel = MetadataRelationship(
             snapshot_id=snapshot.id,
             source_table_id=table.id,
@@ -144,7 +158,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(meta_rel)
         await session.flush()
 
-        # 9. Migration Plan
+        # 10. Migration Plan
         plan = MigrationPlan(
             user_id=user.id,
             target_connection_id=connection.id,
@@ -159,9 +173,10 @@ async def test_full_orm_entity_lifecycle():
         session.add(plan)
         await session.flush()
 
-        # 10. Migration Job
+        # 11. Migration Job
         job = MigrationJob(
             migration_plan_id=plan.id,
+            agent_id=agent.id,
             status="running",
             progress=50.0,
             total_rows=1000,
@@ -175,7 +190,7 @@ async def test_full_orm_entity_lifecycle():
         session.add(job)
         await session.flush()
 
-        # 11. Migration Error
+        # 12. Migration Error
         error = MigrationError(
             migration_job_id=job.id,
             source_table="customers",
@@ -191,16 +206,24 @@ async def test_full_orm_entity_lifecycle():
         await session.commit()
 
         # Fetch using async select with selectinload
-        stmt_user = select(User).where(User.id == user.id).options(selectinload(User.connections))
+        stmt_user = select(User).where(User.id == user.id).options(
+            selectinload(User.connections),
+            selectinload(User.agents),
+        )
         result_user = await session.execute(stmt_user)
         fetched_user = result_user.scalar_one()
 
-        stmt_job = select(MigrationJob).where(MigrationJob.id == job.id).options(selectinload(MigrationJob.errors))
+        stmt_job = select(MigrationJob).where(MigrationJob.id == job.id).options(
+            selectinload(MigrationJob.errors),
+            selectinload(MigrationJob.agent),
+        )
         result_job = await session.execute(stmt_job)
         fetched_job = result_job.scalar_one()
 
         # Assertions
         assert fetched_user.connections[0].name == "Source Postgres DB"
+        assert fetched_user.agents[0].name == "Customer On-Prem Agent 01"
+        assert connection.agent_id == agent.id
         assert connection.database_name == "legacy_db"
         assert snapshot.database_name == "legacy_db"
         assert schema.schema_name == "public"
@@ -208,6 +231,8 @@ async def test_full_orm_entity_lifecycle():
         assert col1.ordinal_position == 1
         assert constraint.constraint_type == "primary_key"
         assert fetched_job.status == "running"
+        assert fetched_job.agent.agent_identifier == "agent-uuid-001"
         assert fetched_job.errors[0].error_type == "DataValidationError"
 
     await test_engine.dispose()
+
