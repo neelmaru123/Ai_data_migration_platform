@@ -1,0 +1,17 @@
+{
+  "venvPath": "C:\\Users\\Qtech\\AppData\\Local\\pypoetry\\Cache\\virtualenvs",
+  "venv": "data-migration-platform-api-1zATvjf9-py3.13",
+  "executionEnvironments": [
+    {
+      "root": "apps/api",
+      "extraPaths": [
+        "apps/api",
+        "C:\\Users\\Qtech\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\data-migration-platform-api-1zATvjf9-py3.13\\Lib\\site-packages"
+      ]
+    }
+  ],
+  "extraPaths": [
+    "apps/api",
+    "C:\\Users\\Qtech\\AppData\\Local\\pypoetry\\Cache\\virtualenvs\\data-migration-platform-api-1zATvjf9-py3.13\\Lib\\site-packages"
+  ]
+}
