@@ -202,8 +202,23 @@ Built a component-based interactive Landing Page for `apps/web` featuring a full
 
 ### 2. Why This Approach? (Rationale)
 - **Dynamic 3D Spline Canvas (`SplineHeroBackground.tsx`)**: Loaded via `next/dynamic` with `{ ssr: false }` to prevent SSR hydration mismatches while offering visual wow factor. Includes a fallback glowing loader.
-- **Component-Based Architecture**: Modularized into single-responsibility components (`Navbar`, `Hero`, `PlatformOverview`, `FeaturesGrid`, `WorkflowSteps`, `CTASection`, `Footer`) in `components/landing/`.
-- **Rich Aesthetic Design**: Applied glassmorphism backdrop blurs, dark slate gradients (`#030712`), and responsive breakpoints.
+- **Component-Based Architecture**: Modularized into single-responsibility components (`Navbar`, `Hero`, `PlatformOverview`, `FeaturesGrid`, `WorkflowSteps`, `Footer`) in `components/landing/`.
+
+---
+
+## [2026-08-13] - 2-Column Split Authentication Pages (`/register` & `/login`) with React Hook Form
+
+### 1. Decision Summary
+Built the **Registration** (`/register`) and **Login** (`/login`) pages using a 2-column split layout (`AuthLayout.tsx`). The left column renders the 3D Spline scene component, while the right column hosts the reactive form rendered with `react-hook-form`, front-end validation (name, email regex, password 8–12 chars), Google authentication button, and integration with `useRegister()` and `useLogin()` hooks.
+
+### 2. Why This Approach? (Rationale)
+- **2-Column Split (`AuthLayout.tsx`)**: Offers visual consistency across `/register` and `/login` while maintaining full focus on the input form on the right pane.
+- **`react-hook-form` Validation**:
+  - `name`: Required, min 2 characters.
+  - `email`: Required, validated via `/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i` regex.
+  - `password`: Required, strictly enforced between 8 and 12 characters (`minLength: 8, maxLength: 12`).
+- **Humanized Angular Design**: Styled with Plus Jakarta Sans typography, solid dark slate containers (`bg-slate-950`), and sharp borders (`rounded-sm`).
+
 
 
 
