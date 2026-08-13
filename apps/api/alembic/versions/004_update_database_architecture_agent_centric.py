@@ -19,13 +19,14 @@ json_type = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
 
 
 def upgrade() -> None:
-    # 1. Create data_sources table with unique constraint on (agent_id, identifier)
+    # 1. Create data_sources table with role column and unique constraint on (agent_id, identifier)
     op.create_table(
         "data_sources",
         sa.Column("id", sa.UUID(), nullable=False),
         sa.Column("agent_id", sa.UUID(), nullable=False),
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column("type", sa.String(length=50), nullable=False),
+        sa.Column("role", sa.String(length=50), nullable=False, server_default="source"),
         sa.Column("identifier", sa.String(length=255), nullable=False),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),

@@ -23,6 +23,7 @@ class SourceService:
             agent_id=data.agent_id,
             name=data.name.strip(),
             type=data.type.lower().strip(),
+            role=data.role.lower().strip(),
             identifier=data.identifier.strip(),
         )
         session.add(source_obj)
@@ -60,6 +61,9 @@ class SourceService:
         changed = False
         if data.name is not None and data.name.strip() != source.name:
             source.name = data.name.strip()
+            changed = True
+        if data.role is not None and data.role.lower().strip() != source.role:
+            source.role = data.role.lower().strip()
             changed = True
         if data.identifier is not None and data.identifier.strip() != source.identifier:
             source.identifier = data.identifier.strip()

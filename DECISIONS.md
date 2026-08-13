@@ -169,3 +169,42 @@ Implemented server-side Google OAuth 2.0 (`POST /auth/google`, `GET /auth/google
 
 ### 4. Trade-offs & Future Considerations
 - Requires configuring `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env` for production Google OAuth consent screens.
+
+---
+
+## [2026-08-13] - Agent-Centric Database Architecture & Credential Elimination
+
+### 1. Decision Summary
+Eliminated database credentials (`host`, `port`, `username`, `password`, `credentials_encrypted`) from the control plane backend. Dropped the obsolete `connections` table and replaced it with a lightweight `data_sources` identity table (`id`, `agent_id`, `name`, `type`, `role`, `identifier`).
+
+### 2. Why This Approach? (Rationale)
+- **Zero Control-Plane Storage of Credentials**: Customer database passwords and connection strings remain strictly inside customer-hosted local Docker Agents. The control plane backend only stores logical source identities and collected metadata history.
+- **N:M Migration Plan Snapshots**: Created `migration_plan_snapshots` join table so a single `MigrationPlan` can combine metadata snapshots from multiple data sources (e.g. Postgres + MySQL into a new Postgres target).
+- **Graceful Deletion Handling**: Changed `agent_id` FK on `migration_plans` to `ondelete="SET NULL"` so completed historical migration plans survive agent deregistration.
+
+### 3. Trade-offs & Future Considerations
+- Alembic migration `004_agent_centric_arch` handles schema transition with full `upgrade()` and `downgrade()` safety.
+
+---
+
+## [2026-08-13] - Sources & Agents Domain Security, Ownership Middleware & Roles
+
+### 1. Decision Summary
+Implemented security middleware dependencies (`sources_dependencies.py`) enforcing agent and data source ownership verification across all endpoints. Added a `role` field (`"source"`, `"target"`, `"both"`) to `data_sources`.
+
+### 2. Why This Approach? (Rationale)
+- **IDOR & Ownership Protection**: Dependencies `get_verified_agent` and `get_verified_data_source` verify that the target agent/source belongs to `current_user.id`, returning `403 Forbidden` if ownership validation fails.
+- **Role Categorization**: Explicitly categorizing data sources by role (`source`, `target`, `both`) enables schema profiling on both source DBs and target DBs while allowing clear UI separation.
+- **Strict Pydantic Validation**: Used Pydantic `Literal` types (`VALID_SOURCE_TYPES`, `VALID_SOURCE_ROLES`) and `min_length=1` field constraints to reject invalid inputs at the API gateway layer.
+
+---
+
+## [2026-08-13] - Agent Domain Module APIs & Concurrent Data Sources Creation
+
+### 1. Decision Summary
+Implemented complete Agent CRUD endpoints (`POST /agents`, `GET /agents`, `GET /agents/{id}`, `PUT /agents/{id}`, `POST /agents/{id}/heartbeat`, `DELETE /agents/{id}`) with support for atomic concurrent creation of Agent + initial Source and Destination DB identities.
+
+### 2. Why This Approach? (Rationale)
+- **Atomic Single-Transaction Setup**: When calling `POST /api/v1/agents`, the payload can include an array of initial `data_sources`. The service creates the Agent record and all attached Data Source records within a single database transaction, ensuring no partial or orphaned state occurs.
+- **Periodic Heartbeat Tracking**: Endpoint `POST /agents/{id}/heartbeat` allows Docker Agents to ping status (`online`, `busy`), update `version`, and update `last_seen_at` timestamp.
+

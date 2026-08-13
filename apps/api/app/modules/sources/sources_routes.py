@@ -23,7 +23,7 @@ from app.modules.sources.sources_dependencies import (
     get_verified_data_source,
 )
 
-router = APIRouter(prefix="/    ", tags=["Data Sources Identity"])
+router = APIRouter(prefix="/data-sources", tags=["Data Sources Identity"])
 
 
 @router.post("", response_model=DataSourceResponse, status_code=status.HTTP_201_CREATED)

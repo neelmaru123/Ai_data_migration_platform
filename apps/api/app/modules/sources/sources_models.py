@@ -34,6 +34,9 @@ class DataSource(Base):
     type: Mapped[str] = mapped_column(
         String(50), nullable=False
     )  # postgresql, mysql, mongodb, csv, excel, parquet
+    role: Mapped[str] = mapped_column(
+        String(50), default="source", nullable=False
+    )  # source, target, both
     identifier: Mapped[str] = mapped_column(
         String(255), nullable=False
     )  # Logical/local identifier for the source on the agent
