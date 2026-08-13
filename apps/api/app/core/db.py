@@ -10,7 +10,7 @@ from app.core.config import settings
 
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy 2.x ORM models."""
-    pass
+    __allow_unmapped__ = True
 
 
 # Async SQLAlchemy Engine

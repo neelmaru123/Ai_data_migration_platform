@@ -54,6 +54,7 @@ class AgentResponse(BaseModel):
     agent_identifier: str
     status: str
     version: Optional[str] = None
+    api_token: Optional[str] = None
     last_seen_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime

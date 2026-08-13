@@ -80,6 +80,9 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         assert res_agent.status_code == 201, res_agent.text
         data_agent = res_agent.json()
         assert data_agent["name"] == "Production Edge Agent"
+        assert data_agent["status"] == "offline"
+        assert data_agent["api_token"] is not None
+        assert data_agent["api_token"].startswith("ag_live_")
         assert len(data_agent["data_sources"]) == 2
         assert data_agent["data_sources"][0]["type"] == "postgresql"
         assert data_agent["data_sources"][0]["role"] == "source"
@@ -87,6 +90,7 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         assert data_agent["data_sources"][1]["role"] == "target"
 
         agent_id = data_agent["id"]
+        api_token = data_agent["api_token"]
 
         # 3. GET /api/v1/agents (List)
         res_list = await client.get("/api/v1/agents")
@@ -99,13 +103,30 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         assert res_detail.status_code == 200
         assert res_detail.json()["agent_identifier"] == "edge_prod_001"
 
-        # 5. POST /api/v1/agents/{agent_id}/heartbeat
-        res_hb = await client.post(
-            f"/api/v1/agents/{agent_id}/heartbeat",
+        # 5a. Unauthenticated Heartbeat attempt -> 401 Unauthorized
+        res_unauth_hb = await client.post(
+            "/api/v1/agents/heartbeat",
             json={"status": "online", "version": "1.0.1"},
         )
-        assert res_hb.status_code == 200
-        assert res_hb.json()["version"] == "1.0.1"
+        assert res_unauth_hb.status_code == 401
+
+        # 5b. Heartbeat with invalid token -> 401 Unauthorized
+        res_bad_token_hb = await client.post(
+            "/api/v1/agents/heartbeat",
+            json={"status": "online", "version": "1.0.1"},
+            headers={"X-Agent-Token": "invalid_token_123"},
+        )
+        assert res_bad_token_hb.status_code == 401
+
+        # 5c. Direct Authenticated Heartbeat Ping via X-Agent-Token header -> 200 OK & Status becomes online
+        res_hb_direct = await client.post(
+            "/api/v1/agents/heartbeat",
+            json={"status": "online", "version": "1.0.1"},
+            headers={"X-Agent-Token": api_token},
+        )
+        assert res_hb_direct.status_code == 200
+        assert res_hb_direct.json()["status"] == "online"
+        assert res_hb_direct.json()["version"] == "1.0.1"
 
         # 6. PUT /api/v1/agents/{agent_id}
         res_put = await client.put(

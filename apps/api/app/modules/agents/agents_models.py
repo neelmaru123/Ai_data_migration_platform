@@ -2,9 +2,11 @@
 Agents Domain Database Models
 """
 
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, ClassVar, List, Optional
 from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -32,6 +34,13 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     agent_identifier: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False
+    )
+    api_token_hash: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False,
+        default=lambda: hashlib.sha256(secrets.token_urlsafe(32).encode("utf-8")).hexdigest(),
     )
     status: Mapped[str] = mapped_column(
         String(50), default="offline", nullable=False

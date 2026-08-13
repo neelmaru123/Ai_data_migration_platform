@@ -3,13 +3,16 @@ FastAPI Router Endpoints for Agents Domain
 """
 
 import uuid
-from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from jwt import PyJWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.modules.users.users_dependencies import get_current_active_user
-from app.modules.users.users_models import User
+from app.core.security import decode_jwt_token
+from app.core.websocket_manager import manager
+from app.modules.agents.agents_dependencies import get_current_agent
 from app.modules.agents.agents_models import Agent
 from app.modules.agents.agents_schemas import (
     AgentCreate,
@@ -20,6 +23,9 @@ from app.modules.agents.agents_schemas import (
 )
 from app.modules.agents.agents_services import AgentService
 from app.modules.sources.sources_dependencies import get_verified_agent
+from app.modules.users.users_dependencies import get_current_active_user
+from app.modules.users.users_models import User
+from app.modules.users.users_services import UserService
 
 router = APIRouter(prefix="/agents", tags=["Agents Management"])
 
@@ -32,6 +38,7 @@ async def create_agent(
 ):
     """
     Register a new Docker Agent for the current user.
+    Generates a secure API Token and initial 'offline' status.
     Optionally registers initial source and destination database identities concurrently
     in the same atomic database transaction.
     """
@@ -77,25 +84,67 @@ async def update_agent(
     )
 
 
-@router.post("/{agent_id}/heartbeat", response_model=AgentResponse)
-async def agent_heartbeat(
-    agent_id: uuid.UUID,
+@router.post("/heartbeat", response_model=AgentResponse)
+async def agent_heartbeat_direct(
     payload: AgentHeartbeat,
+    current_agent: Agent = Depends(get_current_agent),
     session: AsyncSession = Depends(get_db),
 ):
     """
-    Periodic agent heartbeat ping endpoint.
-    Updates agent status, version, and last_seen_at timestamp.
+    Direct authenticated agent heartbeat ping endpoint.
+    Verifies agent identity via 'X-Agent-Token' header and updates status/version/last_seen_at.
+    Broadcasts real-time signal to Web App subscribers over WebSocket.
     """
-    agent = await AgentService.get_agent_by_id(session, agent_id)
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Agent with ID '{agent_id}' not found.",
-        )
     return await AgentService.process_agent_heartbeat(
-        session=session, agent=agent, heartbeat=payload
+        session=session, agent=current_agent, heartbeat=payload
     )
+
+
+@router.websocket("/ws/{agent_id}")
+async def agent_websocket_endpoint(
+    websocket: WebSocket,
+    agent_id: uuid.UUID,
+    token: Optional[str] = Query(None),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Authenticated WebSocket endpoint for Web Applications to listen for real-time status changes
+    and connection events for a specific agent.
+    Requires user access JWT token passed as query parameter `?token=<jwt>`.
+    Verifies agent ownership.
+    """
+    if not token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication token missing")
+        return
+
+    try:
+        payload = decode_jwt_token(token)
+        user_id_str: Optional[str] = payload.get("sub")
+        token_type: Optional[str] = payload.get("type")
+        if not user_id_str or token_type != "access":
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid access token")
+            return
+        user_id = uuid.UUID(user_id_str)
+    except (PyJWTError, ValueError):
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Invalid or expired access token")
+        return
+
+    user = await UserService.get_user_by_id(session, user_id)
+    if not user or not user.is_active:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="User account invalid or inactive")
+        return
+
+    agent = await AgentService.get_agent_by_id(session, agent_id)
+    if not agent or agent.user_id != user.id:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Forbidden agent access")
+        return
+
+    await manager.connect(str(agent_id), websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(str(agent_id), websocket)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

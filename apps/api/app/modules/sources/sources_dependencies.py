@@ -3,16 +3,17 @@ Security & Permission Middleware Dependencies for Sources Domain
 """
 
 import uuid
+
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.db import get_db
-from app.modules.users.users_dependencies import get_current_active_user
-from app.modules.users.users_models import User
 from app.modules.agents.agents_models import Agent
 from app.modules.agents.agents_services import AgentService
 from app.modules.sources.sources_models import DataSource
 from app.modules.sources.sources_services import SourceService
+from app.modules.users.users_dependencies import get_current_active_user
+from app.modules.users.users_models import User
 
 
 async def get_verified_agent(

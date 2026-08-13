@@ -2,16 +2,25 @@
 Agents Domain Services (Business logic & Atomic operations boundary)
 """
 
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
+
 from fastapi import HTTPException, status
 from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
+from app.core.websocket_manager import manager
+from app.modules.agents.agents_dependencies import hash_agent_token
 from app.modules.agents.agents_models import Agent
-from app.modules.agents.agents_schemas import AgentCreate, AgentHeartbeat, AgentUpdate
+from app.modules.agents.agents_schemas import (
+    AgentCreate,
+    AgentDetailResponse,
+    AgentHeartbeat,
+    AgentUpdate,
+)
 from app.modules.sources.sources_models import DataSource
 
 
@@ -21,9 +30,10 @@ class AgentService:
     @staticmethod
     async def create_agent(
         session: AsyncSession, user_id: uuid.UUID, data: AgentCreate
-    ) -> Agent:
+    ) -> AgentDetailResponse:
         """
         Create a new Docker Agent.
+        Generates a secure API token, stores its SHA-256 hash, and sets initial status to 'offline'.
         Concurrently creates initial Data Source identities (source and destination DBs)
         in the same atomic transaction if provided.
         """
@@ -36,19 +46,24 @@ class AgentService:
                 detail=f"An agent with identifier '{data.agent_identifier}' already exists.",
             )
 
-        # 2. Instantiate Agent
+        # 2. Generate secure agent API token & SHA-256 hash
+        raw_token = f"ag_live_{secrets.token_urlsafe(32)}"
+        token_hash = hash_agent_token(raw_token)
+
+        # 3. Instantiate Agent (initial status is offline until agent container boots and sends heartbeat)
         agent = Agent(
             user_id=user_id,
             name=data.name.strip(),
             agent_identifier=data.agent_identifier.strip(),
+            api_token_hash=token_hash,
             version=data.version.strip() if data.version else None,
-            status="online",
-            last_seen_at=datetime.now(timezone.utc),
+            status="offline",
+            last_seen_at=None,
         )
         session.add(agent)
         await session.flush()  # Generates agent.id
 
-        # 3. Create concurrent initial Data Sources if provided
+        # 4. Create concurrent initial Data Sources if provided
         if data.data_sources:
             for ds_input in data.data_sources:
                 ds_obj = DataSource(
@@ -62,8 +77,16 @@ class AgentService:
 
         await session.commit()
 
-        # 4. Return agent re-queried with data_sources relationship loaded
-        return await AgentService.get_agent_by_id(session, agent.id)  # type: ignore[return-value]
+        # 5. Return AgentDetailResponse Pydantic schema with raw api_token attached
+        fetched_agent = await AgentService.get_agent_by_id(session, agent.id)
+        if fetched_agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve newly created agent entity.",
+            )
+        response = AgentDetailResponse.model_validate(fetched_agent)
+        response.api_token = raw_token
+        return response
 
     @staticmethod
     async def get_agent_by_id(
@@ -131,7 +154,12 @@ class AgentService:
     async def process_agent_heartbeat(
         session: AsyncSession, agent: Agent, heartbeat: AgentHeartbeat
     ) -> Agent:
-        """Process periodic heartbeat ping from agent."""
+        """
+        Process periodic heartbeat ping from authenticated agent.
+        Updates status, last_seen_at timestamp, and broadcasts real-time status signal over WebSocket.
+        Emits AGENT_CONNECTED on offline->online transition, or AGENT_HEARTBEAT on recurring pings.
+        """
+        previous_status = agent.status
         agent.status = heartbeat.status.strip()
         agent.last_seen_at = datetime.now(timezone.utc)
         if heartbeat.version:
@@ -139,6 +167,25 @@ class AgentService:
 
         await session.commit()
         await session.refresh(agent)
+
+        event_name = (
+            "AGENT_CONNECTED"
+            if previous_status != "online" and agent.status == "online"
+            else "AGENT_HEARTBEAT"
+        )
+
+        # Broadcast real-time signal to Web App subscribers
+        await manager.broadcast_to_agent(
+            str(agent.id),
+            {
+                "event": event_name,
+                "agent_id": str(agent.id),
+                "status": agent.status,
+                "version": agent.version,
+                "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
+            },
+        )
+
         return agent
 
     @staticmethod
