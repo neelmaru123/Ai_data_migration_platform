@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     COOKIE_SAMESITE: Literal["lax", "none", "strict"] = "lax"
     COOKIE_DOMAIN: str | None = None
 
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    FRONTEND_URL: str = "http://localhost:3000"
+
     API_V1_STR: str = "/api/v1"
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres_password@localhost:5432/migration_platform"

@@ -1,0 +1,61 @@
+"""
+Agents Domain Database Models
+"""
+
+import uuid
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, List, Optional
+from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.core.db import Base
+
+if TYPE_CHECKING:
+    from app.modules.users.users_models import User
+    from app.modules.sources.sources_models import Connection
+    from app.modules.execution.execution_models import MigrationJob
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent_identifier: Mapped[str] = mapped_column(
+        String(255), unique=True, index=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), default="offline", nullable=False
+    )
+    version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship("User", back_populates="agents")
+    connections: Mapped[List["Connection"]] = relationship(
+        "Connection", back_populates="agent"
+    )
+    migration_jobs: Mapped[List["MigrationJob"]] = relationship(
+        "MigrationJob", back_populates="agent"
+    )

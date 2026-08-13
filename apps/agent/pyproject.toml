@@ -1,0 +1,14 @@
+[tool.poetry]
+name = "data-migration-platform-agent"
+version = "0.1.0"
+description = "Docker Agent Application Runtime for Customer Database Migration"
+authors = ["Lead Architect <architect@migrationplatform.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = "^2.9.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0"]
+build-backend = "poetry.core.masonry.api"

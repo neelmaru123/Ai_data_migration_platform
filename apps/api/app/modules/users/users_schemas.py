@@ -5,7 +5,7 @@ Pydantic Schemas for User Module & Authentication
 import uuid
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 
 class UserRegister(BaseModel):
@@ -19,6 +19,11 @@ class UserLogin(BaseModel):
     """Payload to authenticate user."""
     email: EmailStr = Field(..., examples=["user@example.com"])
     password: str = Field(..., examples=["SecurePass123!"])
+
+
+class GoogleAuthRequest(BaseModel):
+    """Payload for Google OAuth ID Token verification."""
+    id_token: str = Field(..., description="Google OAuth ID Token from client authentication")
 
 
 class UserUpdate(BaseModel):
@@ -37,8 +42,7 @@ class UserResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TokenResponse(BaseModel):

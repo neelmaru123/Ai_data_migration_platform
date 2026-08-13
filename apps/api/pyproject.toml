@@ -33,6 +33,7 @@ aiomysql = "^0.2.0"
 pymysql = "^1.2.0"
 python-multipart = "^0.0.9"
 email-validator = "^2.3.0"
+google-auth = "^2.56.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

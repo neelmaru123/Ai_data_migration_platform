@@ -58,6 +58,17 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  agent:
+    build:
+      context: ./apps/agent
+      dockerfile: Dockerfile
+    container_name: migration_platform_agent
+    environment:
+      - API_URL=http://api:8000
+    depends_on:
+      - api
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     container_name: migration_platform_postgres

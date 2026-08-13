@@ -14,6 +14,7 @@ JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 
 if TYPE_CHECKING:
     from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.agents.agents_models import Agent
 
 
 class MigrationJob(Base):
@@ -27,6 +28,12 @@ class MigrationJob(Base):
         ForeignKey("migration_plans.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
+    )
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agents.id", ondelete="SET NULL"),
+        index=True,
+        nullable=True,
     )
     status: Mapped[str] = mapped_column(
         String(50), default="queued", index=True, nullable=False
@@ -59,6 +66,7 @@ class MigrationJob(Base):
 
     # Relationships
     plan: Mapped["MigrationPlan"] = relationship("MigrationPlan", back_populates="jobs")
+    agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="migration_jobs")
     errors: Mapped[List["MigrationError"]] = relationship(
         "MigrationError", back_populates="job", cascade="all, delete-orphan"
     )
