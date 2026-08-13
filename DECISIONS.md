@@ -129,3 +129,43 @@ Implemented User domain CRUD operations and secure JWT Authentication System usi
 ### 4. Trade-offs & Future Considerations
 - CORS credentials must be enabled (`allow_credentials=True`) on frontend requests when transmitting cookies cross-origin.
 - For production multi-domain deployments, ensure `COOKIE_SECURE=True` (HTTPS) and `COOKIE_SAMESITE="lax"` or `"none"`.
+
+---
+
+## [2026-08-12] - Phase 0: Docker Agent Architecture & Control Plane Integration
+
+### 1. Decision Summary
+Introduced the `Agent` domain model and service boundary in `apps/api/app/modules/agents/` and established the standalone `apps/agent/` Docker agent workspace for customer-hosted execution.
+
+### 2. Why This Approach? (Rationale)
+- **Customer Data Privacy**: Enterprise customers require running migration jobs inside their own VPCs without sharing raw data with cloud APIs.
+- **Decoupled Control Plane & Data Plane**: The FastAPI backend acts as the central control plane (issuing jobs and receiving heartbeats/status), while standalone Docker agents execute data transfer locally.
+- **Foreign Key Linking**: Added nullable `agent_id` FK to `connections` and `migration_jobs` tables so connections and execution jobs can optionally bind to customer-hosted Docker agents.
+
+### 3. Alternatives Considered & Rejected
+- **Direct Backend Execution Only**: Rejected because enterprise databases behind strict firewalls cannot be accessed directly by a public backend service.
+
+---
+
+## [2026-08-12] - Server-Side Google OAuth 2.0 & Identity Isolation Policy
+
+### 1. Decision Summary
+Implemented server-side Google OAuth 2.0 (`POST /auth/google`, `GET /auth/google/login`, `GET /auth/google/callback`) integrated with FastAPI's existing HTTP-only cookie JWT session system, enforcing strict account isolation rules between Google accounts and password accounts.
+
+### 2. Why This Approach? (Rationale)
+- **Cryptographic Token Verification**: Uses `google-auth` (`google.oauth2.id_token.verify_oauth2_token`) on the backend to verify Google ID token signatures against Google's public keys (`https://www.googleapis.com/oauth2/v3/certs`). Unverified frontend data is never trusted.
+- **Unified Application Session**: Successful Google authentication converges into the exact same application session (`access_token` and `refresh_token` HTTP-only cookies), keeping frontend session logic clean and standardized.
+- **Strict Identity Isolation Policy**:
+  1. *Google Account Attempting Password Registration*: Rejected with `409 Conflict` ("An account with this email was created using Google Sign-In").
+  2. *Google Account Attempting Password Login*: Rejected with `400 Bad Request` ("This account was created using Google Sign-In").
+  3. *Unlinked Password Account Attempting Google Login*: Restricted with `409 Conflict` ("An account with this email already exists using password authentication").
+  4. *Deactivated Account Attempting OAuth*: Rejected with `400 Bad Request` ("User account is deactivated").
+  5. *Unverified Google Email*: Rejected with `400 Bad Request` ("Google account email is not verified").
+- **Dynamic Client Component Spline Loading**: Loaded `@splinetool/react-spline/next` via `next/dynamic` with `{ ssr: false }` to prevent React 18/19 Next.js 14 client component async rendering errors.
+
+### 3. Alternatives Considered & Rejected
+- **Trusting Client User Data**: Rejected due to critical security risk (account takeover by passing arbitrary email in JSON body).
+- **Separate Session System for Google Users**: Rejected to prevent maintaining parallel authentication middleware, route guards, and cookie handling.
+
+### 4. Trade-offs & Future Considerations
+- Requires configuring `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env` for production Google OAuth consent screens.

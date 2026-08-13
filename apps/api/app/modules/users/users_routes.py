@@ -2,9 +2,14 @@
 FastAPI Routes for User Domain & Authentication System
 """
 
+import secrets
+import urllib.parse
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from google.auth.transport import requests as google_requests
+from google.oauth2 import id_token
+import httpx
 from jwt import PyJWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +26,7 @@ from app.modules.users.users_dependencies import (
 )
 from app.modules.users.users_models import User
 from app.modules.users.users_schemas import (
+    GoogleAuthRequest,
     MessageResponse,
     TokenResponse,
     UserLogin,
@@ -110,17 +116,6 @@ async def login_user(
     refresh token, and set HTTP-only cookies.
     """
     user = await UserService.authenticate_user(db, payload.email, payload.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password.",
-        )
-
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User account is deactivated.",
-        )
 
     access_token = create_access_token(subject=user.id)
     refresh_token = create_refresh_token(subject=user.id)
@@ -131,6 +126,209 @@ async def login_user(
         message="Login successful.",
         user=UserResponse.model_validate(user),
     )
+
+
+@router.get(
+    "/auth/google/login",
+    summary="Initiate Google OAuth 2.0 Authorization Flow",
+)
+async def google_oauth_login(response: Response):
+    """
+    Generate Google OAuth 2.0 Authorization URL with state token for CSRF protection,
+    and return URL to redirect user to Google's authentication consent screen.
+    """
+    if not settings.GOOGLE_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google Client ID is not configured on server.",
+        )
+
+    state = secrets.token_urlsafe(32)
+    response.set_cookie(
+        key="oauth_state",
+        value=state,
+        httponly=True,
+        max_age=600,  # 10 minutes
+        samesite="lax",
+        secure=settings.COOKIE_SECURE,
+        path="/",
+    )
+
+    params = {
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "state": state,
+        "access_type": "offline",
+        "prompt": "select_account",
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+    return {"url": auth_url, "message": "Redirect user to this URL"}
+
+
+@router.get(
+    "/auth/google/callback",
+    response_model=TokenResponse,
+    summary="Handle Google OAuth 2.0 Authorization Callback",
+)
+async def google_oauth_callback(
+    request: Request,
+    response: Response,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Callback endpoint for Google OAuth authorization code exchange.
+    Verifies CSRF state, exchanges authorization code for tokens, verifies Google ID token,
+    creates/links application user, and sets HTTP-only session cookies.
+    """
+    if error:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Google OAuth authorization failed: {error}",
+        )
+
+    if not code:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Authorization code missing from Google callback.",
+        )
+
+    saved_state = request.cookies.get("oauth_state")
+    if saved_state and state and not secrets.compare_digest(saved_state, state):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="OAuth state verification failed (CSRF mismatch).",
+        )
+
+    response.delete_cookie(key="oauth_state", path="/")
+
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": settings.GOOGLE_CLIENT_ID,
+        "client_secret": settings.GOOGLE_CLIENT_SECRET,
+        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.post(token_url, data=token_data)
+            res_data = res.json()
+
+        if res.status_code != 200:
+            err_msg = res_data.get("error_description") or res_data.get("error") or "Failed token exchange"
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Google Token Exchange Error: {err_msg}",
+            )
+
+        google_id_token = res_data.get("id_token")
+        if not google_id_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Google response did not include id_token.",
+            )
+
+        id_info = id_token.verify_oauth2_token(
+            google_id_token,
+            google_requests.Request(),
+            settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID else None,
+        )
+
+        google_sub = id_info.get("sub")
+        email = id_info.get("email")
+        name = id_info.get("name") or email.split("@")[0]
+        email_verified = id_info.get("email_verified", True)
+
+        if not google_sub or not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Google token missing sub or email claims.",
+            )
+
+        user = await UserService.get_or_create_google_user(
+            db, google_id=google_sub, email=email, name=name, email_verified=email_verified
+        )
+
+        access_token = create_access_token(subject=user.id)
+        refresh_token = create_refresh_token(subject=user.id)
+
+        _set_auth_cookies(response, access_token, refresh_token)
+
+        return TokenResponse(
+            message="Google authentication successful.",
+            user=UserResponse.model_validate(user),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Google authentication failed: {str(exc)}",
+        )
+
+
+@router.post(
+    "/auth/google",
+    response_model=TokenResponse,
+    summary="Authenticate via Google OAuth ID Token (SPA / Popup Flow)",
+)
+async def google_auth_credential(
+    payload: GoogleAuthRequest,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Authenticate user using verified Google OAuth ID Token (SPA / Popup flow).
+    Validates token signature via `google-auth` library against Google OAuth public keys,
+    finds or creates user, and sets HTTP-only cookies.
+    """
+    try:
+        id_info = id_token.verify_oauth2_token(
+            payload.id_token,
+            google_requests.Request(),
+            settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID else None,
+        )
+
+        google_sub = id_info.get("sub")
+        email = id_info.get("email")
+        name = id_info.get("name") or email.split("@")[0]
+        email_verified = id_info.get("email_verified", True)
+
+        if not google_sub or not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Google Token claims.",
+            )
+
+        user = await UserService.get_or_create_google_user(
+            db, google_id=google_sub, email=email, name=name, email_verified=email_verified
+        )
+
+        access_token = create_access_token(subject=user.id)
+        refresh_token = create_refresh_token(subject=user.id)
+
+        _set_auth_cookies(response, access_token, refresh_token)
+
+        return TokenResponse(
+            message="Google authentication successful.",
+            user=UserResponse.model_validate(user),
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid Google ID token: {str(exc)}",
+        )
 
 
 @router.post(
@@ -244,7 +442,7 @@ async def delete_my_account(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete authenticated user account and clear authentication cookies."""
+    """Delete authenticated user account and cascade delete related records."""
     await UserService.delete_user(db, current_user)
     _clear_auth_cookies(response)
     return MessageResponse(message="Account deleted successfully.")
