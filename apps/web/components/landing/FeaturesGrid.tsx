@@ -1,0 +1,76 @@
+'use client';
+
+import React from 'react';
+
+export default function FeaturesGrid() {
+  return (
+    <section id="features" className="py-20 bg-slate-950 relative border-t border-slate-800">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
+        {/* Section Header */}
+        <div className="max-w-2xl mb-12">
+          <div className="text-xs font-mono text-indigo-400 font-bold uppercase tracking-wider mb-2">
+            Capabilities
+          </div>
+          <h2 className="text-2xl sm:text-4xl font-extrabold text-slate-100 tracking-tight">
+            Built for Reliable, Deterministic Data Migration
+          </h2>
+        </div>
+
+        {/* Angular Grid Layout - Solid Dark Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+          {/* Feature 1 */}
+          <div className="md:col-span-2 p-7 rounded-sm bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors">
+            <h3 className="text-lg font-bold text-slate-100 mb-2">Schema Mapping Engine</h3>
+            <p className="text-slate-400 text-sm leading-relaxed mb-4">
+              Parses target database definitions and source schemas to automatically infer column aliases, primary keys, and data type casts with zero manual script editing.
+            </p>
+            <div className="p-3 rounded-sm bg-slate-950 border border-slate-800 font-mono text-xs text-indigo-300">
+              UUID -&gt; VARCHAR(36) | JSONB -&gt; JSON | TIMESTAMP -&gt; DATETIME
+            </div>
+          </div>
+
+          {/* Feature 2 */}
+          <div className="p-7 rounded-sm bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors">
+            <h3 className="text-lg font-bold text-slate-100 mb-2">Constant RAM Streaming</h3>
+            <p className="text-slate-400 text-sm leading-relaxed mb-4">
+              Streams data iteratively in cursor batches. RAM consumption remains constant regardless of total dataset size.
+            </p>
+            <div className="text-xs font-mono text-blue-400 font-semibold">
+              MEM FOOTPRINT: CONSTANT ~45MB
+            </div>
+          </div>
+
+          {/* Feature 3 */}
+          <div className="p-7 rounded-sm bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors">
+            <h3 className="text-lg font-bold text-slate-100 mb-2">Supported Connectors</h3>
+            <p className="text-slate-400 text-sm leading-relaxed mb-4">
+              Native high-speed drivers for PostgreSQL, MySQL, MongoDB, and bulk CSV/Excel files.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <span className="px-2 py-1 rounded-sm bg-slate-800 text-slate-300 text-xs font-mono">PostgreSQL</span>
+              <span className="px-2 py-1 rounded-sm bg-slate-800 text-slate-300 text-xs font-mono">MySQL</span>
+              <span className="px-2 py-1 rounded-sm bg-slate-800 text-slate-300 text-xs font-mono">MongoDB</span>
+              <span className="px-2 py-1 rounded-sm bg-slate-800 text-slate-300 text-xs font-mono">CSV</span>
+            </div>
+          </div>
+
+          {/* Feature 4 */}
+          <div className="p-7 rounded-sm bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors">
+            <h3 className="text-lg font-bold text-slate-100 mb-2">Real-Time Job Telemetry</h3>
+            <p className="text-slate-400 text-sm leading-relaxed">
+              Monitor active migration throughput, row transfer counts, progress percentages, and error logs live.
+            </p>
+          </div>
+
+          {/* Feature 5 */}
+          <div className="p-7 rounded-sm bg-slate-900 border border-slate-800 hover:border-slate-700 transition-colors">
+            <h3 className="text-lg font-bold text-slate-100 mb-2">Token Rotation & Auth</h3>
+            <p className="text-slate-400 text-sm leading-relaxed">
+              Secure HTTP-only cookie authentication with automated 401 token refresh queueing.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}

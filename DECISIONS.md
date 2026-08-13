@@ -193,4 +193,17 @@ Established the complete frontend architecture in `apps/web` (Next.js App Router
 ### 3. Trade-offs & Future Considerations
 - Eliminates manual token decoding or localStorage management on the client side.
 
+---
+
+## [2026-08-13] - Component-Based 3D Interactive Landing Page Implementation
+
+### 1. Decision Summary
+Built a component-based interactive Landing Page for `apps/web` featuring a full-screen dynamic Spline 3D Hero background (`https://prod.spline.design/E6eFCzHp4BkxYnO7/scene.splinecode`), followed by structured feature sections detailing AI schema intelligence, streaming ETL capabilities, Bento Grid showcase, 4-step workflow, and glassmorphic CTAs.
+
+### 2. Why This Approach? (Rationale)
+- **Dynamic 3D Spline Canvas (`SplineHeroBackground.tsx`)**: Loaded via `next/dynamic` with `{ ssr: false }` to prevent SSR hydration mismatches while offering visual wow factor. Includes a fallback glowing loader.
+- **Component-Based Architecture**: Modularized into single-responsibility components (`Navbar`, `Hero`, `PlatformOverview`, `FeaturesGrid`, `WorkflowSteps`, `CTASection`, `Footer`) in `components/landing/`.
+- **Rich Aesthetic Design**: Applied glassmorphism backdrop blurs, dark slate gradients (`#030712`), and responsive breakpoints.
+
+
 
