@@ -169,3 +169,28 @@ Implemented server-side Google OAuth 2.0 (`POST /auth/google`, `GET /auth/google
 
 ### 4. Trade-offs & Future Considerations
 - Requires configuring `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env` for production Google OAuth consent screens.
+
+---
+
+## [2026-08-13] - Next.js Frontend State Management Architecture & HTTP-Only Cookie Axios Interceptor Setup
+
+### 1. Decision Summary
+Established the complete frontend architecture in `apps/web` (Next.js App Router). Configured Axios ([`services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts)) using HTTP-only cookies (`withCredentials: true`), dynamic organization header insertion via `js-cookie` (`X-Organization-Id`), automatic token refresh on `401` status via `/auth/refresh`, user notification toasts via `react-hot-toast`, TanStack Query v5 for remote global server state, and Redux Toolkit for local client state.
+
+### 2. Why This Approach? (Rationale)
+- **HTTP-Only Cookies Security**:
+  - Access and refresh tokens are managed natively via secure HTTP-only cookies, eliminating XSS vulnerabilities associated with storing tokens in `localStorage`.
+- **Axios Token Refresh Interceptor (`services/axios.ts`)**:
+  - Configured with `withCredentials: true`.
+  - Automatically attaches `X-Organization-Id` header if `active_org_id` cookie is present.
+  - Intercepts `401 Unauthorized` responses and pauses execution using `isRefreshing` lock and `failedQueue`.
+  - Sends `await apiClient.post('/auth/refresh')` to seamlessly renew cookies and retry pending requests.
+  - Displays user-friendly error toasts (`react-hot-toast`) on session expiration ("Session expired. Please log in again."), network failures, or 500 server errors, redirecting to `/login` when unauthenticated.
+- **TanStack Query & Redux Division of Labor**:
+  - **TanStack Query**: Handles remote auth query/mutation hooks ([`useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts), [`useAuthMutations.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts)).
+  - **Redux Toolkit**: Maintains in-memory user session & local UI state ([`authSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/authSlice.ts), [`uiSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/uiSlice.ts)).
+
+### 3. Trade-offs & Future Considerations
+- Eliminates manual token decoding or localStorage management on the client side.
+
+

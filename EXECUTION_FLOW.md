@@ -66,3 +66,41 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REDIRECT_URI`, `FRONTEND_URL`.
 - **[MODIFIED]**: [`apps/web/app/layout.tsx`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/web/app/layout.tsx) - Imported `./globals.css` and added dark root styling.
 - **[MODIFIED]**: [`apps/web/tailwind.config.js`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/web/tailwind.config.js) & [`apps/web/app/globals.css`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/web/app/globals.css) - Customized glassmorphism, brand glows, and theme colors.
+
+---
+
+---
+
+# Execution Flow - Frontend Authentication & HTTP-Only Cookie Client (`apps/web`)
+
+## 1. Entry Point & Provider Lifecycle
+- **File**: [`apps/web/app/layout.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/layout.tsx#L12)
+- **Wrapper**: Wraps entire App Router with [`StoreProvider`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/providers/StoreProvider.tsx#L12).
+- **Initialization**: Creates singleton instances of Redux Store (`makeStore()`), TanStack Query Client (`QueryClient`), `<Toaster>` (`react-hot-toast`), and React Query DevTools in development.
+
+## 2. API Call & Automatic Token Refresh Flow
+1. **Component Trigger**: Component invokes auth query/mutation hook (e.g. `useAuthUser()` in [`useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts#L6)).
+2. **Service Delegation**: Query function calls `authService.getMe()` in [`authService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/authService.ts#L29).
+3. **Axios Request Interceptor**: [`services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts#L13) checks `Cookies.get('active_org_id')` and attaches header `X-Organization-Id` if set.
+4. **Response / 401 Handling**:
+   - If HTTP request succeeds: Returns JSON response data directly.
+   - If HTTP request fails with 401:
+     - Interceptor checks if request URL is `/auth/refresh` or `/auth/login` (rejects immediately to avoid infinite loops).
+     - Queues concurrent requests using `failedQueue` and lock `isRefreshing = true`.
+     - Issues POST to `/auth/refresh` using HTTP-only cookie credentials (`withCredentials: true`).
+     - On successful renewal: Clears queue (`processQueue(null)`) and retries original request `apiClient(originalRequest)`.
+     - On refresh failure: Displays toast `Session expired. Please log in again.` via `react-hot-toast` and redirects window to `/login`.
+   - On 500 or Network errors: Automatically displays error toast `Network error...` or `A server error occurred...`.
+
+## 3. Impact & Delta Analysis (Frontend Infrastructure)
+- **[NEW]**: [`apps/web/.env.local`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/.env.local) - Environment configuration (`NEXT_PUBLIC_API_URL`).
+- **[NEW]**: [`apps/web/services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts) - Axios HTTP client with HTTP-only cookie credentials, `X-Organization-Id` header, 401 token refresh queue, and toast error notifications.
+- **[NEW]**: [`apps/web/services/authService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/authService.ts) - Auth service methods using `apiClient`.
+- **[NEW]**: [`apps/web/store/index.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/index.ts) - Redux Toolkit store & custom typed hooks.
+- **[NEW]**: [`apps/web/store/slices/authSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/authSlice.ts) - Redux auth slice.
+- **[NEW]**: [`apps/web/store/slices/uiSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/uiSlice.ts) - Redux local UI slice.
+- **[NEW]**: [`apps/web/hooks/queries/useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts) - TanStack Query read hook for user profile.
+- **[NEW]**: [`apps/web/hooks/mutations/useAuthMutations.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts) - TanStack Query mutation hooks (`useLogin`, `useLogout`).
+- **[NEW]**: [`apps/web/providers/StoreProvider.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/providers/StoreProvider.tsx) - Client context provider wrapping RTK + TanStack Query + Toaster + DevTools.
+
+
