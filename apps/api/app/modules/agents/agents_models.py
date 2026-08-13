@@ -12,7 +12,8 @@ from app.core.db import Base
 
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
-    from app.modules.sources.sources_models import Connection
+    from app.modules.sources.sources_models import DataSource
+    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
     from app.modules.execution.execution_models import MigrationJob
 
 
@@ -53,8 +54,11 @@ class Agent(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="agents")
-    connections: Mapped[List["Connection"]] = relationship(
-        "Connection", back_populates="agent"
+    data_sources: Mapped[List["DataSource"]] = relationship(
+        "DataSource", back_populates="agent", cascade="all, delete-orphan"
+    )
+    migration_plans: Mapped[List["MigrationPlan"]] = relationship(
+        "MigrationPlan", back_populates="agent"
     )
     migration_jobs: Mapped[List["MigrationJob"]] = relationship(
         "MigrationJob", back_populates="agent"
