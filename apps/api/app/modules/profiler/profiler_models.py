@@ -23,7 +23,8 @@ from app.core.db import Base
 JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 
 if TYPE_CHECKING:
-    from app.modules.sources.sources_models import Connection
+    from app.modules.sources.sources_models import DataSource
+    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
 
 
 class MetadataSnapshot(Base):
@@ -32,9 +33,9 @@ class MetadataSnapshot(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    connection_id: Mapped[uuid.UUID] = mapped_column(
+    data_source_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("connections.id", ondelete="CASCADE"),
+        ForeignKey("data_sources.id", ondelete="CASCADE"),
         index=True,
         nullable=False,
     )
@@ -50,14 +51,28 @@ class MetadataSnapshot(Base):
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
 
     # Relationships
-    connection: Mapped["Connection"] = relationship("Connection", back_populates="snapshots")
+    data_source: Mapped["DataSource"] = relationship("DataSource", back_populates="snapshots")
     schemas: Mapped[List["MetadataSchema"]] = relationship(
         "MetadataSchema", back_populates="snapshot", cascade="all, delete-orphan"
     )
     relationships: Mapped[List["MetadataRelationship"]] = relationship(
         "MetadataRelationship", back_populates="snapshot", cascade="all, delete-orphan"
+    )
+    migration_plans: Mapped[List["MigrationPlan"]] = relationship(
+        "MigrationPlan", secondary="migration_plan_snapshots", back_populates="snapshots"
     )
 
 

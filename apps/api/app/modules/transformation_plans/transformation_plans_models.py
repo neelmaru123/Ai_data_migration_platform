@@ -4,7 +4,7 @@ Transformation Plans Domain Database Models
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
 from sqlalchemy import DateTime, Float, ForeignKey, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -14,8 +14,26 @@ JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
-    from app.modules.sources.sources_models import Connection
+    from app.modules.agents.agents_models import Agent
+    from app.modules.profiler.profiler_models import MetadataSnapshot
     from app.modules.execution.execution_models import MigrationJob
+
+
+class MigrationPlanSnapshot(Base):
+    """Join table linking MigrationPlan to MetadataSnapshot (N:M relationship)."""
+    __tablename__ = "migration_plan_snapshots"
+
+    migration_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_plans.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    metadata_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("metadata_snapshots.id", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
 
 
 class MigrationPlan(Base):
@@ -30,18 +48,17 @@ class MigrationPlan(Base):
         index=True,
         nullable=False,
     )
-    target_connection_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+    agent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("connections.id", ondelete="SET NULL"),
+        ForeignKey("agents.id", ondelete="SET NULL"),
         index=True,
         nullable=True,
     )
-    source_connection_ids: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
-    source_snapshot_ids: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
-    plan: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
-    ai_model: Mapped[str] = mapped_column(String(100), nullable=False)
-    prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="draft", nullable=False)
+    plan_data: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
+    target_config: Mapped[Optional[Any]] = mapped_column(JSON_TYPE, nullable=True)
+    ai_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     confidence_score: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -57,8 +74,9 @@ class MigrationPlan(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="migration_plans")
-    target_connection: Mapped[Optional["Connection"]] = relationship(
-        "Connection", back_populates="target_migration_plans"
+    agent: Mapped[Optional["Agent"]] = relationship("Agent", back_populates="migration_plans")
+    snapshots: Mapped[List["MetadataSnapshot"]] = relationship(
+        "MetadataSnapshot", secondary="migration_plan_snapshots", back_populates="migration_plans"
     )
     jobs: Mapped[List["MigrationJob"]] = relationship(
         "MigrationJob", back_populates="plan", cascade="all, delete-orphan"
