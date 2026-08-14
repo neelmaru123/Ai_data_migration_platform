@@ -1,0 +1,71 @@
+import apiClient from './axios';
+import {
+  AgentCreatePayload,
+  AgentDetailResponse,
+  AgentDockerCommandResponse,
+} from '../types/agent';
+
+export const agentService = {
+  /**
+   * Register a new agent and its data source identities
+   * Returns AgentDetailResponse including ready-to-run docker commands
+   */
+  async createAgent(payload: AgentCreatePayload): Promise<AgentDetailResponse> {
+    const response = await apiClient.post<AgentDetailResponse>('/agents', payload);
+    return response.data;
+  },
+
+  /**
+   * Fetch agent details by ID with linked data sources
+   */
+  async getAgent(agentId: string): Promise<AgentDetailResponse> {
+    const response = await apiClient.get<AgentDetailResponse>(`/agents/${agentId}`);
+    return response.data;
+  },
+
+  /**
+   * Fetch list of user's registered agents
+   */
+  async listAgents(): Promise<AgentDetailResponse[]> {
+    const response = await apiClient.get<AgentDetailResponse[]>('/agents');
+    return response.data;
+  },
+
+  /**
+   * Generate/Retrieve Docker Run Commands and .env template for an existing agent from backend API
+   */
+  async getAgentDockerCommand(agentId: string): Promise<AgentDockerCommandResponse> {
+    const response = await apiClient.get<AgentDockerCommandResponse>(`/agents/${agentId}/docker-command`);
+    return response.data;
+  },
+
+  /**
+   * Initialize WebSocket subscription for live Agent heartbeats
+   */
+  connectAgentWebSocket(
+    agentId: string,
+    jwtToken: string,
+    onMessage: (data: any) => void,
+    onError?: (err: Event) => void
+  ): WebSocket {
+    const wsBaseUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api/v1';
+    const ws = new WebSocket(`${wsBaseUrl}/agents/ws/${agentId}?token=${jwtToken}`);
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        onMessage(data);
+      } catch {
+        // Ignored raw strings
+      }
+    };
+
+    if (onError) {
+      ws.onerror = onError;
+    }
+
+    return ws;
+  },
+};
+
+export default agentService;

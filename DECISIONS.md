@@ -172,6 +172,59 @@ Implemented server-side Google OAuth 2.0 (`POST /auth/google`, `GET /auth/google
 
 ---
 
+## [2026-08-13] - Next.js Frontend State Management Architecture & HTTP-Only Cookie Axios Interceptor Setup
+
+### 1. Decision Summary
+Established the complete frontend architecture in `apps/web` (Next.js App Router). Configured Axios ([`services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts)) using HTTP-only cookies (`withCredentials: true`), dynamic organization header insertion via `js-cookie` (`X-Organization-Id`), automatic token refresh on `401` status via `/auth/refresh`, user notification toasts via `react-hot-toast`, TanStack Query v5 for remote global server state, and Redux Toolkit for local client state.
+
+### 2. Why This Approach? (Rationale)
+- **HTTP-Only Cookies Security**:
+  - Access and refresh tokens are managed natively via secure HTTP-only cookies, eliminating XSS vulnerabilities associated with storing tokens in `localStorage`.
+- **Axios Token Refresh Interceptor (`services/axios.ts`)**:
+  - Configured with `withCredentials: true`.
+  - Automatically attaches `X-Organization-Id` header if `active_org_id` cookie is present.
+  - Intercepts `401 Unauthorized` responses and pauses execution using `isRefreshing` lock and `failedQueue`.
+  - Sends `await apiClient.post('/auth/refresh')` to seamlessly renew cookies and retry pending requests.
+  - Displays user-friendly error toasts (`react-hot-toast`) on session expiration ("Session expired. Please log in again."), network failures, or 500 server errors, redirecting to `/login` when unauthenticated.
+- **TanStack Query & Redux Division of Labor**:
+  - **TanStack Query**: Handles remote auth query/mutation hooks ([`useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts), [`useAuthMutations.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts)).
+  - **Redux Toolkit**: Maintains in-memory user session & local UI state ([`authSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/authSlice.ts), [`uiSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/uiSlice.ts)).
+
+### 3. Trade-offs & Future Considerations
+- Eliminates manual token decoding or localStorage management on the client side.
+
+---
+
+## [2026-08-13] - Component-Based 3D Interactive Landing Page Implementation
+
+### 1. Decision Summary
+Built a component-based interactive Landing Page for `apps/web` featuring a full-screen dynamic Spline 3D Hero background (`https://prod.spline.design/E6eFCzHp4BkxYnO7/scene.splinecode`), followed by structured feature sections detailing AI schema intelligence, streaming ETL capabilities, Bento Grid showcase, 4-step workflow, and glassmorphic CTAs.
+
+### 2. Why This Approach? (Rationale)
+- **Dynamic 3D Spline Canvas (`SplineHeroBackground.tsx`)**: Loaded via `next/dynamic` with `{ ssr: false }` to prevent SSR hydration mismatches while offering visual wow factor. Includes a fallback glowing loader.
+- **Component-Based Architecture**: Modularized into single-responsibility components (`Navbar`, `Hero`, `PlatformOverview`, `FeaturesGrid`, `WorkflowSteps`, `Footer`) in `components/landing/`.
+
+---
+
+## [2026-08-13] - 2-Column Split Authentication Pages (`/register` & `/login`) with React Hook Form
+
+### 1. Decision Summary
+Built the **Registration** (`/register`) and **Login** (`/login`) pages using a 2-column split layout (`AuthLayout.tsx`). The left column renders the 3D Spline scene component, while the right column hosts the reactive form rendered with `react-hook-form`, front-end validation (name, email regex, password 8–12 chars), Google authentication button, and integration with `useRegister()` and `useLogin()` hooks.
+
+### 2. Why This Approach? (Rationale)
+- **2-Column Split (`AuthLayout.tsx`)**: Offers visual consistency across `/register` and `/login` while maintaining full focus on the input form on the right pane.
+- **`react-hook-form` Validation**:
+  - `name`: Required, min 2 characters.
+  - `email`: Required, validated via `/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i` regex.
+  - `password`: Required, strictly enforced between 8 and 12 characters (`minLength: 8, maxLength: 12`).
+- **Humanized Angular Design**: Styled with Plus Jakarta Sans typography, solid dark slate containers (`bg-slate-950`), and sharp borders (`rounded-sm`).
+
+
+
+
+
+---
+
 ## [2026-08-13] - Agent-Centric Database Architecture & Credential Elimination
 
 ### 1. Decision Summary
@@ -227,6 +280,22 @@ Implemented `AgentCommandGenerator` service and API response enhancements (`POST
 
 ### 4. Trade-offs & Future Considerations
 - Returned commands contain placeholder strings (`<...>`) which require the user to fill in their real passwords locally before executing the Docker run command.
+
+---
+
+## [2026-08-14] - Multi-Step Agent Creation Page (1:1, 2:1, 3:1, Custom N:1) & Docker Command UI
+
+### 1. Decision Summary
+Implemented a 3-step Agent Creation wizard in `apps/web/app/agents/create/page.tsx` that guides users through migration ratio selection (`1:1`, `2:1`, `3:1`, `Custom N:1`), database engine setup (strictly restricted to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`), agent registration, Docker CLI command rendering, and real-time agent connectivity monitoring over WebSocket.
+
+### 2. Why This Approach? (Rationale)
+- **Step 1: Ratio Selection (`TopologySelector.tsx`)**: Offers visual interactive cards for `1:1`, `2:1`, `3:1`, and `Custom N:1` topologies with glowing borders and dynamic source count state.
+- **Step 2: Database & Engine Selection (`DatabaseConfigForm.tsx`)**: Enforces input/output database engine types strictly to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`. Generates input forms for N source databases + 1 destination database.
+- **Step 3: Docker Deployment CLI & Live Monitoring (`DockerCommandOutput.tsx`)**:
+  - Displays generated `docker run` command and `docker-compose.yml` snippet with one-click copy button.
+  - Subscribes via WebSocket to `/api/v1/agents/ws/{agent_id}` (with polling fallback) to dynamically update agent status badge from `WAITING FOR AGENT PING` to `ONLINE` as soon as the user runs the container.
+- **Service Integration & Teammate API Resilience (`agentService.ts`)**: Integrates with `POST /api/v1/agents` for registration and `POST /api/v1/agents/{agent_id}/docker-cmd` for Docker command generation, with client-side fallback formatting in case the backend teammate's endpoint is still in deployment.
+
 
 ---
 

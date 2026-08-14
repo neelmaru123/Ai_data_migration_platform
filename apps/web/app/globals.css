@@ -1,1 +1,52 @@
-/* Structure placeholder */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* iOS / Apple SF Pro font stack with Inter as cross-platform fallback */
+    --font-sans: var(--font-inter), -apple-system, BlinkMacSystemFont,
+      'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', 'Helvetica',
+      'Arial', sans-serif;
+
+    /* SF Mono for code / monospace elements */
+    --font-mono: 'SF Mono', 'Menlo', 'Monaco', 'Cascadia Mono',
+      'Consolas', 'Courier New', monospace;
+
+    /* Theme Tokens - Sky Blue Default */
+    --accent-primary: #38bdf8;        /* sky-400 */
+    --accent-primary-hover: #0ea5e9;  /* sky-500 */
+    --accent-light: #7dd3fc;          /* sky-300 */
+    --accent-dark: #0369a1;           /* sky-700 */
+
+    /* Glassmorphism Tokens */
+    --glass-border: rgba(56, 189, 248, 0.25);
+    --glass-border-hover: rgba(56, 189, 248, 0.5);
+    --glass-bg-from: rgba(56, 189, 248, 0.08);
+    --glass-bg-via: rgba(56, 189, 248, 0.03);
+    --glass-bg-to: rgba(56, 189, 248, 0.01);
+
+    /* Button Tokens */
+    --btn-primary-bg: #38bdf8;
+    --btn-primary-text: #000000;
+    --btn-primary-hover: #7dd3fc;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    background-color: #000000;
+    color: #f8fafc;
+    font-family: var(--font-sans);
+    letter-spacing: -0.01em;
+  }
+
+  /* Apply SF Mono to all monospace elements */
+  code, pre, kbd, samp, .font-mono {
+    font-family: var(--font-mono);
+  }
+}

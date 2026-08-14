@@ -22,10 +22,12 @@ from app.modules.agents.agents_schemas import (
     AgentDetailResponse,
     AgentDockerCommandResponse,
     AgentHeartbeat,
+    AgentResponse,
     AgentUpdate,
 )
 from app.modules.execution.execution_models import MigrationJob
 from app.modules.sources.sources_models import DataSource
+from app.modules.sources.sources_schemas import DataSourceResponse
 
 
 class AgentService:
@@ -86,15 +88,13 @@ class AgentService:
 
         await session.commit()
 
-        # 5. Return AgentDetailResponse Pydantic schema with raw api_token and generated Docker commands attached
+        # 5. Fetch newly created agent entity with data_sources eagerly loaded
         fetched_agent = await AgentService.get_agent_by_id(session, agent.id)
         if fetched_agent is None:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to retrieve newly created agent entity.",
             )
-        response = AgentDetailResponse.model_validate(fetched_agent)
-        response.api_token = raw_token
 
         # 6. Generate Docker commands configured with token and DB credential placeholders
         cmd_payload = AgentCommandGenerator.generate_command_payload(
@@ -102,12 +102,22 @@ class AgentService:
             data_sources=fetched_agent.data_sources,
             raw_token=raw_token,
         )
-        response.docker_command = cmd_payload["docker_command"]
-        response.docker_command_powershell = cmd_payload["docker_command_powershell"]
-        response.docker_command_oneline = cmd_payload["docker_command_oneline"]
-        response.env_template = cmd_payload["env_template"]
 
-        return response
+        # 7. Construct AgentDetailResponse with all dynamic docker commands & raw api_token included
+        base_dict = AgentResponse.model_validate(fetched_agent).model_dump()
+        response_dict = {
+            **base_dict,
+            "data_sources": [
+                DataSourceResponse.model_validate(ds) for ds in (fetched_agent.data_sources or [])
+            ],
+            "api_token": raw_token,
+            "docker_command": cmd_payload["docker_command"],
+            "docker_command_powershell": cmd_payload["docker_command_powershell"],
+            "docker_command_oneline": cmd_payload["docker_command_oneline"],
+            "env_template": cmd_payload["env_template"],
+        }
+
+        return AgentDetailResponse(**response_dict)
 
     @staticmethod
     async def get_agent_by_id(
@@ -376,7 +386,6 @@ class AgentService:
         cmd_payload = AgentCommandGenerator.generate_command_payload(
             agent=agent,
             data_sources=agent.data_sources,
-            raw_token=None,
         )
         return AgentDockerCommandResponse(
             agent_id=agent.id,
@@ -385,5 +394,4 @@ class AgentService:
             docker_command_powershell=cmd_payload["docker_command_powershell"],
             docker_command_oneline=cmd_payload["docker_command_oneline"],
             env_template=cmd_payload["env_template"],
-            environment_variables=cmd_payload["environment_variables"],
         )

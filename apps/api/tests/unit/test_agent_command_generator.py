@@ -5,9 +5,12 @@ Tests command generation for multi-source DB merge, database dialects, collision
 
 import uuid
 import pytest
+import app.main
 from app.modules.agents.agents_command_generator import AgentCommandGenerator
 from app.modules.agents.agents_models import Agent
 from app.modules.sources.sources_models import DataSource
+
+
 
 
 def test_command_generator_multi_source_merge():

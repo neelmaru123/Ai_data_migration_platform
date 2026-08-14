@@ -148,3 +148,65 @@ This document maps entry points, call stack sequences, and module dependencies a
 
 
 
+
+---
+
+---
+
+# Execution Flow - Frontend Authentication & HTTP-Only Cookie Client (`apps/web`)
+
+## 1. Entry Point & Provider Lifecycle
+- **File**: [`apps/web/app/layout.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/layout.tsx#L12)
+- **Wrapper**: Wraps entire App Router with [`StoreProvider`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/providers/StoreProvider.tsx#L12).
+- **Initialization**: Creates singleton instances of Redux Store (`makeStore()`), TanStack Query Client (`QueryClient`), `<Toaster>` (`react-hot-toast`), and React Query DevTools in development.
+
+## 2. API Call & Automatic Token Refresh Flow
+1. **Component Trigger**: Component invokes auth query/mutation hook (e.g. `useAuthUser()` in [`useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts#L6)).
+2. **Service Delegation**: Query function calls `authService.getMe()` in [`authService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/authService.ts#L29).
+3. **Axios Request Interceptor**: [`services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts#L13) checks `Cookies.get('active_org_id')` and attaches header `X-Organization-Id` if set.
+4. **Response / 401 Handling**:
+   - If HTTP request succeeds: Returns JSON response data directly.
+   - If HTTP request fails with 401:
+     - Interceptor checks if request URL is `/auth/refresh` or `/auth/login` (rejects immediately to avoid infinite loops).
+     - Queues concurrent requests using `failedQueue` and lock `isRefreshing = true`.
+     - Issues POST to `/auth/refresh` using HTTP-only cookie credentials (`withCredentials: true`).
+     - On successful renewal: Clears queue (`processQueue(null)`) and retries original request `apiClient(originalRequest)`.
+     - On refresh failure: Displays toast `Session expired. Please log in again.` via `react-hot-toast` and redirects window to `/login`.
+   - On 500 or Network errors: Automatically displays error toast `Network error...` or `A server error occurred...`.
+
+## 3. Impact & Delta Analysis (Frontend Infrastructure)
+- **[NEW]**: [`apps/web/.env.local`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/.env.local) - Environment configuration (`NEXT_PUBLIC_API_URL`).
+- **[NEW]**: [`apps/web/services/axios.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/axios.ts) - Axios HTTP client with HTTP-only cookie credentials, `X-Organization-Id` header, 401 token refresh queue, and toast error notifications.
+- **[NEW]**: [`apps/web/services/authService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/authService.ts) - Auth service methods using `apiClient`.
+- **[NEW]**: [`apps/web/store/index.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/index.ts) - Redux Toolkit store & custom typed hooks.
+- **[NEW]**: [`apps/web/store/slices/authSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/authSlice.ts) - Redux auth slice.
+- **[NEW]**: [`apps/web/store/slices/uiSlice.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/store/slices/uiSlice.ts) - Redux local UI slice.
+- **[NEW]**: [`apps/web/hooks/queries/useAuthUser.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/queries/useAuthUser.ts) - TanStack Query read hook for user profile.
+- **[NEW]**: [`apps/web/hooks/mutations/useAuthMutations.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts) - TanStack Query mutation hooks (`useLogin`, `useLogout`).
+- **[NEW]**: [`apps/web/providers/StoreProvider.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/providers/StoreProvider.tsx) - Client context provider wrapping RTK + TanStack Query + Toaster + DevTools.
+
+---
+
+# Execution Flow - Agent Creation Wizard (`apps/web/app/agents/create`)
+
+## 1. Entry Point
+- **File**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx#L12)
+- **Trigger**: User navigates to `/agents/create` in browser.
+
+## 2. Step-by-Step Execution Sequence
+1. **Topology Selection (Step 1)**: User picks a migration ratio card in [`TopologySelector.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/TopologySelector.tsx) (`1:1`, `2:1`, `3:1`, or `Custom N:1`). Clicking "Configure Databases" computes source count and moves state to Step 2.
+2. **Database Engine & Agent Configuration (Step 2)**: Form in [`DatabaseConfigForm.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) captures agent metadata and database engine choices (restricted strictly to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`).
+3. **API Submission**: Form submit triggers `handleFormSubmit()`, invoking `agentService.createAgent()` in [`agentService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/agentService.ts) which calls `POST /api/v1/agents`.
+4. **Docker Command Generation**: Calls `agentService.generateDockerCommand()`, fetching custom `docker run` / `docker-compose.yml` snippets from `POST /api/v1/agents/{id}/docker-cmd` (or using client-side fallback).
+5. **CLI Display & Live Status Monitoring (Step 3)**: [`DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) presents the command with copy-to-clipboard button and subscribes to WebSocket (`ws://.../api/v1/agents/ws/{id}`) to listen for live heartbeat status transition (`offline` -> `online`).
+
+## 3. Impact & Delta Analysis (Agent Creation UI)
+- **[NEW]**: [`apps/web/types/agent.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/types/agent.ts) - DTOs for agent creation, database sources, topologies, and docker command payloads.
+- **[NEW]**: [`apps/web/services/agentService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/agentService.ts) - API service with Docker command generation and WebSocket heartbeat listener.
+- **[NEW]**: [`apps/web/components/agents/TopologySelector.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/TopologySelector.tsx) - Interactive migration ratio card selector (`1:1`, `2:1`, `3:1`, `Custom N:1`).
+- **[NEW]**: [`apps/web/components/agents/DatabaseConfigForm.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) - Dynamic source and destination database form with engine selection (`postgresql`, `mysql`, `mongodb`, `csv`, `excel`).
+- **[NEW]**: [`apps/web/components/agents/DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) - Terminal command output with tabs, copy-to-clipboard, and live agent status badge.
+- **[NEW]**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx) - Main wizard layout page at `/agents/create`.
+
+
+
