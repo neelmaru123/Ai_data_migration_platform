@@ -4,12 +4,20 @@ FastAPI Application Entry Point
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.core.config import settings
 from app.core.logging import logger
-
 from app.modules.sources.sources_routes import router as sources_router
 from app.modules.users.users_routes import router as users_router
 from app.modules.agents.agents_routes import router as agents_router
+
+# Import all domain models to ensure SQLAlchemy mappers are registered
+import app.modules.users.users_models  # noqa: F401
+import app.modules.agents.agents_models  # noqa: F401
+import app.modules.sources.sources_models  # noqa: F401
+import app.modules.profiler.profiler_models  # noqa: F401
+import app.modules.transformation_plans.transformation_plans_models  # noqa: F401
+import app.modules.execution.execution_models  # noqa: F401
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

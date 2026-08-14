@@ -10,10 +10,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.core.db import Base, get_db
 from app.modules.users.users_models import User
-from app.modules.sources.sources_models import Connection
-from app.modules.profiler.profiler_models import MetadataSnapshot
-from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
-from app.modules.execution.execution_models import MigrationJob
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -62,7 +58,6 @@ async def test_full_auth_and_user_crud_flow():
     6. Delete Account (/users/me) → Check account deletion
     7. Logout (/auth/logout) → Check cookie deletion
     """
-    # Create isolated in-memory SQLite database engine
     test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
 
     async with test_engine.begin() as conn:

@@ -2,9 +2,11 @@
 Agents Domain Database Models
 """
 
+import hashlib
+import secrets
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, ClassVar, List, Optional
 from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,7 +14,8 @@ from app.core.db import Base
 
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
-    from app.modules.sources.sources_models import Connection
+    from app.modules.sources.sources_models import DataSource
+    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
     from app.modules.execution.execution_models import MigrationJob
 
 
@@ -31,6 +34,13 @@ class Agent(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     agent_identifier: Mapped[str] = mapped_column(
         String(255), unique=True, index=True, nullable=False
+    )
+    api_token_hash: Mapped[str] = mapped_column(
+        String(255),
+        unique=True,
+        index=True,
+        nullable=False,
+        default=lambda: hashlib.sha256(secrets.token_urlsafe(32).encode("utf-8")).hexdigest(),
     )
     status: Mapped[str] = mapped_column(
         String(50), default="offline", nullable=False
@@ -53,8 +63,11 @@ class Agent(Base):
 
     # Relationships
     user: Mapped["User"] = relationship("User", back_populates="agents")
-    connections: Mapped[List["Connection"]] = relationship(
-        "Connection", back_populates="agent"
+    data_sources: Mapped[List["DataSource"]] = relationship(
+        "DataSource", back_populates="agent", cascade="all, delete-orphan"
+    )
+    migration_plans: Mapped[List["MigrationPlan"]] = relationship(
+        "MigrationPlan", back_populates="agent"
     )
     migration_jobs: Mapped[List["MigrationJob"]] = relationship(
         "MigrationJob", back_populates="agent"

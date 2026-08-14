@@ -4,6 +4,7 @@ Authentication Middleware and Dependencies
 
 import uuid
 from typing import Optional
+
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordBearer
 from jwt import PyJWTError
