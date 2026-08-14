@@ -261,3 +261,24 @@ Implemented complete Agent CRUD endpoints (`POST /agents`, `GET /agents`, `GET /
 - **Atomic Single-Transaction Setup**: When calling `POST /api/v1/agents`, the payload can include an array of initial `data_sources`. The service creates the Agent record and all attached Data Source records within a single database transaction, ensuring no partial or orphaned state occurs.
 - **Periodic Heartbeat Tracking**: Endpoint `POST /agents/{id}/heartbeat` allows Docker Agents to ping status (`online`, `busy`), update `version`, and update `last_seen_at` timestamp.
 
+---
+
+## [2026-08-14] - Docker Command Generator & Zero-Credential Control Plane Isolation
+
+### 1. Decision Summary
+Implemented `AgentCommandGenerator` service and API response enhancements (`POST /api/v1/agents` and `GET /api/v1/agents/{id}/docker-command`) that automatically construct ready-to-run Docker CLI commands (Bash multi-line, PowerShell, single-line) and `.env` templates parameterized with the generated `AGENT_TOKEN`, `BACKEND_URL`, and credential placeholders for merging multiple source databases into a destination database.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Control-Plane Storage of Sensitive DB Credentials**: Control plane never stores or requires sensitive database passwords/credentials over the network. Instead, the backend generates parameterized Docker commands with credential placeholders (`<SRC_DB_PASSWORD>`, `<DEST_DB_PASSWORD>`, `<DB_NAME>`) that the customer fills directly in their local shell environment before booting the container.
+- **Multi-Platform Support**: Generates cross-platform commands formatted for standard Bash/macOS/Linux (`\`), Windows PowerShell (`` ` ``), single-line execution, and `.env` file ingestion.
+- **Cross-Platform Host Routing**: Injects `--add-host=host.docker.internal:host-gateway` to guarantee seamless connectivity from the container back to host localhost services across Windows, macOS, and Linux Docker engines.
+- **Multi-Source Merge Handling**: Dynamically parses all registered data sources by role (`source`, `target`, `both`) and database type (`postgresql`, `mysql`, `mongodb`, `mssql`, file loaders) generating sanitized environment variable prefixes (`SRC_<IDENTIFIER>_URL`, `DEST_<IDENTIFIER>_URL`) and single-source convenience aliases.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Storing DB Passwords in Backend Database**: Rejected due to enterprise security risks and compliance restrictions regarding plaintext or reversible cloud credential storage.
+- **Alternative B: Pure Client-Side Command Generation**: Rejected because backend owns the API token lifecycle, configuration defaults, and database type dialect URL specifications.
+
+### 4. Trade-offs & Future Considerations
+- Returned commands contain placeholder strings (`<...>`) which require the user to fill in their real passwords locally before executing the Docker run command.
+
+

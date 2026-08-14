@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
     FRONTEND_URL: str = "http://localhost:3000"
+    BACKEND_URL: str = "http://host.docker.internal:8000"
+    AGENT_DOCKER_IMAGE: str = "data-migration-agent:latest"
 
     API_V1_STR: str = "/api/v1"
 

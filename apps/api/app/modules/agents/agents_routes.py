@@ -17,6 +17,7 @@ from app.modules.agents.agents_models import Agent
 from app.modules.agents.agents_schemas import (
     AgentCreate,
     AgentDetailResponse,
+    AgentDockerCommandResponse,
     AgentHeartbeat,
     AgentResponse,
     AgentUpdate,
@@ -41,6 +42,7 @@ async def create_agent(
     Generates a secure API Token and initial 'offline' status.
     Optionally registers initial source and destination database identities concurrently
     in the same atomic database transaction.
+    Returns ready-to-run Docker commands with token and database credential placeholders.
     """
     return await AgentService.create_agent(
         session=session, user_id=current_user.id, data=payload
@@ -58,6 +60,18 @@ async def list_agents(
     )
 
 
+@router.get("/{agent_id}/docker-command", response_model=AgentDockerCommandResponse)
+async def get_agent_docker_command(
+    agent: Agent = Depends(get_verified_agent),
+):
+    """
+    Generate and retrieve ready-to-run Docker commands (Bash, PowerShell, Single-line)
+    and .env configuration template for an existing Docker Agent.
+    Verifies agent ownership.
+    """
+    return AgentService.get_agent_docker_command(agent=agent)
+
+
 @router.get("/{agent_id}", response_model=AgentDetailResponse)
 async def get_agent(
     agent: Agent = Depends(get_verified_agent),
@@ -67,6 +81,8 @@ async def get_agent(
     Verifies agent ownership.
     """
     return agent
+
+
 
 
 @router.put("/{agent_id}", response_model=AgentDetailResponse)

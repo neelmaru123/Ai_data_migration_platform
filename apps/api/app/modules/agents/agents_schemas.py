@@ -63,7 +63,35 @@ class AgentResponse(BaseModel):
 
 
 class AgentDetailResponse(AgentResponse):
-    """Detailed response representation of an Agent with all linked data sources."""
+    """Detailed response representation of an Agent with all linked data sources and ready-to-run Docker commands."""
     data_sources: List[DataSourceResponse] = []
+    docker_command: Optional[str] = Field(
+        None,
+        description="Ready-to-run multi-line Bash / Linux / macOS Docker command with credential placeholders.",
+    )
+    docker_command_powershell: Optional[str] = Field(
+        None,
+        description="Ready-to-run Windows PowerShell Docker command with backtick line continuations.",
+    )
+    docker_command_oneline: Optional[str] = Field(
+        None,
+        description="Single-line Docker run command for easy copy-paste.",
+    )
+    env_template: Optional[str] = Field(
+        None,
+        description="Formatted .env file template containing all agent and database environment variables.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AgentDockerCommandResponse(BaseModel):
+    """Response payload specifically containing Docker commands and environment template for an Agent."""
+    agent_id: UUID
+    agent_identifier: str
+    docker_command: str
+    docker_command_powershell: str
+    docker_command_oneline: str
+    env_template: str
+    environment_variables: dict[str, str] = Field(default_factory=dict)
+

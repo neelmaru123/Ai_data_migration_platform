@@ -44,27 +44,65 @@ This document maps entry points, call stack sequences, and module dependencies a
 2. **Configuration Validation**: Pydantic schemas in `apps/api/app/modules/execution/execution_schemas.py` validate request parameters.
 3. **Execution Policy Branching**:
    - **Mode A (Cloud Async)**: `execution_services.py` enqueues job into Redis (`REDIS_URL`). A background worker process picks up the task, streams data via Polars/DuckDB in `50,000` row chunks, and writes directly to target database.
-   - **Mode B (Local Script Generation)**: `execution_script_generator` packages the verified `TransformationPlan` JSON, dependencies, and standalone runner script into a downloadable `.zip` archive.
-4. **Audit & Log Update**: Progress and status metrics are logged into PostgreSQL `migration_jobs` and `execution_logs` tables.
+   - **Mode B (Local Script Generation)**: `execution_script_generator` packages the verified `TransformationPlan` JSON, dependencies, and standalone runner script into a downloadable `.zip` ```
 
 ---
 
-## 3. Impact & Delta Analysis
+## 3. Agent Creation & Docker Command Generation Flow
 
-- **[NEW]**: [`apps/api/app/modules/sources/sources_dependencies.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_dependencies.py) - Middleware dependencies (`get_verified_agent`, `get_verified_data_source`) enforcing agent/source ownership verification.
-- **[NEW]**: [`apps/api/alembic/versions/004_update_database_architecture_agent_centric.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic/versions/004_update_database_architecture_agent_centric.py) - Reversible migration creating `data_sources` and `migration_plan_snapshots`, removing obsolete `connections` table.
-- **[NEW]**: [`apps/api/tests/unit/test_agent_centric_db_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_centric_db_models.py) - Unit test suite for 13 agent-centric DB models and cascade behavior.
-- **[NEW]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Unit and API integration test suite covering Agent registration, concurrent source/target DB creation, heartbeat, and ownership security.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `InitialDataSourceCreate`, `AgentCreate`, `AgentUpdate`, `AgentHeartbeat`, `AgentResponse`, `AgentDetailResponse`.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Implemented `AgentService` CRUD with atomic single-transaction creation of Agent + initial Source and Target DB identities.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_routes.py) - Implemented `/agents` endpoints (`POST`, `GET`, `GET /{id}`, `PUT /{id}`, `POST /{id}/heartbeat`, `DELETE /{id}`).
-- **[MODIFIED]**: [`apps/api/app/modules/sources/sources_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_models.py) - Replaced `Connection` with `DataSource` model (`id`, `agent_id`, `name`, `type`, `role`, `identifier`).
-- **[MODIFIED]**: [`apps/api/app/modules/sources/sources_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_schemas.py) - Created `DataSourceCreate`, `DataSourceUpdate`, `DataSourceResponse` with Pydantic `Literal` validation for `type` and `role`.
-- **[MODIFIED]**: [`apps/api/app/modules/sources/sources_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_services.py) - Updated `SourceService` for `DataSource` identity CRUD with no-op PATCH protection.
-- **[MODIFIED]**: [`apps/api/app/modules/sources/sources_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/sources/sources_routes.py) - Updated `/data-sources` endpoints with ownership verification middleware.
-- **[MODIFIED]**: [`apps/api/app/modules/transformation_plans/transformation_plans_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/transformation_plans/transformation_plans_models.py) - Added `MigrationPlanSnapshot` join table and nullable `agent_id` with `ondelete="SET NULL"`.
-- **[MODIFIED]**: [`apps/api/app/modules/profiler/profiler_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/profiler/profiler_models.py) - Replaced `connection_id` with `data_source_id` FK and added `created_at`/`updated_at`.
-- **[MODIFIED]**: [`apps/api/tests/integration/test_db_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/integration/test_db_models.py) & [`apps/api/tests/unit/test_users_auth.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_users_auth.py) - Updated tests for `DataSource` identity model.
+```text
+  Web UI (Next.js)
+        │
+        │ HTTP POST /api/v1/agents
+        │ Payload: { name, agent_identifier, data_sources: [ {name, type, role: 'source'|'target', identifier} ] }
+        ▼
+  FastAPI Gateway (apps/api/app/modules/agents/agents_routes.py:create_agent)
+        │
+        │ 1. Validate JWT session via get_current_active_user
+        │ 2. Delegate to AgentService.create_agent
+        ▼
+  Agent Service (apps/api/app/modules/agents/agents_services.py)
+        │
+        │ 1. Verify agent_identifier uniqueness
+        │ 2. Generate raw API token (ag_live_...) & SHA-256 hash
+        │ 3. Atomically persist Agent + attached DataSource entities
+        │ 4. Invoke AgentCommandGenerator.generate_command_payload
+        ▼
+  Command Generator (apps/api/app/modules/agents/agents_command_generator.py)
+        │
+        │ 1. Parse all data_sources by role (source / target) & dialect
+        │ 2. Generate URL templates with masked credential placeholders:
+        │    - SRC_<ID>_URL / DEST_<ID>_URL
+        │ 3. Build multi-platform outputs:
+        │    - Bash command (docker run -d \ ...)
+        │    - PowerShell command (docker run -d ` ...)
+        │    - Single-line command
+        │    - .env template
+        ▼
+  Response Output -> Web UI receives AgentDetailResponse with ready-to-run Docker commands
+        │
+        ▼
+  Customer copies command -> Fills passwords locally -> Runs on local PC
+        │
+        ▼
+  Agent boots in Docker -> Reads local env vars -> Sends heartbeat to Control Plane
+```
+
+---
+
+## 4. Impact & Delta Analysis
+
+- **[NEW]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_command_generator.py) - Dynamic CLI & environment template generator for multi-source and target migration Docker containers.
+- **[NEW]**: [`apps/api/tests/unit/test_agent_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_command_generator.py) - Unit test suite for Docker command generation across database dialects and shell syntaxes.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `BACKEND_URL` and `AGENT_DOCKER_IMAGE` configuration properties.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `docker_command`, `docker_command_powershell`, `docker_command_oneline`, `env_template` to `AgentDetailResponse` and defined `AgentDockerCommandResponse`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Integrated `AgentCommandGenerator` into `create_agent` and added `get_agent_docker_command`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_routes.py) - Documented `POST /agents` and added `GET /agents/{agent_id}/docker-command` endpoint.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added safe startup scanning and logging of configured source/destination database environments.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Added assertions for Docker command response and verified `GET /agents/{id}/docker-command`.
+- **[UNCHANGED]**: Existing authentication, profiling, and transformation database models.
+
+
 
 
 ---
