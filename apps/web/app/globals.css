@@ -1,1 +1,38 @@
-/* Structure placeholder */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-sans: var(--font-jakarta), system-ui, -apple-system, sans-serif;
+
+    /* Theme Tokens - Sky Blue Default */
+    --accent-primary: #38bdf8;        /* sky-400 */
+    --accent-primary-hover: #0ea5e9;  /* sky-500 */
+    --accent-light: #7dd3fc;          /* sky-300 */
+    --accent-dark: #0369a1;           /* sky-700 */
+
+    /* Glassmorphism Tokens */
+    --glass-border: rgba(56, 189, 248, 0.25);
+    --glass-border-hover: rgba(56, 189, 248, 0.5);
+    --glass-bg-from: rgba(56, 189, 248, 0.08);
+    --glass-bg-via: rgba(56, 189, 248, 0.03);
+    --glass-bg-to: rgba(56, 189, 248, 0.01);
+
+    /* Button Tokens */
+    --btn-primary-bg: #38bdf8;
+    --btn-primary-text: #000000;
+    --btn-primary-hover: #7dd3fc;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: #000000;
+    color: #f8fafc;
+    font-family: var(--font-sans);
+    letter-spacing: -0.01em;
+  }
+}

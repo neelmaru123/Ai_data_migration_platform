@@ -7,13 +7,20 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        background: "hsl(var(--background))",
-        foreground: "hsl(var(--foreground))",
-        card: "hsl(var(--card))",
-        primary: {
-          DEFAULT: "#3b82f6",
-          hover: "#2563eb",
+        accent: {
+          DEFAULT: "var(--accent-primary)",
+          hover: "var(--accent-primary-hover)",
+          light: "var(--accent-light)",
+          dark: "var(--accent-dark)",
         },
+        brand: {
+          primary: "#38bdf8",
+          hover: "#0ea5e9",
+        },
+      },
+      borderColor: {
+        glass: "var(--glass-border)",
+        "glass-hover": "var(--glass-border-hover)",
       },
     },
   },
