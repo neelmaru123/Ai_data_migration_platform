@@ -6,6 +6,28 @@ module.exports = {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: [
+          'var(--font-inter)',
+          '-apple-system',
+          'BlinkMacSystemFont',
+          'SF Pro Display',
+          'SF Pro Text',
+          'Helvetica Neue',
+          'Helvetica',
+          'Arial',
+          'sans-serif',
+        ],
+        mono: [
+          'SF Mono',
+          'Menlo',
+          'Monaco',
+          'Cascadia Mono',
+          'Consolas',
+          'Courier New',
+          'monospace',
+        ],
+      },
       colors: {
         accent: {
           DEFAULT: "var(--accent-primary)",

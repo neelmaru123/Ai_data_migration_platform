@@ -281,4 +281,20 @@ Implemented `AgentCommandGenerator` service and API response enhancements (`POST
 ### 4. Trade-offs & Future Considerations
 - Returned commands contain placeholder strings (`<...>`) which require the user to fill in their real passwords locally before executing the Docker run command.
 
+---
+
+## [2026-08-14] - Multi-Step Agent Creation Page (1:1, 2:1, 3:1, Custom N:1) & Docker Command UI
+
+### 1. Decision Summary
+Implemented a 3-step Agent Creation wizard in `apps/web/app/agents/create/page.tsx` that guides users through migration ratio selection (`1:1`, `2:1`, `3:1`, `Custom N:1`), database engine setup (strictly restricted to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`), agent registration, Docker CLI command rendering, and real-time agent connectivity monitoring over WebSocket.
+
+### 2. Why This Approach? (Rationale)
+- **Step 1: Ratio Selection (`TopologySelector.tsx`)**: Offers visual interactive cards for `1:1`, `2:1`, `3:1`, and `Custom N:1` topologies with glowing borders and dynamic source count state.
+- **Step 2: Database & Engine Selection (`DatabaseConfigForm.tsx`)**: Enforces input/output database engine types strictly to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`. Generates input forms for N source databases + 1 destination database.
+- **Step 3: Docker Deployment CLI & Live Monitoring (`DockerCommandOutput.tsx`)**:
+  - Displays generated `docker run` command and `docker-compose.yml` snippet with one-click copy button.
+  - Subscribes via WebSocket to `/api/v1/agents/ws/{agent_id}` (with polling fallback) to dynamically update agent status badge from `WAITING FOR AGENT PING` to `ONLINE` as soon as the user runs the container.
+- **Service Integration & Teammate API Resilience (`agentService.ts`)**: Integrates with `POST /api/v1/agents` for registration and `POST /api/v1/agents/{agent_id}/docker-cmd` for Docker command generation, with client-side fallback formatting in case the backend teammate's endpoint is still in deployment.
+
+
 

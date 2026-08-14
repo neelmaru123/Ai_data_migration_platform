@@ -141,4 +141,28 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[NEW]**: [`apps/web/hooks/mutations/useAuthMutations.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts) - TanStack Query mutation hooks (`useLogin`, `useLogout`).
 - **[NEW]**: [`apps/web/providers/StoreProvider.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/providers/StoreProvider.tsx) - Client context provider wrapping RTK + TanStack Query + Toaster + DevTools.
 
+---
+
+# Execution Flow - Agent Creation Wizard (`apps/web/app/agents/create`)
+
+## 1. Entry Point
+- **File**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx#L12)
+- **Trigger**: User navigates to `/agents/create` in browser.
+
+## 2. Step-by-Step Execution Sequence
+1. **Topology Selection (Step 1)**: User picks a migration ratio card in [`TopologySelector.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/TopologySelector.tsx) (`1:1`, `2:1`, `3:1`, or `Custom N:1`). Clicking "Configure Databases" computes source count and moves state to Step 2.
+2. **Database Engine & Agent Configuration (Step 2)**: Form in [`DatabaseConfigForm.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) captures agent metadata and database engine choices (restricted strictly to `postgresql`, `mysql`, `mongodb`, `csv`, `excel`).
+3. **API Submission**: Form submit triggers `handleFormSubmit()`, invoking `agentService.createAgent()` in [`agentService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/agentService.ts) which calls `POST /api/v1/agents`.
+4. **Docker Command Generation**: Calls `agentService.generateDockerCommand()`, fetching custom `docker run` / `docker-compose.yml` snippets from `POST /api/v1/agents/{id}/docker-cmd` (or using client-side fallback).
+5. **CLI Display & Live Status Monitoring (Step 3)**: [`DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) presents the command with copy-to-clipboard button and subscribes to WebSocket (`ws://.../api/v1/agents/ws/{id}`) to listen for live heartbeat status transition (`offline` -> `online`).
+
+## 3. Impact & Delta Analysis (Agent Creation UI)
+- **[NEW]**: [`apps/web/types/agent.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/types/agent.ts) - DTOs for agent creation, database sources, topologies, and docker command payloads.
+- **[NEW]**: [`apps/web/services/agentService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/agentService.ts) - API service with Docker command generation and WebSocket heartbeat listener.
+- **[NEW]**: [`apps/web/components/agents/TopologySelector.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/TopologySelector.tsx) - Interactive migration ratio card selector (`1:1`, `2:1`, `3:1`, `Custom N:1`).
+- **[NEW]**: [`apps/web/components/agents/DatabaseConfigForm.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) - Dynamic source and destination database form with engine selection (`postgresql`, `mysql`, `mongodb`, `csv`, `excel`).
+- **[NEW]**: [`apps/web/components/agents/DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) - Terminal command output with tabs, copy-to-clipboard, and live agent status badge.
+- **[NEW]**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx) - Main wizard layout page at `/agents/create`.
+
+
 
