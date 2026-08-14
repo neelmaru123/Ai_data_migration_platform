@@ -21,12 +21,16 @@ export function useRegister() {
   const queryClient = useQueryClient();
   const dispatch = useAppDispatch();
 
-  return useMutation<TokenResponse, Error, UserRegisterPayload>({
+  return useMutation<TokenResponse, any, UserRegisterPayload>({
     mutationFn: (payload) => authService.register(payload),
     onSuccess: (data) => {
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Account created successfully!');
+    },
+    onError: (error) => {
+      const message = error?.response?.data?.detail || error?.message || 'Registration failed';
+      toast.error(message);
     },
   });
 }
@@ -38,12 +42,16 @@ export function useLogin() {
   const queryClient = useQueryClient();
   const dispatch = useAppDispatch();
 
-  return useMutation<TokenResponse, Error, UserLoginPayload>({
+  return useMutation<TokenResponse, any, UserLoginPayload>({
     mutationFn: (payload) => authService.login(payload),
     onSuccess: (data) => {
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Login successful!');
+    },
+    onError: (error) => {
+      const message = error?.response?.data?.detail || error?.message || 'Login failed';
+      toast.error(message);
     },
   });
 }
@@ -55,12 +63,16 @@ export function useGoogleAuth() {
   const queryClient = useQueryClient();
   const dispatch = useAppDispatch();
 
-  return useMutation<TokenResponse, Error, GoogleAuthRequestPayload>({
+  return useMutation<TokenResponse, any, GoogleAuthRequestPayload>({
     mutationFn: (payload) => authService.googleAuth(payload),
     onSuccess: (data) => {
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Google authentication successful!');
+    },
+    onError: (error) => {
+      const message = error?.response?.data?.detail || error?.message || 'Google authentication failed';
+      toast.error(message);
     },
   });
 }
@@ -72,12 +84,16 @@ export function useLogout() {
   const queryClient = useQueryClient();
   const dispatch = useAppDispatch();
 
-  return useMutation<MessageResponse, Error, void>({
+  return useMutation<MessageResponse, any, void>({
     mutationFn: () => authService.logout(),
     onSuccess: (data) => {
       dispatch(logoutAction());
       queryClient.clear();
       toast.success(data.message || 'Logged out successfully');
+    },
+    onError: (error) => {
+      const message = error?.response?.data?.detail || error?.message || 'Logout failed';
+      toast.error(message);
     },
   });
 }
@@ -89,12 +105,16 @@ export function useUpdateProfile() {
   const queryClient = useQueryClient();
   const dispatch = useAppDispatch();
 
-  return useMutation<UserResponse, Error, UserUpdatePayload>({
+  return useMutation<UserResponse, any, UserUpdatePayload>({
     mutationFn: (payload) => authService.updateMe(payload),
     onSuccess: (updatedUser) => {
       dispatch(setUser(updatedUser));
       queryClient.setQueryData(AUTH_USER_QUERY_KEY, updatedUser);
       toast.success('Profile updated successfully!');
+    },
+    onError: (error) => {
+      const message = error?.response?.data?.detail || error?.message || 'Profile update failed';
+      toast.error(message);
     },
   });
 }
