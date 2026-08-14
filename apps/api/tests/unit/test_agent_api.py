@@ -1,15 +1,22 @@
 """
 Unit & API Integration Tests for Agent Domain Module
-Verifies Agent registration with concurrent Data Sources, listing, detail, heartbeat, and ownership checks.
+Verifies Agent registration with concurrent Data Sources, listing, detail, heartbeat,
+per-user uniqueness, status validation, degraded diagnostics, and watchdog stale recovery.
 """
 
+from datetime import datetime, timedelta, timezone
 import uuid
-import pytest
 from httpx import ASGITransport, AsyncClient
+import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.db import Base, get_db
 from app.main import app
+from app.modules.agents.agents_models import Agent
+from app.modules.agents.agents_services import AgentService
+from app.modules.execution.execution_models import MigrationJob
+from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
 
 
 @pytest.mark.asyncio
@@ -20,8 +27,8 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
     2. POST /api/v1/agents with concurrent source and target data_sources
     3. GET /api/v1/agents -> verify list returns attached data sources with role
     4. GET /api/v1/agents/{id} -> verify agent detail
-    5. POST /api/v1/agents/{id}/heartbeat -> verify heartbeat timestamp update
-    6. PUT /api/v1/agents/{id} -> verify agent detail update
+    5. POST /api/v1/agents/heartbeat -> verify heartbeat timestamp & degraded status
+    6. PUT /api/v1/agents/{id} -> verify agent detail update (name, version)
     7. Ownership security check: register second user and attempt accessing first user's agent -> 403 Forbidden
     8. DELETE /api/v1/agents/{id} -> verify deletion
     """
@@ -139,7 +146,15 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         )
         assert res_bad_token_hb.status_code == 401
 
-        # 5c. Direct Authenticated Heartbeat Ping via X-Agent-Token header -> 200 OK & Status becomes online
+        # 5c. Heartbeat with invalid status value -> 422 Unprocessable Entity (EC-5 validation)
+        res_invalid_status_hb = await client.post(
+            "/api/v1/agents/heartbeat",
+            json={"status": "UNKNOWN_INVALID_STATUS", "version": "1.0.1"},
+            headers={"X-Agent-Token": api_token},
+        )
+        assert res_invalid_status_hb.status_code == 422
+
+        # 5d. Direct Authenticated Heartbeat Ping via X-Agent-Token header -> 200 OK & Status becomes online
         res_hb_direct = await client.post(
             "/api/v1/agents/heartbeat",
             json={"status": "online", "version": "1.0.1"},
@@ -149,21 +164,113 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         assert res_hb_direct.json()["status"] == "online"
         assert res_hb_direct.json()["version"] == "1.0.1"
 
-        # 6. PUT /api/v1/agents/{agent_id}
+        # 5e. Heartbeat with failing database connection diagnostics -> updates DataSource status and error
+        failing_hb_payload = {
+            "status": "degraded",
+            "version": "1.0.1",
+            "data_sources": [
+                {
+                    "identifier": "pg_primary",
+                    "is_healthy": False,
+                    "error_type": "ConnectionRefused",
+                    "error_message": "Connection refused on host.docker.internal:5432. Ensure database is running.",
+                    "latency_ms": 0.0,
+                },
+                {
+                    "identifier": "src_mysql_warehouse",  # Fuzzy matching test (EC-3)
+                    "is_healthy": False,
+                    "error_type": "UnfilledPlaceholder",
+                    "error_message": "Unfilled credential placeholder found in password.",
+                    "latency_ms": 0.0,
+                },
+            ],
+        }
+        res_failing_hb = await client.post(
+            "/api/v1/agents/heartbeat",
+            json=failing_hb_payload,
+            headers={"X-Agent-Token": api_token},
+        )
+        assert res_failing_hb.status_code == 200
+        assert res_failing_hb.json()["status"] == "degraded"
+
+        # Verify data sources in agent detail reflect the failure state
+        res_detail_failing = await client.get(f"/api/v1/agents/{agent_id}")
+        assert res_detail_failing.status_code == 200
+        ds_list = {ds["identifier"]: ds for ds in res_detail_failing.json()["data_sources"]}
+        assert ds_list["pg_primary"]["status"] == "ConnectionRefused"
+        assert "Connection refused" in ds_list["pg_primary"]["last_error"]
+        assert ds_list["pg_primary"]["last_checked_at"] is not None
+        assert ds_list["mysql_warehouse"]["status"] == "UnfilledPlaceholder"
+        assert "Unfilled credential" in ds_list["mysql_warehouse"]["last_error"]
+
+        # 5f. Self-healing / recovery: Heartbeat with restored healthy database connections -> updates status to healthy
+        recovered_hb_payload = {
+            "status": "online",
+            "version": "1.0.1",
+            "data_sources": [
+                {
+                    "identifier": "pg_primary",
+                    "is_healthy": True,
+                    "latency_ms": 4.2,
+                    "database_name": "prod_db",
+                },
+                {
+                    "identifier": "mysql_warehouse",
+                    "is_healthy": True,
+                    "latency_ms": 8.1,
+                    "database_name": "warehouse_db",
+                },
+            ],
+        }
+        res_recovered_hb = await client.post(
+            "/api/v1/agents/heartbeat",
+            json=recovered_hb_payload,
+            headers={"X-Agent-Token": api_token},
+        )
+        assert res_recovered_hb.status_code == 200
+
+        # Verify data sources in agent detail reflect the recovered healthy state
+        res_detail_healthy = await client.get(f"/api/v1/agents/{agent_id}")
+        assert res_detail_healthy.status_code == 200
+        ds_healthy_list = {ds["identifier"]: ds for ds in res_detail_healthy.json()["data_sources"]}
+        assert ds_healthy_list["pg_primary"]["status"] == "healthy"
+        assert ds_healthy_list["pg_primary"]["last_error"] is None
+        assert ds_healthy_list["mysql_warehouse"]["status"] == "healthy"
+        assert ds_healthy_list["mysql_warehouse"]["last_error"] is None
+
+        # 5g. Graceful offline heartbeat (EC-2)
+        res_offline_hb = await client.post(
+            "/api/v1/agents/heartbeat",
+            json={"status": "offline", "version": "1.0.1"},
+            headers={"X-Agent-Token": api_token},
+        )
+        assert res_offline_hb.status_code == 200
+        assert res_offline_hb.json()["status"] == "offline"
+
+        # 6. PUT /api/v1/agents/{agent_id} (EC-7: updates name and version)
         res_put = await client.put(
             f"/api/v1/agents/{agent_id}",
-            json={"name": "Updated Production Edge Agent"},
+            json={"name": "Updated Production Edge Agent", "version": "1.0.2"},
         )
         assert res_put.status_code == 200
         assert res_put.json()["name"] == "Updated Production Edge Agent"
+        assert res_put.json()["version"] == "1.0.2"
 
-        # 7. Ownership check: Register User 2 and attempt access to User 1's Agent
+        # 7. Ownership check & Per-user uniqueness (EC-6): Register User 2
         user2_payload = {
             "email": "other_user@example.com",
             "password": "Password123!",
             "name": "Other User",
         }
         await client.post("/api/v1/auth/register", json=user2_payload)
+
+        # User 2 can create an agent with the SAME agent_identifier as User 1 (EC-6 per-user uniqueness)
+        res_u2_agent = await client.post(
+            "/api/v1/agents",
+            json={"name": "User2 Agent", "agent_identifier": "edge_prod_001"},
+        )
+        assert res_u2_agent.status_code == 201
+        assert res_u2_agent.json()["agent_identifier"] == "edge_prod_001"
 
         # Try GET User 1's Agent as User 2 -> 403 Forbidden
         res_unauth_get = await client.get(f"/api/v1/agents/{agent_id}")
@@ -182,4 +289,85 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         assert res_get_del.status_code == 404
 
     app.dependency_overrides.clear()
+    await test_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_agent_and_orphaned_job_watchdog():
+    """
+    Test Watchdog Recovery (EC-1 & EC-8):
+    1. Create an agent that was online in the past (last_seen_at > 60s ago).
+    2. Attach a running MigrationJob to this agent.
+    3. Execute AgentService.check_stale_agents_and_jobs.
+    4. Assert agent is transitioned to 'offline'.
+    5. Assert orphaned MigrationJob is transitioned to 'failed' with timeout reason.
+    """
+    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    TestSession = async_sessionmaker(bind=test_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async with TestSession() as session:
+        # Create user
+        from app.modules.users.users_models import User
+        user = User(
+            email="watchdog_test@example.com",
+            password_hash="hashed_pwd",
+            name="Watchdog Test User",
+        )
+        session.add(user)
+        await session.flush()
+
+        # Create agent that hasn't sent heartbeat in 120 seconds
+        stale_time = datetime.now(timezone.utc) - timedelta(seconds=120)
+        stale_agent = Agent(
+            user_id=user.id,
+            name="Stale Watchdog Agent",
+            agent_identifier="stale_agent_001",
+            api_token_hash="fake_hash_123",
+            status="online",
+            last_seen_at=stale_time,
+        )
+        session.add(stale_agent)
+        await session.flush()
+
+        # Create a migration plan and running job for this stale agent
+        plan = MigrationPlan(
+            user_id=user.id,
+            agent_id=stale_agent.id,
+            status="approved",
+            plan_data={"source_type": "postgresql", "target_type": "mysql"},
+        )
+        session.add(plan)
+        await session.flush()
+
+        running_job = MigrationJob(
+            migration_plan_id=plan.id,
+            agent_id=stale_agent.id,
+            status="running",
+            progress=45.0,
+            started_at=datetime.now(timezone.utc),
+        )
+        session.add(running_job)
+        await session.commit()
+
+        # Run the watchdog check
+        stats = await AgentService.check_stale_agents_and_jobs(session, stale_threshold_seconds=60)
+        assert stats["stale_agents_marked_offline"] == 1
+        assert stats["failed_jobs_recovered"] == 1
+
+        # Verify in DB
+        stmt_agent = select(Agent).where(Agent.id == stale_agent.id)
+        res_a = await session.execute(stmt_agent)
+        updated_agent = res_a.scalar_one()
+        assert updated_agent.status == "offline"
+
+        stmt_job = select(MigrationJob).where(MigrationJob.id == running_job.id)
+        res_j = await session.execute(stmt_job)
+        updated_job = res_j.scalar_one()
+        assert updated_job.status == "failed"
+        assert "timed out" in updated_job.error_message
+        assert updated_job.completed_at is not None
+
     await test_engine.dispose()

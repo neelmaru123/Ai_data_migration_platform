@@ -9,7 +9,7 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "003_add_google_auth"
+revision: str = "003_add_google_auth_to_users"
 down_revision: Union[str, None] = "002_add_agents"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

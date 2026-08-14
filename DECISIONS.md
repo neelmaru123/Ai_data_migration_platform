@@ -228,4 +228,52 @@ Implemented `AgentCommandGenerator` service and API response enhancements (`POST
 ### 4. Trade-offs & Future Considerations
 - Returned commands contain placeholder strings (`<...>`) which require the user to fill in their real passwords locally before executing the Docker run command.
 
+---
+
+## [2026-08-14] - Complete Edge Case Hardening: Stale Watchdog, Concurrent Diagnostics & Status Immutability
+
+### 1. Decision Summary
+Fixed 14 systemic edge cases across the Docker Agent and FastAPI backend:
+1. **Ghost Agent & Stale Job Watchdog**: Implemented periodic background watchdog loop in FastAPI `lifespan` detecting dead agents (>60s inactivity), transitioning them to `offline`, and automatically failing orphaned `MigrationJob` records.
+2. **Concurrent Database Socket Checks**: Refactored agent health diagnostics to run across all configured databases in parallel using `concurrent.futures.ThreadPoolExecutor`, strictly bounding socket diagnostic time to $\le 3.5\text{s}$ total.
+3. **Graceful Offline Signaling**: Registered `SIGINT`/`SIGTERM` handlers in the Docker Agent to dispatch a final `status: "offline"` heartbeat before container termination.
+4. **Strict Schema Constraints & Status Immutability**: Enforced Pydantic `Literal["online", "offline", "busy", "degraded", "error"]` validation on heartbeats and removed `status` from user-facing `AgentUpdate` REST payload to prevent status spoofing.
+5. **Per-User Identifier Uniqueness**: Changed `Agent.agent_identifier` from global unique constraint to composite `UniqueConstraint("user_id", "agent_identifier")`.
+6. **Degraded Health Calculation & Fuzzy Matching**: Agent reports `status: "degraded"` when any database source is unreachable, and backend uses fuzzy identifier resolution (`src_...`, `dest_...`) to prevent dropped reports.
+7. **Heartbeat Throttling & WebSocket Keepalive**: Added rate-limiting guards against rapid ping spamming and implemented WebSocket ping/pong protocol for persistent connection keepalive across proxies.
+
+### 2. Why This Approach? (Rationale)
+- **Bounded Latency**: Sequential database testing across 5+ failing databases would cause a 17.5s blocking delay, causing the agent to miss its heartbeat window and appear dead to the control plane. Concurrent threading bounds this to max 3.5s.
+- **Single Source of Truth for Status**: Agent status is solely controlled by authentic agent heartbeats and the backend watchdog; users cannot manually alter status via REST API.
+- **Fail-Safe Job Lifecycle**: If an on-premise Docker container crashes or loses network mid-migration, jobs don't stay in `running` state forever; the control plane auto-recovers and notifies the UI.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying Solely on Docker Exit Codes**: Rejected because the control plane has no direct access to customer on-premise Docker daemons.
+- **Alternative B: Client-Side Polling Only**: Rejected because if the browser tab closes, job state remains stuck in `running` on the backend.
+- **Alternative C: Sequential Socket Tests with Lower Timeouts (0.5s)**: Rejected because high-latency WAN / cloud database handshakes would produce false connection timeouts.
+
+### 4. Trade-offs & Future Considerations
+- In distributed multi-worker deployments of the API control plane, the in-memory WebSocket manager can be backed by Redis Pub/Sub (`settings.REDIS_URL`) for cross-node event distribution.
+
+---
+
+## [2026-08-14] - Alembic Migration 005: Agent API Tokens & DataSource Health Diagnostics
+
+### 1. Decision Summary
+Created Alembic migration [`005_add_agent_tokens_and_datasource_diagnostics.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic/versions/005_add_agent_tokens_and_datasource_diagnostics.py) to synchronize all database tables with newly introduced model fields.
+
+### 2. Why This Approach? (Rationale)
+- **Model-to-Schema Synchronization**:
+  1. `agents.api_token_hash`: Added `String(255)` with unique index `ix_agents_api_token_hash` for secure SHA-256 agent authentication.
+  2. `agents` per-user uniqueness: Converted `agent_identifier` from global unique index to composite `UniqueConstraint("user_id", "agent_identifier", name="uq_agents_user_identifier")`.
+  3. `data_sources.status`: Added `String(50)` (default `"untested"`).
+  4. `data_sources.last_error`: Added nullable `String` for sanitized error messages.
+  5. `data_sources.last_checked_at`: Added nullable `DateTime(timezone=True)` for health check timestamps.
+- **Continuous Revision Linearity**: Verified linear migration DAG: `001_initial_schema` $\rightarrow$ `002_add_agents` $\rightarrow$ `003_add_google_auth_to_users` $\rightarrow$ `004_agent_centric_arch` $\rightarrow$ `005_agent_tokens_and_diagnostics`.
+
+### 3. Trade-offs & Future Considerations
+- Full `upgrade()` and `downgrade()` methods implemented to ensure zero data corruption during deployment rollbacks.
+
+
+
 

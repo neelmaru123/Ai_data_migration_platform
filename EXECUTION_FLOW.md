@@ -97,10 +97,54 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `BACKEND_URL` and `AGENT_DOCKER_IMAGE` configuration properties.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `docker_command`, `docker_command_powershell`, `docker_command_oneline`, `env_template` to `AgentDetailResponse` and defined `AgentDockerCommandResponse`.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Integrated `AgentCommandGenerator` into `create_agent` and added `get_agent_docker_command`.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_routes.py) - Documented `POST /agents` and added `GET /agents/{agent_id}/docker-command` endpoint.
-- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added safe startup scanning and logging of configured source/destination database environments.
-- **[MODIFIED]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Added assertions for Docker command response and verified `GET /agents/{id}/docker-command`.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added concurrent ThreadPoolExecutor socket checks, degraded status computation, graceful offline signal handling, and retry loop backoff.
+- **[MODIFIED]**: [`apps/api/app/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/main.py) - Replaced on_event with modern lifespan context manager and started periodic background stale watchdog task.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_models.py) - Replaced global unique constraint on `agent_identifier` with composite `UniqueConstraint("user_id", "agent_identifier")`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `VALID_AGENT_STATUS` Literal and removed `status` from `AgentUpdate`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Added per-user uniqueness check, fuzzy data source identifier matching, and `check_stale_agents_and_jobs` watchdog recovery.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Added comprehensive edge case validation tests (watchdog recovery, per-user uniqueness, status validation, graceful shutdown).
 - **[UNCHANGED]**: Existing authentication, profiling, and transformation database models.
+
+---
+
+## 5. Agent Heartbeat Diagnostics & Watchdog Recovery Flow
+
+```text
+  Docker Agent (apps/agent/main.py)
+        │
+        │ 1. Collect configured DB URLs from env (SRC_..._URL, DEST_..._URL)
+        │ 2. Execute parallel socket checks via ThreadPoolExecutor (timeout ≤ 3.5s)
+        │ 3. Compute status: 'online' (all OK), 'degraded' (any failing), or 'offline' (on SIGTERM)
+        ▼
+  HTTP POST /api/v1/agents/heartbeat (X-Agent-Token: ag_live_...)
+        │
+        ▼
+  FastAPI Ingress (apps/api/app/modules/agents/agents_routes.py)
+        │
+        │ 1. Authenticate agent via SHA-256 token hash (get_current_agent)
+        │ 2. Delegate to AgentService.process_agent_heartbeat
+        ▼
+  Agent Service (apps/api/app/modules/agents/agents_services.py)
+        │
+        │ 1. Update agent.status, version, last_seen_at
+        │ 2. Fuzzy match incoming reports against data_sources (pg_primary, src_pg_primary)
+        │ 3. Update DataSource status ('healthy', 'ConnectionRefused', 'UnfilledPlaceholder')
+        │ 4. Broadcast real-time WebSocket event (AGENT_CONNECTED / AGENT_HEARTBEAT / AGENT_STATUS_CHANGED)
+        ▼
+  Web UI Dashboard receives live WebSocket update (status badges & diagnostic errors update in real-time)
+
+========================================================================================
+
+  Background Stale Watchdog (apps/api/app/main.py -> AgentService.check_stale_agents_and_jobs)
+        │
+        │ Runs every 20 seconds in FastAPI Lifespan
+        │ 1. Queries agents where status IN ('online', 'busy', 'degraded') AND last_seen_at < (NOW - 60s)
+        │ 2. Marks stale agents as status='offline'
+        │ 3. Finds any MigrationJob with status IN ('running', 'preparing') for those agents
+        │ 4. Transitions orphaned jobs to status='failed', error_message='Agent disconnected or timed out'
+        │ 5. Broadcasts AGENT_DISCONNECTED and JOB_FAILED over WebSockets to UI
+```
+
 
 
 
