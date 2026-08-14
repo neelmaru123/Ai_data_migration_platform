@@ -13,11 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.websocket_manager import manager
+from app.modules.agents.agents_command_generator import AgentCommandGenerator
 from app.modules.agents.agents_dependencies import hash_agent_token
 from app.modules.agents.agents_models import Agent
 from app.modules.agents.agents_schemas import (
     AgentCreate,
     AgentDetailResponse,
+    AgentDockerCommandResponse,
     AgentHeartbeat,
     AgentUpdate,
 )
@@ -36,6 +38,7 @@ class AgentService:
         Generates a secure API token, stores its SHA-256 hash, and sets initial status to 'offline'.
         Concurrently creates initial Data Source identities (source and destination DBs)
         in the same atomic transaction if provided.
+        Generates copy-paste ready Docker run commands with credential placeholders and returns them.
         """
         # 1. Check for identifier uniqueness
         stmt_check = select(Agent).where(Agent.agent_identifier == data.agent_identifier.strip())
@@ -77,7 +80,7 @@ class AgentService:
 
         await session.commit()
 
-        # 5. Return AgentDetailResponse Pydantic schema with raw api_token attached
+        # 5. Return AgentDetailResponse Pydantic schema with raw api_token and generated Docker commands attached
         fetched_agent = await AgentService.get_agent_by_id(session, agent.id)
         if fetched_agent is None:
             raise HTTPException(
@@ -86,6 +89,18 @@ class AgentService:
             )
         response = AgentDetailResponse.model_validate(fetched_agent)
         response.api_token = raw_token
+
+        # 6. Generate Docker commands configured with token and DB credential placeholders
+        cmd_payload = AgentCommandGenerator.generate_command_payload(
+            agent=fetched_agent,
+            data_sources=fetched_agent.data_sources,
+            raw_token=raw_token,
+        )
+        response.docker_command = cmd_payload["docker_command"]
+        response.docker_command_powershell = cmd_payload["docker_command_powershell"]
+        response.docker_command_oneline = cmd_payload["docker_command_oneline"]
+        response.env_template = cmd_payload["env_template"]
+
         return response
 
     @staticmethod
@@ -193,3 +208,25 @@ class AgentService:
         """Delete an agent (cascade deletes linked data sources)."""
         await session.delete(agent)
         await session.commit()
+
+    @staticmethod
+    def get_agent_docker_command(agent: Agent) -> AgentDockerCommandResponse:
+        """
+        Generate Docker run commands and .env configuration template for an existing agent.
+        Uses placeholder token since raw token is not stored in plaintext.
+        """
+        cmd_payload = AgentCommandGenerator.generate_command_payload(
+            agent=agent,
+            data_sources=agent.data_sources,
+            raw_token=None,
+        )
+        return AgentDockerCommandResponse(
+            agent_id=agent.id,
+            agent_identifier=agent.agent_identifier,
+            docker_command=cmd_payload["docker_command"],
+            docker_command_powershell=cmd_payload["docker_command_powershell"],
+            docker_command_oneline=cmd_payload["docker_command_oneline"],
+            env_template=cmd_payload["env_template"],
+            environment_variables=cmd_payload["environment_variables"],
+        )
+

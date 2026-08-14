@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-import sys
+import re
 import time
 import urllib.error
 import urllib.request
@@ -38,11 +38,46 @@ def send_startup_handshake(backend_url: str, agent_token: str, version: str) -> 
     return False
 
 
+def _mask_url(url_val: str) -> str:
+    """Masks password in connection URLs for safe logging, highlighting unfilled placeholders."""
+    if "<" in url_val and ">" in url_val:
+        return f"{url_val} [WARNING: Unfilled credential placeholder detected]"
+    return re.sub(r":([^:@]+)@", r":***@", url_val)
+
+
+def log_configured_databases():
+    """Scans and logs all configured source and destination database environments."""
+    src_configs = {}
+    dest_configs = {}
+
+    for k, v in os.environ.items():
+        if k.startswith("SRC_") or k == "SOURCE_DB_URL":
+            src_configs[k] = _mask_url(v) if "URL" in k or "PASSWORD" in k else v
+        elif k.startswith("DEST_") or k == "DEST_DB_URL":
+            dest_configs[k] = _mask_url(v) if "URL" in k or "PASSWORD" in k else v
+
+    if src_configs:
+        logger.info("Configured Source Databases detected:")
+        for k, v in src_configs.items():
+            logger.info(f"  - {k}: {v}")
+    else:
+        logger.warning("No Source Database environment variables detected.")
+
+    if dest_configs:
+        logger.info("Configured Destination Databases detected:")
+        for k, v in dest_configs.items():
+            logger.info(f"  - {k}: {v}")
+    else:
+        logger.warning("No Destination Database environment variables detected.")
+
+
 def main():
     logger.info("Initializing Docker Agent process...")
     backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
     agent_token = os.getenv("AGENT_TOKEN", "")
     version = os.getenv("AGENT_VERSION", "1.0.0")
+
+    log_configured_databases()
 
     if not agent_token:
         logger.warning("AGENT_TOKEN environment variable not set. Agent running in unauthenticated mode.")

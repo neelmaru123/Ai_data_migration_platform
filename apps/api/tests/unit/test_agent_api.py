@@ -66,13 +66,13 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
                     "name": "Primary PostgreSQL Source",
                     "type": "postgresql",
                     "role": "source",
-                    "identifier": "src_pg_instance_01",
+                    "identifier": "pg_primary",
                 },
                 {
                     "name": "Destination MySQL Warehouse",
                     "type": "mysql",
                     "role": "target",
-                    "identifier": "dest_mysql_instance_01",
+                    "identifier": "mysql_warehouse",
                 },
             ],
         }
@@ -92,6 +92,15 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         agent_id = data_agent["id"]
         api_token = data_agent["api_token"]
 
+        # Verify generated Docker run commands & .env template returned in creation response
+        assert "docker_command" in data_agent
+        assert "docker_command_powershell" in data_agent
+        assert "docker_command_oneline" in data_agent
+        assert "env_template" in data_agent
+        assert api_token in data_agent["docker_command"]
+        assert "SRC_PG_PRIMARY_URL=" in data_agent["docker_command"]
+        assert "DEST_MYSQL_WAREHOUSE_URL=" in data_agent["docker_command"]
+
         # 3. GET /api/v1/agents (List)
         res_list = await client.get("/api/v1/agents")
         assert res_list.status_code == 200
@@ -102,6 +111,18 @@ async def test_agent_api_lifecycle_and_concurrent_data_sources():
         res_detail = await client.get(f"/api/v1/agents/{agent_id}")
         assert res_detail.status_code == 200
         assert res_detail.json()["agent_identifier"] == "edge_prod_001"
+
+        # 4b. GET /api/v1/agents/{agent_id}/docker-command
+        res_cmd = await client.get(f"/api/v1/agents/{agent_id}/docker-command")
+        assert res_cmd.status_code == 200
+        cmd_data = res_cmd.json()
+        assert cmd_data["agent_id"] == agent_id
+        assert "docker_command" in cmd_data
+        assert "docker_command_powershell" in cmd_data
+        assert "docker_command_oneline" in cmd_data
+        assert "env_template" in cmd_data
+        assert "SRC_PG_PRIMARY_URL" in cmd_data["environment_variables"]
+        assert "DEST_MYSQL_WAREHOUSE_URL" in cmd_data["environment_variables"]
 
         # 5a. Unauthenticated Heartbeat attempt -> 401 Unauthorized
         res_unauth_hb = await client.post(
