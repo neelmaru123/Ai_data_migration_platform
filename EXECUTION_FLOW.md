@@ -90,6 +90,56 @@ This document maps entry points, call stack sequences, and module dependencies a
 
 ---
 
+## 7. Metadata Introspection & Control Plane Ingestion Flow (Phase 2)
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/main.py)
+        │
+        │ 1. Startup handshake succeeds -> Trigger AgentMetadataEngine
+        ▼
+  Metadata Introspection Engine (apps/agent/metadata_engine.py)
+        │
+        │ 1. Introspect local DBs via SQL information_schema queries
+        │ 2. Construct Schema AST: Schemas, Tables, Columns, Constraints, FK Relationships
+        │ 3. HTTP POST /api/v1/metadata/sync with X-Agent-Token header
+        ▼
+  FastAPI Control Plane Gateway (apps/api/app/modules/metadata/metadata_routes.py:sync_agent_metadata)
+        │
+        │ 1. Authenticate agent token via get_current_agent dependency
+        │ 2. Delegate payload to MetadataService.ingest_agent_metadata_snapshot
+        ▼
+  Metadata Service (apps/api/app/modules/metadata/metadata_services.py)
+        │
+        │ 1. Match target DataSource entity by UUID or clean identifier
+        │ 2. Query latest snapshot version & compute next_version = version + 1
+        │ 3. Persist MetadataSnapshot header
+        │ 4. Bulk insert MetadataSchema, MetadataTable, MetadataColumn, MetadataConstraint
+        │ 5. Map foreign key column IDs & insert MetadataRelationship records
+        │ 6. Update DataSource status = 'profiled' & commit transaction
+        │ 7. Push METADATA_PROFILED event over WebSocket via manager.broadcast_to_agent()
+        ▼
+  Dashboard Web UI receives WebSocket notification & renders full DB Schema Tree
+```
+
+---
+
+## 8. Impact & Delta Analysis (Phase 2 Metadata Domain)
+
+- **[RENAMED]**: `apps/api/app/modules/profiler/` $\rightarrow$ [`apps/api/app/modules/metadata/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata) - Renamed feature module to `metadata` domain.
+- **[NEW]**: [`apps/agent/metadata_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/metadata_engine.py) - Local SQL database schema introspection engine for on-premise Docker Agent.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_schemas.py) - Pydantic validation schemas for metadata snapshot ingestion and REST DTOs.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_services.py) - Business operations service handling snapshot auto-versioning, relational persistence, and WebSocket broadcasting.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_routes.py) - REST API endpoints (`/api/v1/metadata/sync`, `/api/v1/metadata/sources/{id}/snapshots`).
+- **[NEW]**: [`apps/api/tests/unit/test_metadata_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_metadata_api.py) - Automated test suite for metadata snapshot sync, versioning, and ownership security.
+- **[NEW]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_command_generator.py) - Dynamic CLI & environment template generator for multi-source and target migration Docker containers.
+- **[NEW]**: [`apps/api/tests/unit/test_agent_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_command_generator.py) - Unit test suite for Docker command generation across database dialects and shell syntaxes.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `BACKEND_URL` and `AGENT_DOCKER_IMAGE` configuration properties.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `docker_command`, `docker_command_powershell`, `docker_command_oneline`, `env_template` to `AgentDetailResponse` and defined `AgentDockerCommandResponse`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Integrated `AgentCommandGenerator` into `create_agent` and added `get_agent_docker_command`.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added concurrent ThreadPoolExecutor socket checks, degraded status computation, graceful offline signal handling, and retry loop backoff.
+
+---
+
 ## 4. Impact & Delta Analysis
 
 - **[NEW]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_command_generator.py) - Dynamic CLI & environment template generator for multi-source and target migration Docker containers.

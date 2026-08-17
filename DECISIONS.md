@@ -343,6 +343,26 @@ Created Alembic migration [`005_add_agent_tokens_and_datasource_diagnostics.py`]
 ### 3. Trade-offs & Future Considerations
 - Full `upgrade()` and `downgrade()` methods implemented to ensure zero data corruption during deployment rollbacks.
 
+---
+
+## [2026-08-17] - Phase 2: Metadata Domain Architecture & On-Premise Introspection Engine
+
+### 1. Decision Summary
+Renamed the control plane `profiler` feature module to **`metadata`** (`apps/api/app/modules/metadata/`) and implemented end-to-end database schema introspection, snapshot versioning, control plane ingestion, and real-time WebSockets:
+1. **Domain Rename**: Migrated all models (`metadata_models.py`), schemas (`metadata_schemas.py`), services (`metadata_services.py`), and routes (`metadata_routes.py`) into `app/modules/metadata`.
+2. **On-Premise Introspection Engine**: Implemented [`apps/agent/metadata_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/metadata_engine.py) to introspect database schemas, tables, estimated row counts, column data types, nullability, primary keys, and foreign key relationships locally inside customer VPCs.
+3. **Control Plane Ingestion & Auto-Versioning**: Endpoint `POST /api/v1/metadata/sync` ingests agent payloads, auto-increments version numbers per DataSource, and bulk-persists `MetadataSnapshot`, `MetadataSchema`, `MetadataTable`, `MetadataColumn`, `MetadataConstraint`, and `MetadataRelationship` records in PostgreSQL within a single atomic database transaction.
+4. **Real-Time Push Notifications**: Pushes `METADATA_PROFILED` events over WebSockets via `manager.broadcast_to_agent()` to update Next.js dashboard clients instantly.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Raw Data Transfer**: Customer passwords and table data remain strictly on-premise. Only structural schema ASTs are transmitted to the control plane.
+- **Atomic Hierarchy Persistence**: Flushing parent IDs (`snapshot_id`, `schema_id`, `table_id`) in a single session transaction ensures complex relational metadata is stored without orphaned records.
+- **Fuzzy Identifier Resolution**: Ingestion matches data sources by UUID or clean identifier (`src_...`, `dest_...`), preventing dropped snapshots due to environment naming variations.
+
+### 3. Trade-offs & Future Considerations
+- File-based sources (CSV/Excel) currently infer schemas from top row headers; future enhancement can add deep data type sniffing for multi-gigabyte files.
+
+
 
 
 

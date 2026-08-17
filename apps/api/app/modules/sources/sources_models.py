@@ -12,7 +12,7 @@ from app.core.db import Base
 
 if TYPE_CHECKING:
     from app.modules.agents.agents_models import Agent
-    from app.modules.profiler.profiler_models import MetadataSnapshot
+    from app.modules.metadata.metadata_models import MetadataSnapshot
 
 
 class DataSource(Base):

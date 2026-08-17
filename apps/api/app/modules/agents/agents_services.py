@@ -394,4 +394,5 @@ class AgentService:
             docker_command_powershell=cmd_payload["docker_command_powershell"],
             docker_command_oneline=cmd_payload["docker_command_oneline"],
             env_template=cmd_payload["env_template"],
+            environment_variables=cmd_payload["environment_variables"],
         )

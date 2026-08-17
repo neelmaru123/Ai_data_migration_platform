@@ -14,7 +14,7 @@ from app.core.db import Base
 from app.modules.users.users_models import User
 from app.modules.agents.agents_models import Agent
 from app.modules.sources.sources_models import DataSource
-from app.modules.profiler.profiler_models import (
+from app.modules.metadata.metadata_models import (
     MetadataSnapshot,
     MetadataSchema,
     MetadataTable,

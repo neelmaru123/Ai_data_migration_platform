@@ -13,8 +13,52 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from metadata_engine import AgentMetadataEngine
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("docker-agent")
+
+
+def sync_metadata_snapshots(backend_url: str, agent_token: str):
+    """
+    Introspects local schemas for all configured healthy databases and posts snapshot payloads
+    to backend `/api/v1/metadata/sync`.
+    """
+    url = f"{backend_url.rstrip('/')}/api/v1/metadata/sync"
+    headers = {
+        "Content-Type": "application/json",
+        "X-Agent-Token": agent_token,
+    }
+
+    seen_identifiers = set()
+    for k, v in os.environ.items():
+        if (k.startswith("SRC_") or k.startswith("DEST_") or k in ("SOURCE_DB_URL", "DEST_DB_URL")) and (
+            "URL" in k or "URI" in k
+        ):
+            ident = extract_identifier_from_env_key(k)
+            if ident in seen_identifiers:
+                continue
+            seen_identifiers.add(ident)
+
+            logger.info(f"Executing metadata schema introspection for database '{ident}'...")
+            snapshot_data = AgentMetadataEngine.introspect_database(ident, v)
+            if not snapshot_data:
+                continue
+
+            payload = json.dumps(snapshot_data).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=15.0) as resp:
+                    if resp.status in (200, 201):
+                        res_body = json.loads(resp.read().decode("utf-8"))
+                        logger.info(
+                            f"Metadata snapshot v{res_body.get('version')} successfully synced for database '{ident}' "
+                            f"(Snapshot ID: {res_body.get('id')}, Tables: {res_body.get('total_tables')}, Columns: {res_body.get('total_columns')})."
+                        )
+            except urllib.error.HTTPError as err:
+                logger.error(f"Metadata sync failed for '{ident}' with HTTP status {err.code}: {err.reason}")
+            except Exception as exc:
+                logger.error(f"Could not transmit metadata snapshot for '{ident}' to {url}: {exc}")
 
 
 def _mask_url(url_val: str) -> str:
@@ -349,6 +393,12 @@ def main():
         return
 
     logger.info("Agent process is online and securely connected to backend.")
+
+    # Execute schema metadata introspection for all configured healthy databases
+    try:
+        sync_metadata_snapshots(backend_url, agent_token)
+    except Exception as meta_err:
+        logger.warning(f"Metadata auto-introspection encountered an error: {meta_err}")
 
     if run_once:
         logger.info("AGENT_RUN_ONCE is enabled. Exiting startup routine.")

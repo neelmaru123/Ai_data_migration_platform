@@ -15,7 +15,7 @@ JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
     from app.modules.agents.agents_models import Agent
-    from app.modules.profiler.profiler_models import MetadataSnapshot
+    from app.modules.metadata.metadata_models import MetadataSnapshot
     from app.modules.execution.execution_models import MigrationJob
 
 

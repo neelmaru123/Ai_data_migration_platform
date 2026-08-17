@@ -13,13 +13,14 @@ from app.core.db import AsyncSessionLocal
 from app.core.logging import logger
 from app.modules.agents.agents_routes import router as agents_router
 from app.modules.agents.agents_services import AgentService
+from app.modules.metadata.metadata_routes import router as metadata_router
 from app.modules.sources.sources_routes import router as sources_router
 from app.modules.users.users_routes import router as users_router
 
 # Import all domain models to ensure SQLAlchemy mappers are registered
 import app.modules.agents.agents_models  # noqa: F401
 import app.modules.execution.execution_models  # noqa: F401
-import app.modules.profiler.profiler_models  # noqa: F401
+import app.modules.metadata.metadata_models  # noqa: F401
 import app.modules.sources.sources_models  # noqa: F401
 import app.modules.transformation_plans.transformation_plans_models  # noqa: F401
 import app.modules.users.users_models  # noqa: F401
@@ -71,6 +72,7 @@ app = FastAPI(
 app.include_router(sources_router, prefix=settings.API_V1_STR)
 app.include_router(users_router, prefix=settings.API_V1_STR)
 app.include_router(agents_router, prefix=settings.API_V1_STR)
+app.include_router(metadata_router, prefix=settings.API_V1_STR)
 
 # CORS Middleware Setup
 app.add_middleware(
