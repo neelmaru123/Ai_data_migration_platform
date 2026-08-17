@@ -11,7 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
 
 if TYPE_CHECKING:
-    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.migration_plans.migration_plans_models import MigrationPlan
     from app.modules.agents.agents_models import Agent
 
 

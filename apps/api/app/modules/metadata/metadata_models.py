@@ -24,7 +24,7 @@ JSON_TYPE = JSONB().with_variant(JSON, "sqlite")
 
 if TYPE_CHECKING:
     from app.modules.sources.sources_models import DataSource
-    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.migration_plans.migration_plans_models import MigrationPlan
 
 
 class MetadataSnapshot(Base):

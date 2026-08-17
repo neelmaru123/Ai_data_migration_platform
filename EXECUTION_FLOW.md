@@ -258,5 +258,54 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[NEW]**: [`apps/web/components/agents/DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) - Terminal command output with tabs, copy-to-clipboard, and live agent status badge.
 - **[NEW]**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx) - Main wizard layout page at `/agents/create`.
 
+---
+
+# Execution Flow - AI Migration Plan Generation & Local Execution (Phase 3 & Phase 4)
+
+## 1. Entry Points
+- **Plan Generation**: HTTP POST `/api/v1/plans/generate` in [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/migration_plans/migration_plans_routes.py)
+- **Local Agent Run**: Docker Agent main entry point [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py)
+
+## 2. Step-by-Step Execution Sequence
+
+```text
+  Client (Web / Swagger / Script)
+        │
+        │ 1. POST /api/v1/plans/generate (agent_id, target_config)
+        ▼
+  FastAPI Route (migration_plans_routes.py:generate_plan)
+        │
+        │ 2. Fetch Agent's MetadataSnapshots for all DataSources
+        │ 3. MetadataContextSerializer converts snapshots to Zero-Raw-Data Context
+        ▼
+  AI Plan Generator Service (migration_plans_llm.py:LLMPlanGeneratorService)
+        │
+        │ 4. Invokes ChatGoogleGenerativeAI (gemini-3.5-flash-lite)
+        │ 5. Parses output using PydanticOutputParser(TransformationPlanAST)
+        ▼
+  Control Plane Persistence (migration_plans_services.py)
+        │
+        │ 6. Persists MigrationPlan DB record & broadcasts WebSocket event
+        │ 7. Client receives complete TransformationPlanAST (DDL + ETL rules)
+        ▼
+  Local Docker Agent Execution (Phase 4 Pipeline)
+        │
+        │ 8. Local Agent receives EXECUTE_MIGRATION command
+        │ 9. Target DDL Executor executes pre_migration_ddl on local target DB (db_4)
+        │ 10. Polars / DuckDB reads chunks from local source DBs (db_1, db_2, db_3)
+        │ 11. Applies column AST mapping (merge_concat, split, type_cast, rekey)
+        │ 12. Performs in-memory multi-database table merge & email deduplication
+        │ 13. Bulk-loads transformed rows directly into local target DB (db_4)
+        │ 14. Executes post_migration_ddl (foreign key constraints)
+        ▼
+  Progress Reporting -> Docker Agent posts status & row counts back to Control Plane
+```
+
+## 3. Impact & Delta Analysis (Phase 3 & Phase 4 Modules)
+- **[NEW]**: [`apps/api/app/modules/migration_plans/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/migration_plans) - Models, schemas, REST endpoints, and Gemini 3.5 Flash Lite engine.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added `auto_register_agent` and header-based authentication (`X-Agent-Token`).
+- **[NEW]**: [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) - Local Polars/DuckDB execution engine for target DDL, 3-way table merges, and bulk streaming.
+
+
 
 

@@ -362,6 +362,31 @@ Renamed the control plane `profiler` feature module to **`metadata`** (`apps/api
 ### 3. Trade-offs & Future Considerations
 - File-based sources (CSV/Excel) currently infer schemas from top row headers; future enhancement can add deep data type sniffing for multi-gigabyte files.
 
+---
+
+## [2026-08-17] - Phase 3 AI Plan Generator AST Integration & Phase 4 Local Agent Execution Architecture
+
+### 1. Decision Summary
+Implemented Phase 3 AI Migration Plan Generator using **Gemini 3.5 Flash Lite** with `PydanticOutputParser` and designed Phase 4 Local Agent Execution Pipeline:
+1. **Domain Rename**: Standardized domain naming from `transformation_plans` to **`migration_plans`** across `apps/api/app/modules/migration_plans/`.
+2. **Zero Raw Data Policy**: Built `MetadataContextSerializer` to convert metadata ASTs into zero-raw-data prompt contexts.
+3. **Structured Schema Parsing**: Selected `PydanticOutputParser(pydantic_object=TransformationPlanAST)` with `gemini-3.5-flash-lite` (1,500 RPD, 1M token window) ensuring 100% deterministic schema validation across 9 column transformation types (`direct_copy`, `merge_concat`, `type_cast`, `split`, `expression`, `lookup_join`, `default_constant`, `drop_column`, `new_column_added`).
+4. **Local Docker Agent Auto-Registration & Header Authentication**: Added `auto_register_agent` in [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) to enable seamless token-less local docker runs, authenticated via `X-Agent-Token` request headers.
+5. **Phase 4 Local Execution Engine Design**: Offloaded data streaming, 3-way table merging, UUID v4 rekeying, and target bulk loading to the local Docker Agent process using Polars & DuckDB, enforcing Zero Raw Data cloud transfer.
+
+### 2. Why This Approach? (Rationale)
+- **Model Choice (`gemini-3.5-flash-lite`)**: Provides high intelligence for multi-database schema reasoning, high daily rate limits (1,500 RPD), and 1M token context window at zero cost.
+- **PydanticOutputParser over `with_structured_output`**: Eliminates SDK version incompatibilities and type errors in `langchain-google-genai` by enforcing explicit JSON format instructions and Pydantic parsing.
+- **Local Agent Execution Model**: Running ETL transformations locally inside the customer's Docker Agent guarantees data privacy (raw data never leaves local network) while avoiding cloud bandwidth costs.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Passing Raw Data to LLM**: Rejected due to enterprise security violations and severe context window bloat.
+- **Alternative B: Running Data Transformations in Cloud API**: Rejected due to high egress network costs and air-gapped database accessibility limitations.
+
+### 4. Trade-offs & Future Considerations
+- Polars streaming lazily evaluates transformations; batch chunk sizes (e.g. 50,000 rows) can be dynamically tuned based on host system RAM.
+
+
 
 
 

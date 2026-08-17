@@ -1,5 +1,5 @@
 """
-Transformation Plans Domain Database Models
+Migration Plans Domain Database Models
 """
 
 import uuid

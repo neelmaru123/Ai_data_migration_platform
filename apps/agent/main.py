@@ -341,9 +341,84 @@ def graceful_shutdown(backend_url: str, agent_token: str, version: str):
         logger.warning(f"Could not send final offline heartbeat: {exc}")
 
 
+def auto_register_agent(backend_url: str) -> Optional[str]:
+    """
+    Auto-registers an Agent with the backend if USER_EMAIL and USER_PASSWORD (or default test credentials)
+    are available, auto-detecting data sources from environment variables.
+    """
+    user_email = os.getenv("USER_EMAIL", "complex_test@example.com")
+    user_pass = os.getenv("USER_PASSWORD", "Password123!")
+    agent_name = os.getenv("AGENT_NAME", "Docker Agent")
+    agent_ident = os.getenv("AGENT_IDENTIFIER", f"docker_agent_{int(time.time())}")
+
+    # 1. Login user to get JWT token
+    login_url = f"{backend_url.rstrip('/')}/api/v1/auth/login"
+    login_data = json.dumps({"email": user_email, "password": user_pass}).encode("utf-8")
+    req = urllib.request.Request(login_url, data=login_data, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            cookies = resp.headers.get_all("Set-Cookie") or []
+            jwt_token = ""
+            for c in cookies:
+                if "access_token=" in c:
+                    jwt_token = c.split("access_token=")[1].split(";")[0]
+
+            if not jwt_token:
+                res_json = json.loads(resp.read().decode("utf-8"))
+                jwt_token = res_json.get("access_token", "")
+
+            if not jwt_token:
+                logger.error("Could not obtain access token during auto-registration login.")
+                return None
+    except Exception as exc:
+        logger.error(f"Auto-registration login failed for '{user_email}': {exc}")
+        return None
+
+    # 2. Extract DataSources from ENV
+    ds_list = []
+    seen = set()
+    for k, v in os.environ.items():
+        if ("SRC_" in k or "DEST_" in k or "SOURCE_DB" in k or "DEST_DB" in k) and ("URL" in k or "URI" in k):
+            ident = extract_identifier_from_env_key(k)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            role = "target" if ("DEST" in k) else "source"
+            db_type = os.getenv(f"{k.replace('_URL', '_TYPE').replace('_URI', '_TYPE')}", "postgresql")
+            ds_list.append({"name": f"{ident.title()} DB", "type": db_type.lower(), "role": role, "identifier": ident})
+
+    if not ds_list:
+        ds_list = [{"name": "Default DB", "type": "postgresql", "role": "source", "identifier": "src_db_1"}]
+
+    # 3. Create Agent
+    create_url = f"{backend_url.rstrip('/')}/api/v1/agents"
+    create_payload = json.dumps({
+        "name": agent_name,
+        "agent_identifier": agent_ident,
+        "version": os.getenv("AGENT_VERSION", "1.0.0"),
+        "data_sources": ds_list,
+    }).encode("utf-8")
+
+    req_create = urllib.request.Request(
+        create_url,
+        data=create_payload,
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {jwt_token}"},
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req_create, timeout=10.0) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+            token = body.get("api_token")
+            logger.info(f"Agent '{agent_name}' auto-registered successfully! Agent ID: {body.get('id')}")
+            return token
+    except Exception as exc:
+        logger.error(f"Failed to auto-register Agent '{agent_name}': {exc}")
+        return None
+
+
 def main():
     logger.info("Initializing Docker Agent process...")
-    backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
+    backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
     agent_token = os.getenv("AGENT_TOKEN", "")
     version = os.getenv("AGENT_VERSION", "1.0.0")
     run_once = os.getenv("AGENT_RUN_ONCE", "false").lower() == "true"
@@ -352,7 +427,11 @@ def main():
     log_configured_databases()
 
     if not agent_token:
-        logger.warning("AGENT_TOKEN environment variable not set. Agent running in unauthenticated mode.")
+        logger.info("AGENT_TOKEN not set. Attempting auto-registration with Control Plane...")
+        agent_token = auto_register_agent(backend_url)
+
+    if not agent_token:
+        logger.error("Could not obtain AGENT_TOKEN. Docker Agent cannot start unauthenticated.")
         return
 
     # Register graceful shutdown handlers

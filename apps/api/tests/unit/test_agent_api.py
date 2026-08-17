@@ -16,7 +16,7 @@ from app.main import app
 from app.modules.agents.agents_models import Agent
 from app.modules.agents.agents_services import AgentService
 from app.modules.execution.execution_models import MigrationJob
-from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+from app.modules.migration_plans.migration_plans_models import MigrationPlan
 
 
 @pytest.mark.asyncio

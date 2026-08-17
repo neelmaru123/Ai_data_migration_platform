@@ -22,7 +22,7 @@ from app.modules.metadata.metadata_models import (
     MetadataConstraint,
     MetadataRelationship,
 )
-from app.modules.transformation_plans.transformation_plans_models import (
+from app.modules.migration_plans.migration_plans_models import (
     MigrationPlan,
     MigrationPlanSnapshot,
 )

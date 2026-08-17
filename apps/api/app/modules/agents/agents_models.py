@@ -15,7 +15,7 @@ from app.core.db import Base
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
     from app.modules.sources.sources_models import DataSource
-    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.migration_plans.migration_plans_models import MigrationPlan
     from app.modules.execution.execution_models import MigrationJob
 
 
