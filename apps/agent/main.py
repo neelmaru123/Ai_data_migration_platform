@@ -416,6 +416,61 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
         return None
 
 
+def poll_and_execute_tasks(backend_url: str, agent_token: str):
+    """Polls backend GET /api/v1/agents/tasks for pending migration execution jobs."""
+    clean_token = agent_token.strip()
+    url = f"{backend_url.rstrip('/')}/api/v1/agents/tasks"
+    req = urllib.request.Request(url, headers={"X-Agent-Token": clean_token}, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=10.0) as resp:
+            tasks = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(tasks, list) or not tasks:
+                return
+
+            logger.info(f"Discovered {len(tasks)} pending execution job(s) for this agent!")
+
+            # Fetch source & target database URLs from environment
+            src_urls = {}
+            dest_url = ""
+            for k, v in os.environ.items():
+                if ("SRC_" in k or "SOURCE_DB" in k) and ("URL" in k or "URI" in k):
+                    ident = extract_identifier_from_env_key(k)
+                    src_urls[ident] = v
+                elif ("DEST_" in k or "DEST_DB" in k) and ("URL" in k or "URI" in k):
+                    dest_url = v
+
+            if not dest_url:
+                dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", "postgresql://postgres:postgres_password@localhost:5432/db_4"))
+
+            for task in tasks:
+                job_id = task.get("job_id")
+                plan_id = task.get("migration_plan_id")
+                logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
+
+                # Fetch full plan AST from API using Agent token auth
+                plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
+                req_plan = urllib.request.Request(
+                    plan_url,
+                    headers={"X-Agent-Token": clean_token},
+                    method="GET"
+                )
+                with urllib.request.urlopen(req_plan, timeout=15.0) as r_plan:
+                    plan_ast = json.loads(r_plan.read().decode("utf-8"))
+
+                # Import and run execution engine
+                from execution_engine import ExecutionOrchestrator
+                ExecutionOrchestrator.run_job(
+                    backend_url=backend_url,
+                    agent_token=clean_token,
+                    job_id=job_id,
+                    plan_ast=plan_ast,
+                    source_db_urls=src_urls,
+                    target_db_url=dest_url,
+                )
+    except Exception as exc:
+        logger.warning(f"Task polling check exception: {exc}")
+
+
 def main():
     logger.info("Initializing Docker Agent process...")
     backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
@@ -450,7 +505,6 @@ def main():
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
     except (ValueError, AttributeError):
-        # Some signals may not be available on all OS/thread setups
         pass
 
     # Initial startup connection handshake with retry loop
@@ -483,13 +537,15 @@ def main():
         logger.info("AGENT_RUN_ONCE is enabled. Exiting startup routine.")
         return
 
-    # Continuous background heartbeat loop for automatic self-healing recovery
-    logger.info(f"Starting continuous background health check loop (interval: {interval}s)...")
+    # Continuous background heartbeat loop for automatic self-healing recovery & task polling
+    logger.info(f"Starting continuous background health check & task polling loop (interval: {interval}s)...")
     try:
         while True:
             time.sleep(interval)
             success = send_heartbeat(backend_url, agent_token, version)
-            if not success:
+            if success:
+                poll_and_execute_tasks(backend_url, agent_token)
+            else:
                 logger.warning("Heartbeat failed in loop. Will retry sooner in 5 seconds...")
                 time.sleep(5)
     except KeyboardInterrupt:

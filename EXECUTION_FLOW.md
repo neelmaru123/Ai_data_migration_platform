@@ -303,8 +303,48 @@ This document maps entry points, call stack sequences, and module dependencies a
 
 ## 3. Impact & Delta Analysis (Phase 3 & Phase 4 Modules)
 - **[NEW]**: [`apps/api/app/modules/migration_plans/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/migration_plans) - Models, schemas, REST endpoints, and Gemini 3.5 Flash Lite engine.
-- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added `auto_register_agent` and header-based authentication (`X-Agent-Token`).
-- **[NEW]**: [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) - Local Polars/DuckDB execution engine for target DDL, 3-way table merges, and bulk streaming.
+- **[NEW]**: [`apps/api/app/modules/execution/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution) - Execution REST API routes (`/api/v1/plans/{plan_id}/execute`, `/api/v1/executions`, `/api/v1/agents/tasks`, `/api/v1/executions/{id}/progress`), using existing `migration_jobs` DB table.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added `auto_register_agent`, `poll_and_execute_tasks` background task poller, and header-based authentication (`X-Agent-Token`).
+- **[NEW]**: [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) - Production local ETL engine featuring `DDLExecutor`, `SourceConnectorFactory` (PostgreSQL, MySQL, MongoDB, CSV, Excel), `ASTTransformer` (all 9 transformation types), `TableMerger` (3-way merge & deduplication), `TargetWriterFactory` (PostgreSQL, MySQL, MongoDB bulk loader), `CheckpointManager` (resumable state), and `ProgressReporter`.
+
+---
+
+## 8. Fault Tolerance & One-Click UI Job Resumption Flow
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/execution_engine.py)
+        │
+        │ ETL Migration encounters an anomaly (Bad Row / Network Drop / Container Crash)
+        ▼
+   Fault Handling Policy Branching:
+        ├────────────────────────────────────────────────────────┐
+        │ Scenario 1: Bad Row Data (Row Isolation)               │ Scenario 2: Network Drop / Container Crash
+        ▼                                                        ▼
+   Bulk insert fails -> Fallback to per-row insert          CheckpointManager saved offset (e.g. Row 850,000)
+   Valid rows saved -> Bad rows logged to Dead-Letter log   Job status set to 'failed' / 'interrupted' in DB
+        │                                                        │
+        └──────────────────────────┬─────────────────────────────┘
+                                   ▼
+   ProgressReporter sends error stack trace to Control Plane (POST /api/v1/execution/{id}/progress)
+                                   │
+                                   ▼
+   Control Plane broadcasts WebSocket event (JOB_FAILED) -> Web UI shows Red Error Card ❌
+                                   │
+                                   ▼
+   User handles error 100% inside Web UI (NO TERMINAL COMMANDS REQUIRED):
+        ├────────────────────────────────────────────────────────┐
+        │ Option A: One-Click 'Resume Migration'                 │ Option B: One-Click 'Edit Plan & Retry'
+        ▼                                                        ▼
+   User clicks 'Resume Migration'                            User fixes mapping in UI & re-approves plan
+   POST /api/v1/executions/{id}/resume                       POST /api/v1/plans/{plan_id}/execute
+   Job status reset to 'queued'                              New job queued in migration_jobs table
+        │                                                        │
+        └──────────────────────────┬─────────────────────────────┘
+                                   ▼
+   Local Docker Agent Task Poller (main.py:poll_and_execute_tasks)
+   Discovers queued job -> Loads CheckpointManager -> RESUMES AT ROW 850,000 INSTANTLY 🚀
+```
+
 
 
 

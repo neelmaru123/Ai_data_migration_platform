@@ -3,13 +3,13 @@ Migration Plans Domain — FastAPI REST API Routes
 """
 
 import uuid
-from typing import Any, Dict, List
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.db import get_db
+from app.modules.agents.agents_dependencies import hash_agent_token
 from app.modules.agents.agents_models import Agent
 from app.modules.migration_plans.migration_plans_schemas import (
     PlanDetailResponse,
@@ -17,7 +17,7 @@ from app.modules.migration_plans.migration_plans_schemas import (
     PlanResponse,
 )
 from app.modules.migration_plans.migration_plans_services import MigrationPlanService
-from app.modules.users.users_dependencies import get_current_active_user
+from app.modules.users.users_dependencies import get_current_active_user, get_current_user
 from app.modules.users.users_models import User
 
 router = APIRouter(prefix="/plans", tags=["Migration Plans & AI Generation"])
@@ -109,12 +109,13 @@ async def list_migration_plans(
 @router.get("/{plan_id}", response_model=PlanDetailResponse)
 async def get_migration_plan(
     plan_id: uuid.UUID,
-    current_user: User = Depends(get_current_active_user),
+    request: Request,
+    x_agent_token: Optional[str] = Header(None, alias="X-Agent-Token"),
     session: AsyncSession = Depends(get_db),
 ):
     """
     Fetch the complete migration plan including full TransformationPlanAST JSON for UI rendering.
-    Verifies ownership.
+    Supports user session or Agent authentication via X-Agent-Token header.
     """
     plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
     if not plan:
@@ -122,11 +123,42 @@ async def get_migration_plan(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Migration plan '{plan_id}' not found.",
         )
-    if plan.user_id != current_user.id:
+
+    # 1. Agent Token Auth
+    if x_agent_token:
+        token_hash = hash_agent_token(x_agent_token)
+        from sqlalchemy import select
+        res_agent = await session.execute(select(Agent).where(Agent.api_token_hash == token_hash))
+        agent = res_agent.scalar_one_or_none()
+        if agent and plan.agent_id == agent.id:
+            return PlanDetailResponse(
+                id=plan.id,
+                agent_id=plan.agent_id,
+                status=plan.status,
+                ai_model=plan.ai_model,
+                confidence_score=plan.confidence_score,
+                created_at=plan.created_at,
+                updated_at=plan.updated_at,
+                plan_data=plan.plan_data,
+                target_config=plan.target_config,
+                prompt_version=plan.prompt_version,
+            )
+
+    # 2. User Auth Fallback
+    try:
+        current_user = await get_current_user(request=request, bearer_token=None, db=session)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide valid user session or X-Agent-Token.",
+        )
+
+    if not current_user or plan.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have permission to view this migration plan.",
         )
+
     return PlanDetailResponse(
         id=plan.id,
         agent_id=plan.agent_id,

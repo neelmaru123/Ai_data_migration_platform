@@ -57,7 +57,7 @@ class MigrationPlanService:
         for ds in data_sources:
             # Build logical alias: src_db_1, src_db_2, etc.
             source_count += 1
-            alias = f"source_db_{source_count}"
+            alias = ds.identifier if ds.identifier else f"source_db_{source_count}"
             alias_map[str(ds.id)] = alias
 
             # Fetch latest snapshot for this DataSource

@@ -117,7 +117,7 @@ class AgentService:
             "env_template": cmd_payload["env_template"],
         }
 
-        return AgentDetailResponse(**response_dict)
+        return AgentDetailResponse.model_validate(response_dict)
 
     @staticmethod
     async def get_agent_by_id(

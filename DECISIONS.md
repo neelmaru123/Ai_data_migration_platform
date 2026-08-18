@@ -383,8 +383,52 @@ Implemented Phase 3 AI Migration Plan Generator using **Gemini 3.5 Flash Lite** 
 - **Alternative A: Passing Raw Data to LLM**: Rejected due to enterprise security violations and severe context window bloat.
 - **Alternative B: Running Data Transformations in Cloud API**: Rejected due to high egress network costs and air-gapped database accessibility limitations.
 
-### 4. Trade-offs & Future Considerations
-- Polars streaming lazily evaluates transformations; batch chunk sizes (e.g. 50,000 rows) can be dynamically tuned based on host system RAM.
+---
+
+## [2026-08-17] - Phase 4: Local Docker Agent ETL Execution Pipeline Implementation
+
+### 1. Decision Summary
+Fully implemented Phase 4 Local Docker Agent ETL Execution Pipeline:
+1. **Control Plane Execution REST API**: Created `/api/v1/plans/{plan_id}/execute`, `/api/v1/executions`, `/api/v1/executions/{id}`, `/api/v1/executions/{id}/progress`, and `/api/v1/agents/tasks` in [`apps/api/app/modules/execution/ execution_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution/execution_routes.py).
+2. **Schema & Model Reuse**: Reused existing `migration_jobs` database table and `MigrationJob` ORM model in [`apps/api/app/modules/execution/execution_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution/execution_models.py) avoiding redundant table creation.
+3. **Local ETL Engine (`execution_engine.py`)**: Built [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) featuring `DDLExecutor`, `SourceConnectorFactory` (PostgreSQL, MySQL, MongoDB, CSV, Excel), `ASTTransformer` (all 9 transformation types), `TableMerger` (multi-DB merge & deduplication), `TargetWriterFactory` (PostgreSQL, MySQL, MongoDB bulk loading), `CheckpointManager` (resumable state), and `ProgressReporter`.
+4. **Task Polling Loop**: Added background task poller in [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) polling `/api/v1/agents/tasks` every 20 seconds.
+5. **Agent Plan Fetching**: Enabled `GET /api/v1/plans/{plan_id}` to authenticate Docker Agents via `X-Agent-Token` header.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Raw Data Transfer**: Data extraction, AST column transformations, table merges, and bulk insertion execute 100% inside customer VPC.
+- **Resumability & Fault Tolerance**: Savepoints stored per chunk in `CheckpointManager` prevent restarting from zero if container restarts.
+- **Cross-Engine Support**: Unified Polars memory dataframes bridge relational (SQL), document (NoSQL), and flat file (CSV/Excel) sources into any target database dialect.
+
+---
+
+## [2026-08-17] - Human-in-the-Loop AI Transformation Plan Review & Approval Gateway
+
+### 1. Decision Summary
+Enforced explicit **Human-in-the-Loop (HITL) Plan Review and Approval Gateway** between AI Plan Generation (`POST /api/v1/plans/generate`) and Migration Execution (`POST /api/v1/plans/{plan_id}/execute`). Data migration jobs **NEVER execute automatically** upon AI plan generation; explicit user approval in the Web UI is strictly required.
+
+### 2. Why This Approach? (Rationale)
+- **Safety & Control**: AI-generated transformation plans (table mappings, column type casts, deduplication rules) must be verified by a human database administrator or developer before touching production databases.
+- **Editable Blueprint**: Allows users to inspect DDL scripts, adjust column mappings, or customize deduplication rules in the UI prior to execution.
+- **Auditability**: Migration job state transitions (`draft` → `generated` → `approved` → `queued` → `running` → `completed`) maintain a strict audit trail of who approved which migration job at what time.
+
+---
+
+## [2026-08-18] - Fault Tolerance, Row Isolation, & One-Click UI Job Resumption Architecture
+
+### 1. Decision Summary
+Implemented multi-layered fault tolerance across local Agent execution and Control Plane orchestration:
+1. **Row-Level Error Isolation**: When bulk inserts encounter bad data, `TargetWriterFactory` falls back to per-row insertion, isolating corrupted rows into a dead-letter log while allowing valid rows to insert cleanly.
+2. **Chunk Checkpointing (`CheckpointManager`)**: Progress is saved per table chunk (`processed_rows`, `offset`, `chunk_index`). Crashed or interrupted jobs can be resumed from the exact last saved offset rather than starting from row 0.
+3. **One-Click Web UI Resume/Retry**: Users never need to touch the terminal to handle failures. Clicking **"Resume Migration"** or **"Edit Plan & Retry"** in the Web UI updates the job state in the Control Plane, and the background Docker Agent automatically picks up the job via task polling.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Terminal Interventions**: Non-technical users and DBAs manage job execution, error inspection, and retries 100% from the Web Dashboard.
+- **Data Loss Prevention**: Isolating bad rows prevents a single bad string from aborting a 1,000,000-row migration.
+- **Resource & Time Savings**: Checkpointing prevents re-fetching and re-transforming millions of already-processed rows after a container crash or network drop.
+
+
+
 
 
 

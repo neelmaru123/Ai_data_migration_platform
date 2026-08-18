@@ -13,6 +13,7 @@ from app.core.db import AsyncSessionLocal
 from app.core.logging import logger
 from app.modules.agents.agents_routes import router as agents_router
 from app.modules.agents.agents_services import AgentService
+from app.modules.execution.execution_routes import execution_router
 from app.modules.metadata.metadata_routes import router as metadata_router
 from app.modules.migration_plans.migration_plans_routes import router as migration_plans_router
 from app.modules.sources.sources_routes import router as sources_router
@@ -72,6 +73,7 @@ app = FastAPI(
 # Register API Routers
 app.include_router(sources_router, prefix=settings.API_V1_STR)
 app.include_router(users_router, prefix=settings.API_V1_STR)
+app.include_router(execution_router, prefix=settings.API_V1_STR)
 app.include_router(agents_router, prefix=settings.API_V1_STR)
 app.include_router(metadata_router, prefix=settings.API_V1_STR)
 app.include_router(migration_plans_router, prefix=settings.API_V1_STR)
