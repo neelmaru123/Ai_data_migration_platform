@@ -7,7 +7,7 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, List, Optional
-from sqlalchemy import DateTime, ForeignKey, String
+from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -15,12 +15,15 @@ from app.core.db import Base
 if TYPE_CHECKING:
     from app.modules.users.users_models import User
     from app.modules.sources.sources_models import DataSource
-    from app.modules.transformation_plans.transformation_plans_models import MigrationPlan
+    from app.modules.migration_plans.migration_plans_models import MigrationPlan
     from app.modules.execution.execution_models import MigrationJob
 
 
 class Agent(Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "agent_identifier", name="uq_agents_user_identifier"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -33,7 +36,7 @@ class Agent(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     agent_identifier: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
+        String(255), index=True, nullable=False
     )
     api_token_hash: Mapped[str] = mapped_column(
         String(255),

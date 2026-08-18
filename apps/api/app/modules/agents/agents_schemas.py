@@ -3,7 +3,7 @@ Agents Domain Schemas (Pydantic boundaries)
 """
 
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Literal, Optional
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -12,6 +12,8 @@ from app.modules.sources.sources_schemas import (
     VALID_SOURCE_ROLES,
     VALID_SOURCE_TYPES,
 )
+
+VALID_AGENT_STATUS = Literal["online", "offline", "busy", "degraded", "error"]
 
 
 class InitialDataSourceCreate(BaseModel):
@@ -34,16 +36,30 @@ class AgentCreate(BaseModel):
 
 
 class AgentUpdate(BaseModel):
-    """Request payload to update agent details."""
+    """Request payload to update agent details (name, version). Status is managed strictly by agent heartbeats & backend watchdog."""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    status: Optional[str] = Field(None, max_length=50, examples=["online", "offline", "busy"])
     version: Optional[str] = Field(None, max_length=50, examples=["1.0.1"])
+
+
+class DataSourceHealthReport(BaseModel):
+    """Health and connectivity report for an individual Data Source on the Agent."""
+    identifier: str = Field(..., description="Logical identifier of the data source on the agent")
+    is_healthy: bool = Field(..., description="Whether database connection and credential check succeeded")
+    error_type: Optional[str] = Field(None, description="Classified error type (e.g. ConnectionRefused, AuthenticationFailed)")
+    error_message: Optional[str] = Field(None, description="Sanitized diagnostic error message")
+    latency_ms: float = Field(default=0.0, description="Ping/query latency in milliseconds")
+    server_version: Optional[str] = Field(None, description="Database server version if connection succeeded")
+    database_name: Optional[str] = Field(None, description="Database or collection name")
 
 
 class AgentHeartbeat(BaseModel):
-    """Request payload for agent periodic heartbeat status ping."""
-    status: str = Field(default="online", max_length=50, examples=["online", "busy"])
+    """Request payload for agent periodic heartbeat status ping and data source diagnostics."""
+    status: VALID_AGENT_STATUS = "online"
     version: Optional[str] = Field(None, max_length=50, examples=["1.0.1"])
+    data_sources: Optional[List[DataSourceHealthReport]] = Field(
+        default=None,
+        description="Optional list of health diagnostics for attached data sources",
+    )
 
 
 class AgentResponse(BaseModel):

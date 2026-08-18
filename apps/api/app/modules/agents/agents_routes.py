@@ -2,6 +2,7 @@
 FastAPI Router Endpoints for Agents Domain
 """
 
+import json
 import uuid
 from typing import List, Optional
 
@@ -92,7 +93,7 @@ async def update_agent(
     session: AsyncSession = Depends(get_db),
 ):
     """
-    Update Docker Agent details (name, status, version).
+    Update Docker Agent details (name, version).
     Verifies agent ownership.
     """
     return await AgentService.update_agent(
@@ -158,7 +159,15 @@ async def agent_websocket_endpoint(
     await manager.connect(str(agent_id), websocket)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            if data:
+                try:
+                    msg = json.loads(data)
+                    if msg.get("type") == "ping":
+                        await websocket.send_text(json.dumps({"type": "pong"}))
+                except json.JSONDecodeError:
+                    if data.strip().lower() == "ping":
+                        await websocket.send_text(json.dumps({"type": "pong"}))
     except WebSocketDisconnect:
         manager.disconnect(str(agent_id), websocket)
 

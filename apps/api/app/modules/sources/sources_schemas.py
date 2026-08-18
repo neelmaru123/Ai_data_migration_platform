@@ -35,6 +35,9 @@ class DataSourceResponse(BaseModel):
     type: str
     role: str
     identifier: str
+    status: str = "untested"
+    last_error: Optional[str] = None
+    last_checked_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

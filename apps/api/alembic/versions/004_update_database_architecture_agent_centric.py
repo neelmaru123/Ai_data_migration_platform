@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 revision: str = "004_agent_centric_arch"
-down_revision: Union[str, None] = "003_add_google_auth"
+down_revision: Union[str, None] = "003_add_google_auth_to_users"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

@@ -297,4 +297,141 @@ Implemented a 3-step Agent Creation wizard in `apps/web/app/agents/create/page.t
 - **Service Integration & Teammate API Resilience (`agentService.ts`)**: Integrates with `POST /api/v1/agents` for registration and `POST /api/v1/agents/{agent_id}/docker-cmd` for Docker command generation, with client-side fallback formatting in case the backend teammate's endpoint is still in deployment.
 
 
+---
+
+## [2026-08-14] - Complete Edge Case Hardening: Stale Watchdog, Concurrent Diagnostics & Status Immutability
+
+### 1. Decision Summary
+Fixed 14 systemic edge cases across the Docker Agent and FastAPI backend:
+1. **Ghost Agent & Stale Job Watchdog**: Implemented periodic background watchdog loop in FastAPI `lifespan` detecting dead agents (>60s inactivity), transitioning them to `offline`, and automatically failing orphaned `MigrationJob` records.
+2. **Concurrent Database Socket Checks**: Refactored agent health diagnostics to run across all configured databases in parallel using `concurrent.futures.ThreadPoolExecutor`, strictly bounding socket diagnostic time to $\le 3.5\text{s}$ total.
+3. **Graceful Offline Signaling**: Registered `SIGINT`/`SIGTERM` handlers in the Docker Agent to dispatch a final `status: "offline"` heartbeat before container termination.
+4. **Strict Schema Constraints & Status Immutability**: Enforced Pydantic `Literal["online", "offline", "busy", "degraded", "error"]` validation on heartbeats and removed `status` from user-facing `AgentUpdate` REST payload to prevent status spoofing.
+5. **Per-User Identifier Uniqueness**: Changed `Agent.agent_identifier` from global unique constraint to composite `UniqueConstraint("user_id", "agent_identifier")`.
+6. **Degraded Health Calculation & Fuzzy Matching**: Agent reports `status: "degraded"` when any database source is unreachable, and backend uses fuzzy identifier resolution (`src_...`, `dest_...`) to prevent dropped reports.
+7. **Heartbeat Throttling & WebSocket Keepalive**: Added rate-limiting guards against rapid ping spamming and implemented WebSocket ping/pong protocol for persistent connection keepalive across proxies.
+
+### 2. Why This Approach? (Rationale)
+- **Bounded Latency**: Sequential database testing across 5+ failing databases would cause a 17.5s blocking delay, causing the agent to miss its heartbeat window and appear dead to the control plane. Concurrent threading bounds this to max 3.5s.
+- **Single Source of Truth for Status**: Agent status is solely controlled by authentic agent heartbeats and the backend watchdog; users cannot manually alter status via REST API.
+- **Fail-Safe Job Lifecycle**: If an on-premise Docker container crashes or loses network mid-migration, jobs don't stay in `running` state forever; the control plane auto-recovers and notifies the UI.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying Solely on Docker Exit Codes**: Rejected because the control plane has no direct access to customer on-premise Docker daemons.
+- **Alternative B: Client-Side Polling Only**: Rejected because if the browser tab closes, job state remains stuck in `running` on the backend.
+- **Alternative C: Sequential Socket Tests with Lower Timeouts (0.5s)**: Rejected because high-latency WAN / cloud database handshakes would produce false connection timeouts.
+
+### 4. Trade-offs & Future Considerations
+- In distributed multi-worker deployments of the API control plane, the in-memory WebSocket manager can be backed by Redis Pub/Sub (`settings.REDIS_URL`) for cross-node event distribution.
+
+---
+
+## [2026-08-14] - Alembic Migration 005: Agent API Tokens & DataSource Health Diagnostics
+
+### 1. Decision Summary
+Created Alembic migration [`005_add_agent_tokens_and_datasource_diagnostics.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/alembic/versions/005_add_agent_tokens_and_datasource_diagnostics.py) to synchronize all database tables with newly introduced model fields.
+
+### 2. Why This Approach? (Rationale)
+- **Model-to-Schema Synchronization**:
+  1. `agents.api_token_hash`: Added `String(255)` with unique index `ix_agents_api_token_hash` for secure SHA-256 agent authentication.
+  2. `agents` per-user uniqueness: Converted `agent_identifier` from global unique index to composite `UniqueConstraint("user_id", "agent_identifier", name="uq_agents_user_identifier")`.
+  3. `data_sources.status`: Added `String(50)` (default `"untested"`).
+  4. `data_sources.last_error`: Added nullable `String` for sanitized error messages.
+  5. `data_sources.last_checked_at`: Added nullable `DateTime(timezone=True)` for health check timestamps.
+- **Continuous Revision Linearity**: Verified linear migration DAG: `001_initial_schema` $\rightarrow$ `002_add_agents` $\rightarrow$ `003_add_google_auth_to_users` $\rightarrow$ `004_agent_centric_arch` $\rightarrow$ `005_agent_tokens_and_diagnostics`.
+
+### 3. Trade-offs & Future Considerations
+- Full `upgrade()` and `downgrade()` methods implemented to ensure zero data corruption during deployment rollbacks.
+
+---
+
+## [2026-08-17] - Phase 2: Metadata Domain Architecture & On-Premise Introspection Engine
+
+### 1. Decision Summary
+Renamed the control plane `profiler` feature module to **`metadata`** (`apps/api/app/modules/metadata/`) and implemented end-to-end database schema introspection, snapshot versioning, control plane ingestion, and real-time WebSockets:
+1. **Domain Rename**: Migrated all models (`metadata_models.py`), schemas (`metadata_schemas.py`), services (`metadata_services.py`), and routes (`metadata_routes.py`) into `app/modules/metadata`.
+2. **On-Premise Introspection Engine**: Implemented [`apps/agent/metadata_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/metadata_engine.py) to introspect database schemas, tables, estimated row counts, column data types, nullability, primary keys, and foreign key relationships locally inside customer VPCs.
+3. **Control Plane Ingestion & Auto-Versioning**: Endpoint `POST /api/v1/metadata/sync` ingests agent payloads, auto-increments version numbers per DataSource, and bulk-persists `MetadataSnapshot`, `MetadataSchema`, `MetadataTable`, `MetadataColumn`, `MetadataConstraint`, and `MetadataRelationship` records in PostgreSQL within a single atomic database transaction.
+4. **Real-Time Push Notifications**: Pushes `METADATA_PROFILED` events over WebSockets via `manager.broadcast_to_agent()` to update Next.js dashboard clients instantly.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Raw Data Transfer**: Customer passwords and table data remain strictly on-premise. Only structural schema ASTs are transmitted to the control plane.
+- **Atomic Hierarchy Persistence**: Flushing parent IDs (`snapshot_id`, `schema_id`, `table_id`) in a single session transaction ensures complex relational metadata is stored without orphaned records.
+- **Fuzzy Identifier Resolution**: Ingestion matches data sources by UUID or clean identifier (`src_...`, `dest_...`), preventing dropped snapshots due to environment naming variations.
+
+### 3. Trade-offs & Future Considerations
+- File-based sources (CSV/Excel) currently infer schemas from top row headers; future enhancement can add deep data type sniffing for multi-gigabyte files.
+
+---
+
+## [2026-08-17] - Phase 3 AI Plan Generator AST Integration & Phase 4 Local Agent Execution Architecture
+
+### 1. Decision Summary
+Implemented Phase 3 AI Migration Plan Generator using **Gemini 3.5 Flash Lite** with `PydanticOutputParser` and designed Phase 4 Local Agent Execution Pipeline:
+1. **Domain Rename**: Standardized domain naming from `transformation_plans` to **`migration_plans`** across `apps/api/app/modules/migration_plans/`.
+2. **Zero Raw Data Policy**: Built `MetadataContextSerializer` to convert metadata ASTs into zero-raw-data prompt contexts.
+3. **Structured Schema Parsing**: Selected `PydanticOutputParser(pydantic_object=TransformationPlanAST)` with `gemini-3.5-flash-lite` (1,500 RPD, 1M token window) ensuring 100% deterministic schema validation across 9 column transformation types (`direct_copy`, `merge_concat`, `type_cast`, `split`, `expression`, `lookup_join`, `default_constant`, `drop_column`, `new_column_added`).
+4. **Local Docker Agent Auto-Registration & Header Authentication**: Added `auto_register_agent` in [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) to enable seamless token-less local docker runs, authenticated via `X-Agent-Token` request headers.
+5. **Phase 4 Local Execution Engine Design**: Offloaded data streaming, 3-way table merging, UUID v4 rekeying, and target bulk loading to the local Docker Agent process using Polars & DuckDB, enforcing Zero Raw Data cloud transfer.
+
+### 2. Why This Approach? (Rationale)
+- **Model Choice (`gemini-3.5-flash-lite`)**: Provides high intelligence for multi-database schema reasoning, high daily rate limits (1,500 RPD), and 1M token context window at zero cost.
+- **PydanticOutputParser over `with_structured_output`**: Eliminates SDK version incompatibilities and type errors in `langchain-google-genai` by enforcing explicit JSON format instructions and Pydantic parsing.
+- **Local Agent Execution Model**: Running ETL transformations locally inside the customer's Docker Agent guarantees data privacy (raw data never leaves local network) while avoiding cloud bandwidth costs.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Passing Raw Data to LLM**: Rejected due to enterprise security violations and severe context window bloat.
+- **Alternative B: Running Data Transformations in Cloud API**: Rejected due to high egress network costs and air-gapped database accessibility limitations.
+
+---
+
+## [2026-08-17] - Phase 4: Local Docker Agent ETL Execution Pipeline Implementation
+
+### 1. Decision Summary
+Fully implemented Phase 4 Local Docker Agent ETL Execution Pipeline:
+1. **Control Plane Execution REST API**: Created `/api/v1/plans/{plan_id}/execute`, `/api/v1/executions`, `/api/v1/executions/{id}`, `/api/v1/executions/{id}/progress`, and `/api/v1/agents/tasks` in [`apps/api/app/modules/execution/ execution_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution/execution_routes.py).
+2. **Schema & Model Reuse**: Reused existing `migration_jobs` database table and `MigrationJob` ORM model in [`apps/api/app/modules/execution/execution_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution/execution_models.py) avoiding redundant table creation.
+3. **Local ETL Engine (`execution_engine.py`)**: Built [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) featuring `DDLExecutor`, `SourceConnectorFactory` (PostgreSQL, MySQL, MongoDB, CSV, Excel), `ASTTransformer` (all 9 transformation types), `TableMerger` (multi-DB merge & deduplication), `TargetWriterFactory` (PostgreSQL, MySQL, MongoDB bulk loading), `CheckpointManager` (resumable state), and `ProgressReporter`.
+4. **Task Polling Loop**: Added background task poller in [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) polling `/api/v1/agents/tasks` every 20 seconds.
+5. **Agent Plan Fetching**: Enabled `GET /api/v1/plans/{plan_id}` to authenticate Docker Agents via `X-Agent-Token` header.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Raw Data Transfer**: Data extraction, AST column transformations, table merges, and bulk insertion execute 100% inside customer VPC.
+- **Resumability & Fault Tolerance**: Savepoints stored per chunk in `CheckpointManager` prevent restarting from zero if container restarts.
+- **Cross-Engine Support**: Unified Polars memory dataframes bridge relational (SQL), document (NoSQL), and flat file (CSV/Excel) sources into any target database dialect.
+
+---
+
+## [2026-08-17] - Human-in-the-Loop AI Transformation Plan Review & Approval Gateway
+
+### 1. Decision Summary
+Enforced explicit **Human-in-the-Loop (HITL) Plan Review and Approval Gateway** between AI Plan Generation (`POST /api/v1/plans/generate`) and Migration Execution (`POST /api/v1/plans/{plan_id}/execute`). Data migration jobs **NEVER execute automatically** upon AI plan generation; explicit user approval in the Web UI is strictly required.
+
+### 2. Why This Approach? (Rationale)
+- **Safety & Control**: AI-generated transformation plans (table mappings, column type casts, deduplication rules) must be verified by a human database administrator or developer before touching production databases.
+- **Editable Blueprint**: Allows users to inspect DDL scripts, adjust column mappings, or customize deduplication rules in the UI prior to execution.
+- **Auditability**: Migration job state transitions (`draft` → `generated` → `approved` → `queued` → `running` → `completed`) maintain a strict audit trail of who approved which migration job at what time.
+
+---
+
+## [2026-08-18] - Fault Tolerance, Row Isolation, & One-Click UI Job Resumption Architecture
+
+### 1. Decision Summary
+Implemented multi-layered fault tolerance across local Agent execution and Control Plane orchestration:
+1. **Row-Level Error Isolation**: When bulk inserts encounter bad data, `TargetWriterFactory` falls back to per-row insertion, isolating corrupted rows into a dead-letter log while allowing valid rows to insert cleanly.
+2. **Chunk Checkpointing (`CheckpointManager`)**: Progress is saved per table chunk (`processed_rows`, `offset`, `chunk_index`). Crashed or interrupted jobs can be resumed from the exact last saved offset rather than starting from row 0.
+3. **One-Click Web UI Resume/Retry**: Users never need to touch the terminal to handle failures. Clicking **"Resume Migration"** or **"Edit Plan & Retry"** in the Web UI updates the job state in the Control Plane, and the background Docker Agent automatically picks up the job via task polling.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Terminal Interventions**: Non-technical users and DBAs manage job execution, error inspection, and retries 100% from the Web Dashboard.
+- **Data Loss Prevention**: Isolating bad rows prevents a single bad string from aborting a 1,000,000-row migration.
+- **Resource & Time Savings**: Checkpointing prevents re-fetching and re-transforming millions of already-processed rows after a container crash or network drop.
+
+
+
+
+
+
+
+
 

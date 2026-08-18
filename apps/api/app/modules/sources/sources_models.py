@@ -4,7 +4,7 @@ Sources Domain Database Models (Data Sources Identity)
 
 import uuid
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Optional
 from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -12,7 +12,7 @@ from app.core.db import Base
 
 if TYPE_CHECKING:
     from app.modules.agents.agents_models import Agent
-    from app.modules.profiler.profiler_models import MetadataSnapshot
+    from app.modules.metadata.metadata_models import MetadataSnapshot
 
 
 class DataSource(Base):
@@ -40,6 +40,13 @@ class DataSource(Base):
     identifier: Mapped[str] = mapped_column(
         String(255), nullable=False
     )  # Logical/local identifier for the source on the agent
+    status: Mapped[str] = mapped_column(
+        String(50), default="untested", nullable=False
+    )  # untested, healthy, unreachable, auth_failed
+    last_error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_checked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

@@ -7,6 +7,7 @@ import urllib.parse
 import uuid
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi.responses import RedirectResponse
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
 import httpx
@@ -170,7 +171,7 @@ async def google_oauth_login(response: Response):
 
 @router.get(
     "/auth/google/callback",
-    response_model=TokenResponse,
+    response_class=RedirectResponse,
     summary="Handle Google OAuth 2.0 Authorization Callback",
 )
 async def google_oauth_callback(
@@ -184,7 +185,7 @@ async def google_oauth_callback(
     """
     Callback endpoint for Google OAuth authorization code exchange.
     Verifies CSRF state, exchanges authorization code for tokens, verifies Google ID token,
-    creates/links application user, and sets HTTP-only session cookies.
+    creates/links application user, sets HTTP-only session cookies, and redirects to frontend.
     """
     if error:
         raise HTTPException(
@@ -204,8 +205,6 @@ async def google_oauth_callback(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="OAuth state verification failed (CSRF mismatch).",
         )
-
-    response.delete_cookie(key="oauth_state", path="/")
 
     token_url = "https://oauth2.googleapis.com/token"
     token_data = {
@@ -259,12 +258,14 @@ async def google_oauth_callback(
         access_token = create_access_token(subject=user.id)
         refresh_token = create_refresh_token(subject=user.id)
 
-        _set_auth_cookies(response, access_token, refresh_token)
-
-        return TokenResponse(
-            message="Google authentication successful.",
-            user=UserResponse.model_validate(user),
+        redirect_response = RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/agents/create",
+            status_code=status.HTTP_302_FOUND
         )
+        redirect_response.delete_cookie(key="oauth_state", path="/")
+        _set_auth_cookies(redirect_response, access_token, refresh_token)
+
+        return redirect_response
 
     except HTTPException:
         raise

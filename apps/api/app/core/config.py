@@ -33,8 +33,11 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://redis:6379/0"
 
     GEMINI_API_KEY: str = ""
-    AI_PROVIDER: str = "gemini"
-    AI_MODEL_NAME: str = "gemini-1.5-pro"
+    OPENAI_API_KEY: str = ""
+    LLM_PROVIDER: Literal["gemini", "openai"] = "gemini"
+    LLM_MODEL: str = "gemini-3.5-flash-lite"
+    LLM_TEMPERATURE: float = 0.0
+    LLM_MAX_RETRIES: int = 2
 
     MAX_CLOUD_ROWS: int = 500_000
     MAX_CLOUD_SIZE_MB: float = 100.0

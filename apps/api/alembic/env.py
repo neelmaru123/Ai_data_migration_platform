@@ -12,8 +12,8 @@ from app.core.db import Base
 import app.modules.users.users_models  # noqa: F401
 import app.modules.agents.agents_models  # noqa: F401
 import app.modules.sources.sources_models  # noqa: F401
-import app.modules.profiler.profiler_models  # noqa: F401
-import app.modules.transformation_plans.transformation_plans_models  # noqa: F401
+import app.modules.metadata.metadata_models  # noqa: F401
+import app.modules.migration_plans.migration_plans_models  # noqa: F401
 import app.modules.execution.execution_models  # noqa: F401
 
 config = context.config

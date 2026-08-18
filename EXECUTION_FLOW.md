@@ -90,6 +90,56 @@ This document maps entry points, call stack sequences, and module dependencies a
 
 ---
 
+## 7. Metadata Introspection & Control Plane Ingestion Flow (Phase 2)
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/main.py)
+        │
+        │ 1. Startup handshake succeeds -> Trigger AgentMetadataEngine
+        ▼
+  Metadata Introspection Engine (apps/agent/metadata_engine.py)
+        │
+        │ 1. Introspect local DBs via SQL information_schema queries
+        │ 2. Construct Schema AST: Schemas, Tables, Columns, Constraints, FK Relationships
+        │ 3. HTTP POST /api/v1/metadata/sync with X-Agent-Token header
+        ▼
+  FastAPI Control Plane Gateway (apps/api/app/modules/metadata/metadata_routes.py:sync_agent_metadata)
+        │
+        │ 1. Authenticate agent token via get_current_agent dependency
+        │ 2. Delegate payload to MetadataService.ingest_agent_metadata_snapshot
+        ▼
+  Metadata Service (apps/api/app/modules/metadata/metadata_services.py)
+        │
+        │ 1. Match target DataSource entity by UUID or clean identifier
+        │ 2. Query latest snapshot version & compute next_version = version + 1
+        │ 3. Persist MetadataSnapshot header
+        │ 4. Bulk insert MetadataSchema, MetadataTable, MetadataColumn, MetadataConstraint
+        │ 5. Map foreign key column IDs & insert MetadataRelationship records
+        │ 6. Update DataSource status = 'profiled' & commit transaction
+        │ 7. Push METADATA_PROFILED event over WebSocket via manager.broadcast_to_agent()
+        ▼
+  Dashboard Web UI receives WebSocket notification & renders full DB Schema Tree
+```
+
+---
+
+## 8. Impact & Delta Analysis (Phase 2 Metadata Domain)
+
+- **[RENAMED]**: `apps/api/app/modules/profiler/` $\rightarrow$ [`apps/api/app/modules/metadata/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata) - Renamed feature module to `metadata` domain.
+- **[NEW]**: [`apps/agent/metadata_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/metadata_engine.py) - Local SQL database schema introspection engine for on-premise Docker Agent.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_schemas.py) - Pydantic validation schemas for metadata snapshot ingestion and REST DTOs.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_services.py) - Business operations service handling snapshot auto-versioning, relational persistence, and WebSocket broadcasting.
+- **[NEW]**: [`apps/api/app/modules/metadata/metadata_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/metadata/metadata_routes.py) - REST API endpoints (`/api/v1/metadata/sync`, `/api/v1/metadata/sources/{id}/snapshots`).
+- **[NEW]**: [`apps/api/tests/unit/test_metadata_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_metadata_api.py) - Automated test suite for metadata snapshot sync, versioning, and ownership security.
+- **[NEW]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_command_generator.py) - Dynamic CLI & environment template generator for multi-source and target migration Docker containers.
+- **[NEW]**: [`apps/api/tests/unit/test_agent_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_command_generator.py) - Unit test suite for Docker command generation across database dialects and shell syntaxes.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `BACKEND_URL` and `AGENT_DOCKER_IMAGE` configuration properties.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `docker_command`, `docker_command_powershell`, `docker_command_oneline`, `env_template` to `AgentDetailResponse` and defined `AgentDockerCommandResponse`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Integrated `AgentCommandGenerator` into `create_agent` and added `get_agent_docker_command`.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added concurrent ThreadPoolExecutor socket checks, degraded status computation, graceful offline signal handling, and retry loop backoff.
+
+---
+
 ## 4. Impact & Delta Analysis
 
 - **[NEW]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_command_generator.py) - Dynamic CLI & environment template generator for multi-source and target migration Docker containers.
@@ -97,10 +147,54 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/core/config.py) - Added `BACKEND_URL` and `AGENT_DOCKER_IMAGE` configuration properties.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `docker_command`, `docker_command_powershell`, `docker_command_oneline`, `env_template` to `AgentDetailResponse` and defined `AgentDockerCommandResponse`.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Integrated `AgentCommandGenerator` into `create_agent` and added `get_agent_docker_command`.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_routes.py) - Documented `POST /agents` and added `GET /agents/{agent_id}/docker-command` endpoint.
-- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added safe startup scanning and logging of configured source/destination database environments.
-- **[MODIFIED]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Added assertions for Docker command response and verified `GET /agents/{id}/docker-command`.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added concurrent ThreadPoolExecutor socket checks, degraded status computation, graceful offline signal handling, and retry loop backoff.
+- **[MODIFIED]**: [`apps/api/app/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/main.py) - Replaced on_event with modern lifespan context manager and started periodic background stale watchdog task.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_models.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_models.py) - Replaced global unique constraint on `agent_identifier` with composite `UniqueConstraint("user_id", "agent_identifier")`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_schemas.py) - Added `VALID_AGENT_STATUS` Literal and removed `status` from `AgentUpdate`.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/agents/agents_services.py) - Added per-user uniqueness check, fuzzy data source identifier matching, and `check_stale_agents_and_jobs` watchdog recovery.
+- **[MODIFIED]**: [`apps/api/tests/unit/test_agent_api.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/tests/unit/test_agent_api.py) - Added comprehensive edge case validation tests (watchdog recovery, per-user uniqueness, status validation, graceful shutdown).
 - **[UNCHANGED]**: Existing authentication, profiling, and transformation database models.
+
+---
+
+## 5. Agent Heartbeat Diagnostics & Watchdog Recovery Flow
+
+```text
+  Docker Agent (apps/agent/main.py)
+        │
+        │ 1. Collect configured DB URLs from env (SRC_..._URL, DEST_..._URL)
+        │ 2. Execute parallel socket checks via ThreadPoolExecutor (timeout ≤ 3.5s)
+        │ 3. Compute status: 'online' (all OK), 'degraded' (any failing), or 'offline' (on SIGTERM)
+        ▼
+  HTTP POST /api/v1/agents/heartbeat (X-Agent-Token: ag_live_...)
+        │
+        ▼
+  FastAPI Ingress (apps/api/app/modules/agents/agents_routes.py)
+        │
+        │ 1. Authenticate agent via SHA-256 token hash (get_current_agent)
+        │ 2. Delegate to AgentService.process_agent_heartbeat
+        ▼
+  Agent Service (apps/api/app/modules/agents/agents_services.py)
+        │
+        │ 1. Update agent.status, version, last_seen_at
+        │ 2. Fuzzy match incoming reports against data_sources (pg_primary, src_pg_primary)
+        │ 3. Update DataSource status ('healthy', 'ConnectionRefused', 'UnfilledPlaceholder')
+        │ 4. Broadcast real-time WebSocket event (AGENT_CONNECTED / AGENT_HEARTBEAT / AGENT_STATUS_CHANGED)
+        ▼
+  Web UI Dashboard receives live WebSocket update (status badges & diagnostic errors update in real-time)
+
+========================================================================================
+
+  Background Stale Watchdog (apps/api/app/main.py -> AgentService.check_stale_agents_and_jobs)
+        │
+        │ Runs every 20 seconds in FastAPI Lifespan
+        │ 1. Queries agents where status IN ('online', 'busy', 'degraded') AND last_seen_at < (NOW - 60s)
+        │ 2. Marks stale agents as status='offline'
+        │ 3. Finds any MigrationJob with status IN ('running', 'preparing') for those agents
+        │ 4. Transitions orphaned jobs to status='failed', error_message='Agent disconnected or timed out'
+        │ 5. Broadcasts AGENT_DISCONNECTED and JOB_FAILED over WebSockets to UI
+```
+
 
 
 
@@ -163,6 +257,95 @@ This document maps entry points, call stack sequences, and module dependencies a
 - **[NEW]**: [`apps/web/components/agents/DatabaseConfigForm.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) - Dynamic source and destination database form with engine selection (`postgresql`, `mysql`, `mongodb`, `csv`, `excel`).
 - **[NEW]**: [`apps/web/components/agents/DockerCommandOutput.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) - Terminal command output with tabs, copy-to-clipboard, and live agent status badge.
 - **[NEW]**: [`apps/web/app/agents/create/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx) - Main wizard layout page at `/agents/create`.
+
+---
+
+# Execution Flow - AI Migration Plan Generation & Local Execution (Phase 3 & Phase 4)
+
+## 1. Entry Points
+- **Plan Generation**: HTTP POST `/api/v1/plans/generate` in [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/migration_plans/migration_plans_routes.py)
+- **Local Agent Run**: Docker Agent main entry point [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py)
+
+## 2. Step-by-Step Execution Sequence
+
+```text
+  Client (Web / Swagger / Script)
+        │
+        │ 1. POST /api/v1/plans/generate (agent_id, target_config)
+        ▼
+  FastAPI Route (migration_plans_routes.py:generate_plan)
+        │
+        │ 2. Fetch Agent's MetadataSnapshots for all DataSources
+        │ 3. MetadataContextSerializer converts snapshots to Zero-Raw-Data Context
+        ▼
+  AI Plan Generator Service (migration_plans_llm.py:LLMPlanGeneratorService)
+        │
+        │ 4. Invokes ChatGoogleGenerativeAI (gemini-3.5-flash-lite)
+        │ 5. Parses output using PydanticOutputParser(TransformationPlanAST)
+        ▼
+  Control Plane Persistence (migration_plans_services.py)
+        │
+        │ 6. Persists MigrationPlan DB record & broadcasts WebSocket event
+        │ 7. Client receives complete TransformationPlanAST (DDL + ETL rules)
+        ▼
+  Local Docker Agent Execution (Phase 4 Pipeline)
+        │
+        │ 8. Local Agent receives EXECUTE_MIGRATION command
+        │ 9. Target DDL Executor executes pre_migration_ddl on local target DB (db_4)
+        │ 10. Polars / DuckDB reads chunks from local source DBs (db_1, db_2, db_3)
+        │ 11. Applies column AST mapping (merge_concat, split, type_cast, rekey)
+        │ 12. Performs in-memory multi-database table merge & email deduplication
+        │ 13. Bulk-loads transformed rows directly into local target DB (db_4)
+        │ 14. Executes post_migration_ddl (foreign key constraints)
+        ▼
+  Progress Reporting -> Docker Agent posts status & row counts back to Control Plane
+```
+
+## 3. Impact & Delta Analysis (Phase 3 & Phase 4 Modules)
+- **[NEW]**: [`apps/api/app/modules/migration_plans/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/migration_plans) - Models, schemas, REST endpoints, and Gemini 3.5 Flash Lite engine.
+- **[NEW]**: [`apps/api/app/modules/execution/`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/api/app/modules/execution) - Execution REST API routes (`/api/v1/plans/{plan_id}/execute`, `/api/v1/executions`, `/api/v1/agents/tasks`, `/api/v1/executions/{id}/progress`), using existing `migration_jobs` DB table.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/main.py) - Added `auto_register_agent`, `poll_and_execute_tasks` background task poller, and header-based authentication (`X-Agent-Token`).
+- **[NEW]**: [`apps/agent/execution_engine.py`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py) - Production local ETL engine featuring `DDLExecutor`, `SourceConnectorFactory` (PostgreSQL, MySQL, MongoDB, CSV, Excel), `ASTTransformer` (all 9 transformation types), `TableMerger` (3-way merge & deduplication), `TargetWriterFactory` (PostgreSQL, MySQL, MongoDB bulk loader), `CheckpointManager` (resumable state), and `ProgressReporter`.
+
+---
+
+## 8. Fault Tolerance & One-Click UI Job Resumption Flow
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/execution_engine.py)
+        │
+        │ ETL Migration encounters an anomaly (Bad Row / Network Drop / Container Crash)
+        ▼
+   Fault Handling Policy Branching:
+        ├────────────────────────────────────────────────────────┐
+        │ Scenario 1: Bad Row Data (Row Isolation)               │ Scenario 2: Network Drop / Container Crash
+        ▼                                                        ▼
+   Bulk insert fails -> Fallback to per-row insert          CheckpointManager saved offset (e.g. Row 850,000)
+   Valid rows saved -> Bad rows logged to Dead-Letter log   Job status set to 'failed' / 'interrupted' in DB
+        │                                                        │
+        └──────────────────────────┬─────────────────────────────┘
+                                   ▼
+   ProgressReporter sends error stack trace to Control Plane (POST /api/v1/execution/{id}/progress)
+                                   │
+                                   ▼
+   Control Plane broadcasts WebSocket event (JOB_FAILED) -> Web UI shows Red Error Card ❌
+                                   │
+                                   ▼
+   User handles error 100% inside Web UI (NO TERMINAL COMMANDS REQUIRED):
+        ├────────────────────────────────────────────────────────┐
+        │ Option A: One-Click 'Resume Migration'                 │ Option B: One-Click 'Edit Plan & Retry'
+        ▼                                                        ▼
+   User clicks 'Resume Migration'                            User fixes mapping in UI & re-approves plan
+   POST /api/v1/executions/{id}/resume                       POST /api/v1/plans/{plan_id}/execute
+   Job status reset to 'queued'                              New job queued in migration_jobs table
+        │                                                        │
+        └──────────────────────────┬─────────────────────────────┘
+                                   ▼
+   Local Docker Agent Task Poller (main.py:poll_and_execute_tasks)
+   Discovers queued job -> Loads CheckpointManager -> RESUMES AT ROW 850,000 INSTANTLY 🚀
+```
+
+
 
 
 
