@@ -60,6 +60,9 @@ class MigrationPlan(Base):
     ai_model: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     prompt_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     confidence_score: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    is_valid: Mapped[Optional[bool]] = mapped_column(nullable=True, default=True)
+    validation_errors: Mapped[Optional[Any]] = mapped_column(JSON_TYPE, nullable=True)
+    langgraph_thread_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

@@ -1,9 +1,10 @@
-"""
-Core Settings Configuration
-"""
-
+import os
 from typing import List, Literal
+from dotenv import find_dotenv, load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Automatically load .env variables into process os.environ for LangChain/LangSmith AI tracing
+load_dotenv(find_dotenv())
 
 
 class Settings(BaseSettings):

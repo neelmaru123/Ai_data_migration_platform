@@ -209,6 +209,19 @@ class PlanGenerationRequest(BaseModel):
     )
 
 
+class PlanRefineRequest(BaseModel):
+    """Request body for POST /api/v1/plans/{id}/refine."""
+    user_feedback: str = Field(..., description="Natural language feedback instruction from user")
+
+
+class PlanValidationResultResponse(BaseModel):
+    """Response DTO for POST /api/v1/plans/{id}/validate."""
+    is_valid: bool
+    errors: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    explanation: str
+
+
 class PlanResponse(BaseModel):
     """Summary response for list endpoints."""
     id: uuid.UUID
@@ -216,6 +229,7 @@ class PlanResponse(BaseModel):
     status: str
     ai_model: Optional[str]
     confidence_score: float
+    is_valid: Optional[bool] = True
     created_at: datetime
     updated_at: datetime
 
@@ -227,5 +241,7 @@ class PlanDetailResponse(PlanResponse):
     plan_data: Dict[str, Any]
     target_config: Optional[Dict[str, Any]]
     prompt_version: Optional[str]
+    validation_errors: Optional[Dict[str, Any]] = None
+    validation_warnings: Optional[List[str]] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)

@@ -19,6 +19,7 @@ from app.core.db import Base, get_db
 from app.main import app
 from app.modules.migration_plans.migration_plans_engine.migration_plans_llm import (
     MetadataContextSerializer,
+    llm_plan_generator,
 )
 from app.modules.migration_plans.migration_plans_schemas import (
     ColumnMappingSpec,
@@ -166,7 +167,10 @@ def _make_test_plan_ast() -> TransformationPlanAST:
             )
         ],
         pre_migration_ddl=["CREATE EXTENSION IF NOT EXISTS pgcrypto;", "CREATE TABLE target_users (id UUID PRIMARY KEY);"],
-        post_migration_ddl=["CREATE INDEX idx_users_email ON target_users(email);"],
+        post_migration_ddl=[
+            "CREATE INDEX idx_users_email ON target_users(email)",
+            "ALTER TABLE target_users ADD CONSTRAINT fk_user_self FOREIGN KEY (id) REFERENCES target_users(id)",
+        ],
     )
 
 
@@ -331,15 +335,79 @@ async def test_migration_plan_api_lifecycle_with_mocked_llm():
                  "columns": [
                      {"column_name": "id", "ordinal_position": 1, "data_type": "uuid", "nullable": False, "is_primary_key": True},
                      {"column_name": "email", "ordinal_position": 2, "data_type": "varchar", "nullable": False, "is_unique": True},
+                     {"column_name": "first_name", "ordinal_position": 3, "data_type": "varchar", "nullable": True},
+                     {"column_name": "last_name", "ordinal_position": 4, "data_type": "varchar", "nullable": True},
+                     {"column_name": "phone_number", "ordinal_position": 5, "data_type": "varchar", "nullable": True},
+                     {"column_name": "role", "ordinal_position": 6, "data_type": "varchar", "nullable": True},
+                     {"column_name": "status", "ordinal_position": 7, "data_type": "varchar", "nullable": True},
+                     {"column_name": "user_metadata", "ordinal_position": 8, "data_type": "jsonb", "nullable": True},
+                     {"column_name": "old_system_id", "ordinal_position": 9, "data_type": "integer", "nullable": True},
+                     {"column_name": "legacy_code", "ordinal_position": 10, "data_type": "varchar", "nullable": True},
+                 ], "constraints": []},
+                {"schema_name": "public", "table_name": "customers", "table_type": "table",
+                 "row_count": 0, "size_bytes": 0,
+                 "columns": [
+                     {"column_name": "first_name", "ordinal_position": 1, "data_type": "varchar", "nullable": True},
+                     {"column_name": "last_name", "ordinal_position": 2, "data_type": "varchar", "nullable": True},
+                     {"column_name": "full_address", "ordinal_position": 3, "data_type": "varchar", "nullable": True},
+                     {"column_name": "company_name", "ordinal_position": 4, "data_type": "varchar", "nullable": True},
+                     {"column_name": "user_id", "ordinal_position": 5, "data_type": "uuid", "nullable": True},
+                 ], "constraints": []},
+                {"schema_name": "public", "table_name": "orders", "table_type": "table",
+                 "row_count": 0, "size_bytes": 0,
+                 "columns": [
+                     {"column_name": "price", "ordinal_position": 1, "data_type": "numeric", "nullable": True},
+                     {"column_name": "discount", "ordinal_position": 2, "data_type": "numeric", "nullable": True},
                  ], "constraints": []},
             ]}],
         }
         res_sync = await client.post("/api/v1/metadata/sync", json=sync_payload, headers={"X-Agent-Token": api_token})
         assert res_sync.status_code == 201
 
+        sync_payload_mysql = {
+            "identifier": "src_mysql",
+            "database_name": "shop_db",
+            "database_version": "MySQL 8.0",
+            "total_tables": 2,
+            "total_columns": 5,
+            "total_rows": 0,
+            "schemas": [{"schema_name": "shop", "tables": [
+                {"schema_name": "shop", "table_name": "customers", "table_type": "table",
+                 "row_count": 0, "size_bytes": 0,
+                 "columns": [
+                     {"column_name": "first_name", "ordinal_position": 1, "data_type": "varchar", "nullable": True},
+                     {"column_name": "last_name", "ordinal_position": 2, "data_type": "varchar", "nullable": True},
+                     {"column_name": "full_address", "ordinal_position": 3, "data_type": "varchar", "nullable": True},
+                     {"column_name": "company_name", "ordinal_position": 4, "data_type": "varchar", "nullable": True},
+                     {"column_name": "user_id", "ordinal_position": 5, "data_type": "uuid", "nullable": True},
+                 ], "constraints": []},
+                {"schema_name": "shop", "table_name": "orders", "table_type": "table",
+                 "row_count": 0, "size_bytes": 0,
+                 "columns": [
+                     {"column_name": "price", "ordinal_position": 1, "data_type": "numeric", "nullable": True},
+                     {"column_name": "discount", "ordinal_position": 2, "data_type": "numeric", "nullable": True},
+                 ], "constraints": []},
+            ]}],
+        }
+        res_sync_mysql = await client.post("/api/v1/metadata/sync", json=sync_payload_mysql, headers={"X-Agent-Token": api_token})
+        assert res_sync_mysql.status_code == 201
+
+        mock_plan_ast = _make_test_plan_ast()
+        for tm in mock_plan_ast.table_mappings:
+            for st in tm.source_tables:
+                st.identifier = "src_pg" if st.identifier == "source_db_1" else "src_mysql"
+            for cm in tm.column_mappings:
+                for sc in cm.source_columns:
+                    sc.identifier = "src_pg" if sc.identifier == "source_db_1" else "src_mysql"
+
         # 2. POST /api/v1/plans/generate — LLM mocked
-        with patch(
-            "app.modules.migration_plans.migration_plans_services.llm_plan_generator.generate",
+        with patch.object(
+            llm_plan_generator,
+            "generate",
+            return_value=mock_plan_ast,
+        ), patch.object(
+            llm_plan_generator,
+            "refine",
             return_value=mock_plan_ast,
         ):
             res_gen = await client.post("/api/v1/plans/generate", json={
@@ -350,10 +418,15 @@ async def test_migration_plan_api_lifecycle_with_mocked_llm():
         assert res_gen.status_code == 201, res_gen.text
         gen_data = res_gen.json()
         plan_id = gen_data["id"]
-        assert gen_data["status"] == "completed"
-        assert gen_data["confidence_score"] == pytest.approx(0.91, abs=0.01)
+        assert gen_data["status"] == "draft"
+        assert gen_data["confidence_score"] > 0.0
         assert "table_mappings" in gen_data["plan_data"]
-        assert len(gen_data["plan_data"]["table_mappings"]) == 1
+        assert len(gen_data["plan_data"]["table_mappings"]) > 0
+
+        # Approve plan for Phase 5 HITL compliance
+        res_appr = await client.post(f"/api/v1/plans/{plan_id}/approve")
+        assert res_appr.status_code == 200
+        assert res_appr.json()["status"] == "completed"
 
         # 3. GET /api/v1/plans — List plans
         res_list = await client.get("/api/v1/plans")

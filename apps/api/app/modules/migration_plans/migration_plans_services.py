@@ -105,14 +105,19 @@ class MigrationPlanService:
         target_config: TargetDatabaseConfig,
     ) -> MigrationPlan:
         """
-        Full plan generation lifecycle:
+        Full plan generation lifecycle using LangGraph StateGraph:
         1. Fetch latest MetadataSnapshots for all Agent DataSources.
-        2. Serialize metadata to sanitized context string (Zero Raw Data).
-        3. Call LLM engine to generate TransformationPlanAST.
-        4. Persist MigrationPlan + MigrationPlanSnapshot join rows.
-        5. Broadcast PLAN_GENERATED WebSocket event.
+        2. Execute LangGraph workflow (Nodes 1 -> 2 -> 3 -> Router -> Node 5 interrupt).
+        3. Run feasibility validator.
+        4. Persist MigrationPlan entity with validation status.
         """
-        # Step 1: Fetch snapshots
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_graph import (
+            migration_plan_graph,
+        )
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
         snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
             session, agent
         )
@@ -120,45 +125,77 @@ class MigrationPlanService:
         target_db_type = target_config.database_type
         custom_instructions = target_config.custom_instructions
 
-        # Step 2: Serialize metadata → sanitized context
-        context_str = MetadataContextSerializer.serialize(
-            snapshots=snapshots,
-            source_aliases=alias_map,
-            target_db_type=target_db_type,
-            custom_instructions=custom_instructions,
-        )
+        initial_state = {
+            "agent_id": str(agent.id),
+            "user_id": str(agent.user_id),
+            "target_db_type": target_db_type,
+            "custom_instructions": custom_instructions,
+            "context_yaml": "",
+            "snapshots": snapshots,
+            "alias_map": alias_map,
+            "current_ast": None,
+            "validation_result": None,
+            "user_feedback": None,
+            "manual_edits": None,
+            "attempt_count": 0,
+            "is_approved": False,
+            "feasibility_explanation": None,
+            "persisted_plan_id": None,
+        }
 
-        # Step 3: Call LLM — may raise RuntimeError on total failure
-        plan_status = "completed"
-        plan_ast: Optional[TransformationPlanAST] = None
+        # Run LangGraph graph
+        plan_status = "draft"
+        plan_ast_dict = None
+        val_res_dict = None
+
         try:
-            plan_ast = llm_plan_generator.generate(
-                context_str=context_str,
+            res_state = await migration_plan_graph.ainvoke(initial_state)
+            plan_ast_dict = res_state.get("current_ast")
+            val_res_dict = res_state.get("validation_result")
+            if res_state.get("feasibility_explanation"):
+                plan_status = "invalid"
+            else:
+                plan_status = "draft"
+        except Exception as exc:
+            logger.error(f"LangGraph execution exception: {exc}")
+            # Direct LLM fallback if graph interrupted
+            context_str = MetadataContextSerializer.serialize(
+                snapshots=snapshots,
+                source_aliases=alias_map,
                 target_db_type=target_db_type,
+                custom_instructions=custom_instructions,
             )
-        except RuntimeError as exc:
-            logger.error(f"LLM plan generation failed: {exc}")
-            plan_status = "draft_failed"
+            try:
+                ast_obj = llm_plan_generator.generate(context_str, target_db_type)
+                plan_ast_dict = ast_obj.model_dump(mode="json")
+                val_res = MigrationPlanValidator.validate(plan_ast_dict, snapshots, alias_map)
+                val_res_dict = val_res.model_dump(mode="json")
+                plan_status = "draft"
+            except Exception as inner_exc:
+                logger.error(f"Fallback generation also failed: {inner_exc}")
+                plan_status = "draft_failed"
 
-        # Step 4: Persist MigrationPlan
-        plan_data: Dict[str, Any] = (
-            plan_ast.model_dump(mode="json") if plan_ast else {"error": "LLM generation failed"}
-        )
+        if not val_res_dict and plan_ast_dict:
+            val_res = MigrationPlanValidator.validate(plan_ast_dict, snapshots, alias_map)
+            val_res_dict = val_res.model_dump(mode="json")
+
+        is_valid = val_res_dict.get("is_valid", False) if val_res_dict else False
 
         migration_plan = MigrationPlan(
             user_id=agent.user_id,
             agent_id=agent.id,
             status=plan_status,
-            plan_data=plan_data,
+            plan_data=plan_ast_dict or {"error": "Generation failed"},
             target_config=target_config.model_dump(mode="json"),
             ai_model=f"{settings_llm_provider()}:{settings_llm_model()}",
             prompt_version=PROMPT_VERSION,
-            confidence_score=plan_ast.confidence_score if plan_ast else 0.0,
+            confidence_score=plan_ast_dict.get("confidence_score", 0.9) if plan_ast_dict else 0.0,
+            is_valid=is_valid,
+            validation_errors=val_res_dict,
         )
         session.add(migration_plan)
         await session.flush()
 
-        # Step 5: Persist MigrationPlanSnapshot join rows (link plan ↔ all source snapshots)
         for snap in snapshots:
             join_row = MigrationPlanSnapshot(
                 migration_plan_id=migration_plan.id,
@@ -167,39 +204,22 @@ class MigrationPlanService:
             session.add(join_row)
 
         await session.commit()
-
-        # Step 6: Broadcast WebSocket event
-        if plan_status == "completed" and plan_ast:
-            await manager.broadcast_to_agent(
-                agent_id=str(agent.id),
-                message={
-                    "event_type": "PLAN_GENERATED",
-                    "data": {
-                        "plan_id": str(migration_plan.id),
-                        "agent_id": str(agent.id),
-                        "status": plan_status,
-                        "confidence_score": migration_plan.confidence_score,
-                        "total_tables": len(plan_ast.table_mappings),
-                        "warnings_count": len(plan_ast.warnings),
-                    },
-                },
-            )
-
-        logger.info(
-            f"Migration plan {migration_plan.id} [{plan_status}] generated for agent '{agent.id}' "
-            f"(Tables: {len(plan_ast.table_mappings) if plan_ast else 0}, "
-            f"Confidence: {migration_plan.confidence_score:.2f})."
-        )
-
         return migration_plan
 
     @staticmethod
     async def get_plan_by_id(
         session: AsyncSession, plan_id: uuid.UUID
     ) -> Optional[MigrationPlan]:
-        """Fetch MigrationPlan by primary key UUID."""
-        res = await session.get(MigrationPlan, plan_id)
-        return res
+        """Fetch MigrationPlan by primary key UUID with agent and data_sources eagerly loaded."""
+        stmt = (
+            select(MigrationPlan)
+            .where(MigrationPlan.id == plan_id)
+            .options(
+                selectinload(MigrationPlan.agent).selectinload(Agent.data_sources)
+            )
+        )
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
 
     @staticmethod
     async def list_plans_for_user(
@@ -220,10 +240,139 @@ class MigrationPlanService:
         plan: MigrationPlan,
         plan_data: Dict[str, Any],
     ) -> MigrationPlan:
-        """Save user-edited plan data (UI allows manual adjustment of column mappings)."""
+        """Save user-edited plan data and run feasibility validation."""
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
         plan.plan_data = plan_data
-        plan.status = "edited"
+        if plan.agent:
+            snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
+                session, plan.agent
+            )
+            val_res = MigrationPlanValidator.validate(plan_data, snapshots, alias_map)
+            val_dict = val_res.model_dump(mode="json")
+            plan.is_valid = val_res.is_valid
+            plan.validation_errors = val_dict
+            plan.status = "edited" if val_res.is_valid else "invalid_edits"
+        else:
+            plan.status = "edited"
+
         await session.commit()
+        return plan
+
+    @staticmethod
+    async def refine_plan(
+        session: AsyncSession,
+        plan: MigrationPlan,
+        user_feedback: str,
+    ) -> MigrationPlan:
+        """Refines a plan using natural language user feedback via LLM + Validator."""
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
+        if not plan.agent:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Migration plan has no attached agent.",
+            )
+
+        snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
+            session, plan.agent
+        )
+
+        target_db_type = (
+            plan.target_config.get("database_type", "postgresql")
+            if plan.target_config
+            else "postgresql"
+        )
+
+        context_str = MetadataContextSerializer.serialize(
+            snapshots=snapshots,
+            source_aliases=alias_map,
+            target_db_type=target_db_type,
+        )
+
+        refined_ast_obj = llm_plan_generator.refine(
+            context_str=context_str,
+            current_ast_dict=plan.plan_data,
+            user_feedback=user_feedback,
+        )
+
+        refined_ast_dict = refined_ast_obj.model_dump(mode="json")
+        val_res = MigrationPlanValidator.validate(refined_ast_dict, snapshots, alias_map)
+        val_dict = val_res.model_dump(mode="json")
+
+        plan.plan_data = refined_ast_dict
+        plan.is_valid = val_res.is_valid
+        plan.validation_errors = val_dict
+        plan.status = "edited" if val_res.is_valid else "invalid_edits"
+
+        await session.commit()
+        return plan
+
+    @staticmethod
+    async def validate_plan_by_id(
+        session: AsyncSession,
+        plan: MigrationPlan,
+    ) -> Dict[str, Any]:
+        """Runs instant feasibility check on a plan."""
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
+        if not plan.agent:
+            return {
+                "is_valid": True,
+                "errors": [],
+                "warnings": [],
+                "explanation": "No agent attached for snapshot validation.",
+            }
+
+        snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
+            session, plan.agent
+        )
+        val_res = MigrationPlanValidator.validate(plan.plan_data, snapshots, alias_map)
+        return val_res.model_dump(mode="json")
+
+    @staticmethod
+    async def approve_plan(
+        session: AsyncSession,
+        plan: MigrationPlan,
+    ) -> MigrationPlan:
+        """Approves a plan for execution."""
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
+        if plan.agent:
+            snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
+                session, plan.agent
+            )
+            val_res = MigrationPlanValidator.validate(plan.plan_data, snapshots, alias_map)
+            if not val_res.is_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Cannot approve invalid plan: {val_res.explanation}",
+                )
+
+        plan.status = "completed"
+        await session.commit()
+
+        if plan.agent_id:
+            await manager.broadcast_to_agent(
+                agent_id=str(plan.agent_id),
+                message={
+                    "event_type": "PLAN_GENERATED",
+                    "data": {
+                        "plan_id": str(plan.id),
+                        "agent_id": str(plan.agent_id),
+                        "status": "completed",
+                    },
+                },
+            )
+
         return plan
 
 

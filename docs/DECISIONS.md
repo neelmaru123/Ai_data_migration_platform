@@ -427,11 +427,49 @@ Implemented multi-layered fault tolerance across local Agent execution and Contr
 - **Data Loss Prevention**: Isolating bad rows prevents a single bad string from aborting a 1,000,000-row migration.
 - **Resource & Time Savings**: Checkpointing prevents re-fetching and re-transforming millions of already-processed rows after a container crash or network drop.
 
+---
 
+## [2026-08-18] - Phase 5: LangGraph Stateful Agent Plan Refinement & Feasibility Validation Engine
 
+### 1. Decision Summary
+Selected **LangGraph (`StateGraph`)** to implement Phase 5's non-linear AI plan refinement, dynamic human feedback loop, and deterministic feasibility validation engine.
 
+### 2. Why This Approach? (Rationale)
+- **Stateful Multi-Step Node Routing**: LangGraph models plan generation, structural schema validation, error auto-correction, and human feedback refinement as explicit nodes (`StateGraph`).
+- **Self-Correcting LLM Loop**: If the initial AST contains a minor validation flaw, the graph automatically loops back to feed structural errors back into Gemini *before* presenting the plan to the user.
+- **Feasibility Error Transparency**: When a user's proposed edit or mapping is technically impossible (e.g. non-existent column, incompatible foreign key), the `validate_feasibility_node` captures the exact reason and explains *why* the database cannot be migrated with those settings.
+- **LangChain Ecosystem Compatibility**: Integrates directly with our existing `ChatGoogleGenerativeAI` and `PydanticOutputParser` pipeline.
 
+### 3. Implementation Status & Verification
+- Implemented `MigrationPlanValidator` (`migration_plans_validator.py`) for 5-stage schema validation.
+- Implemented 9-node `StateGraph` (`migration_plans_graph.py`) managing context serialization, Gemini AST generation, feasibility validation, auto-correction, HITL interrupt, feedback processing, and plan persistence.
+- Added REST Endpoints: `POST /plans/{id}/refine`, `POST /plans/{id}/validate`, `POST /plans/{id}/approve`.
+- Enforced execution guard in `ExecutionService` (`POST /plans/{id}/execute` blocks invalid plans).
+- Verified with unit tests (`test_migration_plans_validator.py` - 2/2 passed) and E2E integration test (`test_phase5_e2e_langgraph.py` - passed end-to-end).
 
+---
 
+## [2026-08-18] - Phase 5 Code Audit Hardening & Control Flow Integrity
 
+### 1. Decision Summary
+Applied 7 critical bug fixes and architectural hardening updates across the Phase 5 LangGraph Plan Refinement Engine:
+1. **Execution Guard Enforcement (`ExecutionService`)**: Added explicit `plan.status == 'completed'` verification to prevent unapproved draft or invalid plans from being queued.
+2. **Stage D Foreign Key Integrity (`MigrationPlanValidator`)**: Added Stage D validation to catch non-existent target table references in post-migration DDL `FOREIGN KEY ... REFERENCES` statements.
+3. **Router 2 Fallthrough Protection (`human_feedback_router`)**: Changed fallback routing to stay at `human_approval_interrupt_node` instead of silently falling through to plan approval when no human action is set.
+4. **Resilient Auto-Correction (`auto_correct_ast_node`)**: Added try/except handling around LLM refinement calls during auto-correction to prevent graph crashes on transient API timeouts.
+5. **LLM Refinement Retry Loop (`LLMPlanGeneratorService.refine`)**: Added a 3-attempt retry loop with Pydantic parse error feedback matching the initial generator behavior.
+6. **Enhanced API Response (`PlanDetailResponse`)**: Added `validation_warnings` list field to response DTO to cleanly present non-blocking advisories to the Web UI.
+7. **Signal Node State (`finalize_and_persist_node`)**: Updated Node 9 to preserve `persisted_plan_id` in state and document its role as a state signal.
 
+### 2. Verification
+- Created unit test suite `test_phase5_bugfixes.py` (6/6 tests passed).
+- Ran full unit test suite across `apps/api` (all tests passing cleanly).
+
+---
+
+## [2026-08-18] - Static Type Safety & Variable Shadowing Resolution
+
+### 1. Decision Summary
+Resolved 2 static type checker (Pyright/MyPy) warnings:
+1. **LangGraph State Schema Compatibility (`migration_plans_graph.py`)**: Imported `TypedDict` from `typing_extensions` instead of standard `typing` so `MigrationPlanState` is recognized as a valid `TypedDictLike` by `StateGraph`.
+2. **Variable Shadowing Elimination (`migration_plans_validator.py`)**: Renamed local dictionary `col_map` (used in snapshot introspection on L70) to `column_type_map`. This resolved the type collision where Pyright bound `col_map` as `dict[str, str]` instead of `ColumnMappingSpec` during the `for col_map in table_map.column_mappings:` iteration.

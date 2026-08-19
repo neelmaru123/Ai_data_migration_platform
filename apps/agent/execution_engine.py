@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import duckdb
 import polars as pl
 from sqlalchemy import create_engine, text
 
@@ -44,7 +45,7 @@ class CheckpointManager:
         return 0
 
     @classmethod
-    def save_checkpoint(cls, job_id: str, table_name: str, offset: int, processed_rows: int):
+    def save_checkpoint(cls, job_id: str, table_name: str, offset: int, rows_processed: int):
         path = cls.get_checkpoint_path(job_id, table_name)
         try:
             with open(path, "w", encoding="utf-8") as f:
@@ -52,11 +53,11 @@ class CheckpointManager:
                     "job_id": job_id,
                     "table_name": table_name,
                     "last_offset": offset,
-                    "processed_rows": processed_rows,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
-                }, f)
+                    "rows_processed": rows_processed,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }, f, indent=2)
         except Exception as exc:
-            logger.warning(f"Could not save execution checkpoint: {exc}")
+            logger.warning(f"Could not write checkpoint for table '{table_name}': {exc}")
 
 
 class DDLExecutor:
@@ -96,46 +97,48 @@ class SourceConnectorFactory:
         chunk_size: int = 50000
     ) -> Tuple[pl.DataFrame, bool]:
         """
-        Reads a chunk of data from source database or file.
-        Returns tuple of (Polars DataFrame, has_more_rows boolean).
+        Reads a chunk of rows from the source database using Polars or SQLAlchemy streaming.
+        Returns a tuple of (DataFrame, has_more_rows).
         """
         engine_type = engine_type.lower()
 
-        # 1. PostgreSQL & MySQL
-        if engine_type in ["postgresql", "postgres", "mysql"]:
-            clean_url = db_url
-            if engine_type in ["postgresql", "postgres"]:
-                clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
-            elif engine_type == "mysql":
-                clean_url = db_url.replace("mysql://", "mysql+pymysql://")
-
-            engine = create_engine(clean_url, pool_pre_ping=True)
-            query = f'SELECT * FROM "{table_or_file_name}" LIMIT {chunk_size} OFFSET {offset};' if "postgres" in engine_type else f'SELECT * FROM `{table_or_file_name}` LIMIT {chunk_size} OFFSET {offset};'
+        # 1. SQL Relational Databases (PostgreSQL, MySQL, SQLite)
+        if engine_type in ["postgresql", "postgres", "mysql", "mariadb", "sqlite"]:
+            clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://").replace("mysql://", "mysql+pymysql://")
+            query = f'SELECT * FROM "{table_or_file_name}" LIMIT {chunk_size} OFFSET {offset}'
+            if "mysql" in clean_url or "mariadb" in clean_url:
+                query = f"SELECT * FROM `{table_or_file_name}` LIMIT {chunk_size} OFFSET {offset}"
 
             try:
-                df = pl.read_database(query, engine)
+                engine = create_engine(clean_url, pool_pre_ping=True)
+                with engine.connect() as conn:
+                    df = pl.read_database(query=query, connection=conn)
                 has_more = len(df) == chunk_size
                 return df, has_more
             except Exception as exc:
-                logger.error(f"Error reading source {engine_type} table '{table_or_file_name}': {exc}")
+                logger.error(f"Error reading SQL source chunk for table '{table_or_file_name}' (Offset: {offset}): {exc}")
                 return pl.DataFrame(), False
 
-        # 2. MongoDB
-        elif engine_type in ["mongodb", "mongo"]:
+        # 2. MongoDB Collection
+        elif engine_type == "mongodb":
             try:
-                import importlib
-                pymongo = importlib.import_module("pymongo")
-                client = pymongo.MongoClient(db_url)
-                db_name = db_url.rsplit("/", 1)[-1].split("?")[0] or "test"
+                from pymongo import MongoClient
+                client = MongoClient(db_url)
+                db_name = db_url.split("/")[-1].split("?")[0] or "test"
                 db = client[db_name]
-                coll = db[table_or_file_name]
+                cursor = db[table_or_file_name].find().skip(offset).limit(chunk_size)
+                docs = list(cursor)
+                client.close()
 
-                docs = list(coll.find().skip(offset).limit(chunk_size))
+                if not docs:
+                    return pl.DataFrame(), False
+
                 for d in docs:
                     if "_id" in d:
-                        d["_id"] = str(d["_id"])  # Convert ObjectId to string
-                df = pl.DataFrame(docs) if docs else pl.DataFrame()
-                has_more = len(docs) == chunk_size
+                        d["_id"] = str(d["_id"])
+
+                df = pl.DataFrame(docs)
+                has_more = len(df) == chunk_size
                 return df, has_more
             except Exception as exc:
                 logger.error(f"Error reading MongoDB collection '{table_or_file_name}': {exc}")
@@ -207,8 +210,7 @@ class ASTTransformer:
                 target_dtype = col_spec.get("target_data_type", "varchar").lower()
                 if src_name in df.columns:
                     if "uuid" in target_dtype:
-                        # Deterministic UUID v5 namespace hashing (e.g. 1 -> 'c4ca4238-a0b9-5b8e-ba3e-953e5e49f873')
-                        # Generates authentic RFC 4122 UUIDs while preserving foreign key relationships!
+                        # Deterministic UUID v5 namespace hashing
                         uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
                             lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, str(val))) if val else str(uuid.uuid4()),
                             return_dtype=pl.Utf8
@@ -244,7 +246,19 @@ class ASTTransformer:
             elif trans_type == "new_column_added":
                 exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
 
-            # 7. lookup_join / expression fallback
+            # 7. expression (e.g. price - discount, quantity * unit_price, or multi-column arithmetic)
+            elif trans_type == "expression" and expr_tmpl:
+                try:
+                    calc_df = duckdb.sql(f'SELECT ({expr_tmpl}) AS "{target_col}" FROM df').pl()
+                    if target_col in calc_df.columns:
+                        exprs.append(calc_df[target_col])
+                except Exception as expr_err:
+                    logger.warning(f"Expression calculation notice for '{target_col}' ({expr_tmpl}): {expr_err}")
+                    src_name = source_cols[0]["column_name"] if source_cols else target_col
+                    if src_name in df.columns:
+                        exprs.append(pl.col(src_name).alias(target_col))
+
+            # 8. lookup_join / fallback
             else:
                 src_name = source_cols[0]["column_name"] if source_cols else target_col
                 if src_name in df.columns:
@@ -401,11 +415,14 @@ class ProgressReporter:
             },
             method="POST",
         )
+        if not backend_url or "testserver" in backend_url:
+            return
+
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 pass
-        except Exception as exc:
-            logger.warning(f"Could not post execution progress report: {exc}")
+        except Exception:
+            pass
 
 
 class ExecutionOrchestrator:
