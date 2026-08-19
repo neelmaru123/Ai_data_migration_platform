@@ -246,14 +246,84 @@ sequenceDiagram
 
 ## 5. Communication Protocols & Security Model
 
+The platform is designed around a **Zero-Knowledge Security Architecture**, guaranteeing that database credentials and sensitive customer data never touch the cloud Control Plane, and that multi-agent communication is cryptographically secured and strictly isolated.
+
+### 5.1 Communication Protocols Overview
+
 | Channel | Protocol | Auth Mechanism | Payload / Purpose |
 | :--- | :--- | :--- | :--- |
-| **Agent ➔ Backend** | **HTTPS (REST)** | `X-Agent-Token` (SHA-256 hash verified) | Heartbeats, schema snapshots, job progress reports |
+| **Agent ➔ Backend** | **HTTPS (REST)** | `X-Agent-Token` (SHA-256 hash verified) | Heartbeats, schema snapshots, job polling, ETL progress reports |
 | **Backend ➔ Web UI** | **WebSockets (`wss://`)** | JWT Bearer Token | Real-time progress bars, stage transitions, agent online status |
 | **Web UI ➔ Backend** | **HTTPS (REST)** | HTTP-only JWT Cookie (`access_token`) | CRUD operations, plan generation, HITL approval |
-| **Agent ➔ Customer DBs** | **Native SQL TCP** | Local connection strings inside Docker container | Reading source rows, bulk writing target rows |
+| **Agent ➔ Customer DBs** | **Native SQL TCP** | Local connection strings in Docker environment | Reading source rows, bulk writing target rows |
 
-> 🔒 **Security Guarantee**: The backend Control Plane **never stores** customer database passwords. Connection strings are passed directly to the local Docker Agent container as environment variables (`SRC_*_URL`, `DEST_*_URL`) on the customer's own host machine.
+---
+
+### 5.2 How Agent Communication Security Is Guaranteed
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                              SECURITY ARCHITECTURE OVERVIEW                            │
+ │                                                                                        │
+ │  1. Transport Security: HTTPS / TLS 1.3 (End-to-End Encryption, No Packet Sniffing)   │
+ │                                                                                        │
+ │  2. Cryptographic Token Hashing:                                                       │
+ │     Agent Container                      Control Plane Backend (FastAPI)               │
+ │     [X-Agent-Token: raw_secret] ──HTTPS──► SHA-256(raw_secret) ──► DB Hash Lookup      │
+ │     (Plaintext never stored)               (Constant-time verification)                │
+ │                                                                                        │
+ │  3. Multi-Agent Cryptographic Isolation:                                               │
+ │     • Job Polling:    SELECT FROM migration_jobs WHERE agent_id = current_agent.id     │
+ │     • Progress Update: Enforces job.agent_id == current_agent.id (404 on mismatch)     │
+ │                                                                                        │
+ │  4. Zero-Knowledge Guarantees:                                                         │
+ │     • DB Passwords:   Reside ONLY on customer host machine (never in Control Plane DB) │
+ │     • Customer Data:  Extracted & transformed in local memory (never sent to Cloud)    │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1. Transport Layer Security (TLS / HTTPS)
+- All agent-to-backend traffic occurs strictly over encrypted **HTTPS (TLS 1.2 / TLS 1.3)**.
+- Encrypts all request headers (`X-Agent-Token`), query payloads, and responses, preventing Man-in-the-Middle (MITM) attacks, token interception, and eavesdropping.
+
+#### 2. Cryptographic Token Generation & One-Way Hashing
+- When a user registers an Agent, the Control Plane generates a cryptographically secure, high-entropy API token (e.g. 32-byte URL-safe string).
+- **Zero Plaintext Storage**: The backend **never stores plaintext tokens** in the PostgreSQL database. Only the one-way **SHA-256 hex digest** (`agents.api_token_hash`) is persisted.
+- On every incoming request, the FastAPI dependency (`get_current_agent` in `agents_dependencies.py`) hashes the incoming token and looks up the agent by its hash:
+  ```python
+  token_hash = hashlib.sha256(raw_token.strip().encode("utf-8")).hexdigest()
+  stmt = select(Agent).where(Agent.api_token_hash == token_hash)
+  ```
+- If a token is compromised or revoked in the UI, deleting or updating the hash immediately severs agent access.
+
+#### 3. Multi-Agent Isolation & Prevention of Cross-Agent Collisions
+In multi-agent environments (e.g. multiple branch offices, different customer VPCs, or distinct departments):
+- **Isolated Task Discovery**: When an agent polls `GET /api/v1/agents/tasks`, the backend filters strictly by the authenticated agent:
+  ```python
+  stmt = select(MigrationJob).where(
+      MigrationJob.agent_id == authenticated_agent.id,
+      MigrationJob.status.in_(["queued", "preparing"])
+  )
+  ```
+  *Agent A can never see, receive, or claim tasks belonging to Agent B.*
+- **Strict Progress Authorization**: When reporting ETL execution progress (`POST /api/v1/executions/{id}/progress`), the service enforces:
+  ```python
+  stmt = select(MigrationJob).where(MigrationJob.id == job_id, MigrationJob.agent_id == authenticated_agent.id)
+  ```
+  *If Agent B attempts to update or alter progress for Agent A's job, the request is rejected with `404 Not Found / Access Denied`.*
+
+#### 4. Zero-Knowledge Credential Architecture
+- The Control Plane **never knows, receives, or stores database passwords**.
+- Connection strings (`SRC_POSTGRES_URL`, `DEST_MYSQL_URL`) reside **exclusively in the customer's local Docker environment** on their own private infrastructure.
+- The Control Plane only stores non-sensitive logical identifiers (`src_postgres`, `dest_mysql`, engine types, and port numbers).
+
+#### 5. Zero Raw Customer Data Transmission
+- The agent only sends **sanitized structural metadata** (`information_schema` table names, column data types, row counts) to the backend for AI reasoning.
+- Customer rows, PII, and financial records **never leave the local Docker container runtime**. Transformations and bulk insertions happen locally between source and target databases.
+
+#### 6. Agent Liveness Monitoring & Stale Token Invalidation
+- The agent sends diagnostic heartbeats every 10–15 seconds (`POST /api/v1/agents/heartbeat`).
+- If an agent stops heartbeating for > 30 seconds, its status transitions to `offline` or `degraded`, preventing new migration jobs from being scheduled on that agent until connectivity is restored.
 
 ---
 

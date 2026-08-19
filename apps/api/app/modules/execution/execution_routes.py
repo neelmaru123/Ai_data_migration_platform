@@ -118,5 +118,5 @@ async def update_execution_progress(
     Authenticated via X-Agent-Token request header.
     """
     return await ExecutionService.update_job_progress(
-        session=session, job_id=id, update=update
+        session=session, job_id=id, update=update, agent_id=agent.id
     )

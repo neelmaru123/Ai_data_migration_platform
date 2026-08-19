@@ -147,18 +147,25 @@ class ExecutionService:
 
     @staticmethod
     async def update_job_progress(
-        session: AsyncSession, job_id: uuid.UUID, update: ExecutionProgressUpdate
+        session: AsyncSession,
+        job_id: uuid.UUID,
+        update: ExecutionProgressUpdate,
+        agent_id: Optional[uuid.UUID] = None,
     ) -> MigrationJob:
         """
         Updates live metrics and status for a MigrationJob from Docker Agent progress payload.
+        Ensures the updating agent is the one assigned to the job.
         """
         stmt = select(MigrationJob).where(MigrationJob.id == job_id)
+        if agent_id:
+            stmt = stmt.where(MigrationJob.agent_id == agent_id)
+
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
         if not job:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Execution job '{job_id}' not found.",
+                detail=f"Execution job '{job_id}' not found or access denied for this agent.",
             )
 
         now = datetime.now(timezone.utc)
