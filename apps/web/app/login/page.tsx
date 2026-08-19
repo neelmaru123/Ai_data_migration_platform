@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import AuthLayout from '../../components/auth/AuthLayout';
 import LoginForm from '../../components/auth/LoginForm';
 
@@ -16,7 +16,9 @@ export default function LoginPage() {
       subtitle="Sign in to Migraflow to manage database connection strings, schema plans, and active ETL streaming jobs."
       sceneUrl={AUTH_SPLINE_URL}
     >
-      <LoginForm />
+      <Suspense fallback={<div className="text-zinc-500 text-xs py-4 text-center">Loading sign-in...</div>}>
+        <LoginForm />
+      </Suspense>
     </AuthLayout>
   );
 }

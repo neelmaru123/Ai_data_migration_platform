@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import AuthLayout from '../../components/auth/AuthLayout';
 import RegisterForm from '../../components/auth/RegisterForm';
 
@@ -16,7 +16,9 @@ export default function RegisterPage() {
       subtitle="Join Migraflow to translate database schemas with AI and execute high-speed streaming ETL migrations."
       sceneUrl={AUTH_SPLINE_URL}
     >
-      <RegisterForm />
+      <Suspense fallback={<div className="text-zinc-500 text-xs py-4 text-center">Loading sign-up...</div>}>
+        <RegisterForm />
+      </Suspense>
     </AuthLayout>
   );
 }

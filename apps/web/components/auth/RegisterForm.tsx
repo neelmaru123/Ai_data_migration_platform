@@ -1,17 +1,27 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useRegister } from '../../hooks/mutations/useAuthMutations';
 import { UserRegisterPayload } from '../../types/auth';
 import GoogleAuthButton from './GoogleAuthButton';
 import { ArrowRight, Lock, Mail, User } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 export default function RegisterForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const registerMutation = useRegister();
+
+  useEffect(() => {
+    const errorParam = searchParams.get('error');
+    if (errorParam) {
+      toast.error(decodeURIComponent(errorParam));
+      window.history.replaceState({}, '', '/register');
+    }
+  }, [searchParams]);
 
   const {
     register,
