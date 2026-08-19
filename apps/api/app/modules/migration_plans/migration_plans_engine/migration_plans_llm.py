@@ -313,6 +313,75 @@ class LLMPlanGeneratorService:
             f"Last error: {last_error}"
         )
 
+    def refine(
+        self,
+        context_str: str,
+        current_ast_dict: dict,
+        user_feedback: Optional[str] = None,
+        validation_errors: Optional[List[str]] = None,
+        max_retries: int = 3,
+    ) -> TransformationPlanAST:
+        """
+        Refines an existing TransformationPlanAST given user feedback or validation error feedback.
+        Includes a 3-attempt retry loop with schema validation feedback.
+        """
+        import json
+        from langchain_core.messages import HumanMessage, SystemMessage
+        from langchain_core.output_parsers import PydanticOutputParser
+
+        llm = self._get_llm()
+        parser = PydanticOutputParser(pydantic_object=TransformationPlanAST)
+
+        feedback_instructions = []
+        if user_feedback:
+            feedback_instructions.append(f"USER FEEDBACK INSTRUCTION:\n{user_feedback}")
+        if validation_errors:
+            err_list = "\n".join(f"- {err}" for err in validation_errors)
+            feedback_instructions.append(f"STRUCTURAL VALIDATION ERRORS TO FIX:\n{err_list}")
+
+        instructions_str = "\n\n".join(feedback_instructions)
+
+        last_error = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                messages = [
+                    SystemMessage(content=SYSTEM_PROMPT),
+                    HumanMessage(
+                        content=(
+                            f"{parser.get_format_instructions()}\n\n"
+                            f"Here is the database metadata context:\n{context_str}\n\n"
+                            f"Here is the CURRENT TransformationPlan AST blueprint:\n```json\n{json.dumps(current_ast_dict, indent=2)}\n```\n\n"
+                            f"Apply the following refinement instructions to update and improve the TransformationPlan AST blueprint:\n"
+                            f"{instructions_str}\n\n"
+                            f"Output the updated complete TransformationPlan JSON matching the schema."
+                        )
+                    ),
+                ]
+
+                if last_error:
+                    messages.append(
+                        HumanMessage(
+                            content=(
+                                f"Your previous refinement response failed Pydantic schema validation. "
+                                f"Error: {last_error}. "
+                                f"Please correct and re-generate the complete TransformationPlan JSON."
+                            )
+                        )
+                    )
+
+                response = llm.invoke(messages)
+                content = str(response.content)
+                result = parser.parse(content)
+                logger.info(f"LLM plan refinement succeeded on attempt {attempt}.")
+                return result
+            except Exception as exc:
+                last_error = exc
+                logger.warning(f"LLM refinement attempt {attempt} failed: {exc}")
+
+        raise RuntimeError(
+            f"LLM plan refinement failed after {max_retries} attempts. Last error: {last_error}"
+        )
+
 
 # Singleton instance
 llm_plan_generator = LLMPlanGeneratorService()

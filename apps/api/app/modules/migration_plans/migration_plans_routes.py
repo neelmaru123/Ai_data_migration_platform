@@ -14,13 +14,37 @@ from app.modules.agents.agents_models import Agent
 from app.modules.migration_plans.migration_plans_schemas import (
     PlanDetailResponse,
     PlanGenerationRequest,
+    PlanRefineRequest,
     PlanResponse,
+    PlanValidationResultResponse,
 )
 from app.modules.migration_plans.migration_plans_services import MigrationPlanService
 from app.modules.users.users_dependencies import get_current_active_user, get_current_user
 from app.modules.users.users_models import User
 
 router = APIRouter(prefix="/plans", tags=["Migration Plans & AI Generation"])
+
+
+def _to_plan_detail_response(plan) -> PlanDetailResponse:
+    warnings = []
+    if plan.validation_errors and isinstance(plan.validation_errors, dict):
+        warnings = plan.validation_errors.get("warnings", [])
+
+    return PlanDetailResponse(
+        id=plan.id,
+        agent_id=plan.agent_id,
+        status=plan.status,
+        ai_model=plan.ai_model,
+        confidence_score=plan.confidence_score,
+        is_valid=plan.is_valid,
+        validation_errors=plan.validation_errors,
+        validation_warnings=warnings,
+        created_at=plan.created_at,
+        updated_at=plan.updated_at,
+        plan_data=plan.plan_data,
+        target_config=plan.target_config,
+        prompt_version=plan.prompt_version,
+    )
 
 
 async def _get_agent_for_user(
@@ -54,33 +78,13 @@ async def generate_migration_plan(
     session: AsyncSession = Depends(get_db),
 ):
     """
-    Generate an AI Migration Plan for all source databases connected to the specified Agent.
-
-    The LLM receives ONLY structural schema metadata (tables, columns, data types, FK relationships).
-    No passwords, row data, or sensitive information is transmitted.
-
-    Returns a complete `TransformationPlanAST` JSON with:
-    - Per-table transformation strategy (direct_copy, merge, split_target)
-    - Per-column mappings with transformation_type and UI badge type
-    - Pre/post migration DDL statements
-    - AI narrative explanation and warnings
+    Generate an AI Migration Plan using LangGraph StateGraph engine.
     """
     agent = await _get_agent_for_user(payload.agent_id, current_user, session)
     plan = await MigrationPlanService.create_plan_for_agent(
         session=session, agent=agent, target_config=payload.target_config
     )
-    return PlanDetailResponse(
-        id=plan.id,
-        agent_id=plan.agent_id,
-        status=plan.status,
-        ai_model=plan.ai_model,
-        confidence_score=plan.confidence_score,
-        created_at=plan.created_at,
-        updated_at=plan.updated_at,
-        plan_data=plan.plan_data,
-        target_config=plan.target_config,
-        prompt_version=plan.prompt_version,
-    )
+    return _to_plan_detail_response(plan)
 
 
 @router.get("", response_model=List[PlanResponse])
@@ -99,6 +103,7 @@ async def list_migration_plans(
             status=p.status,
             ai_model=p.ai_model,
             confidence_score=p.confidence_score,
+            is_valid=p.is_valid,
             created_at=p.created_at,
             updated_at=p.updated_at,
         )
@@ -115,7 +120,6 @@ async def get_migration_plan(
 ):
     """
     Fetch the complete migration plan including full TransformationPlanAST JSON for UI rendering.
-    Supports user session or Agent authentication via X-Agent-Token header.
     """
     plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
     if not plan:
@@ -131,18 +135,7 @@ async def get_migration_plan(
         res_agent = await session.execute(select(Agent).where(Agent.api_token_hash == token_hash))
         agent = res_agent.scalar_one_or_none()
         if agent and plan.agent_id == agent.id:
-            return PlanDetailResponse(
-                id=plan.id,
-                agent_id=plan.agent_id,
-                status=plan.status,
-                ai_model=plan.ai_model,
-                confidence_score=plan.confidence_score,
-                created_at=plan.created_at,
-                updated_at=plan.updated_at,
-                plan_data=plan.plan_data,
-                target_config=plan.target_config,
-                prompt_version=plan.prompt_version,
-            )
+            return _to_plan_detail_response(plan)
 
     # 2. User Auth Fallback
     try:
@@ -159,18 +152,7 @@ async def get_migration_plan(
             detail="You do not have permission to view this migration plan.",
         )
 
-    return PlanDetailResponse(
-        id=plan.id,
-        agent_id=plan.agent_id,
-        status=plan.status,
-        ai_model=plan.ai_model,
-        confidence_score=plan.confidence_score,
-        created_at=plan.created_at,
-        updated_at=plan.updated_at,
-        plan_data=plan.plan_data,
-        target_config=plan.target_config,
-        prompt_version=plan.prompt_version,
-    )
+    return _to_plan_detail_response(plan)
 
 
 @router.put("/{plan_id}", response_model=PlanDetailResponse)
@@ -180,11 +162,7 @@ async def update_migration_plan(
     current_user: User = Depends(get_current_active_user),
     session: AsyncSession = Depends(get_db),
 ):
-    """
-    Save user-edited plan data.
-    The UI allows manual adjustment of column mappings — this endpoint persists those edits.
-    Plan status is updated to 'edited'.
-    """
+    """Save user-edited plan data and re-evaluate feasibility validation."""
     plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
     if not plan:
         raise HTTPException(
@@ -197,15 +175,76 @@ async def update_migration_plan(
             detail="You do not have permission to edit this migration plan.",
         )
     updated = await MigrationPlanService.update_plan_data(session, plan, plan_data)
-    return PlanDetailResponse(
-        id=updated.id,
-        agent_id=updated.agent_id,
-        status=updated.status,
-        ai_model=updated.ai_model,
-        confidence_score=updated.confidence_score,
-        created_at=updated.created_at,
-        updated_at=updated.updated_at,
-        plan_data=updated.plan_data,
-        target_config=updated.target_config,
-        prompt_version=updated.prompt_version,
+    return _to_plan_detail_response(updated)
+
+
+@router.post("/{plan_id}/refine", response_model=PlanDetailResponse)
+async def refine_migration_plan(
+    plan_id: uuid.UUID,
+    payload: PlanRefineRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Refine migration plan using natural language feedback instruction."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to refine this migration plan.",
+        )
+    refined = await MigrationPlanService.refine_plan(session, plan, payload.user_feedback)
+    return _to_plan_detail_response(refined)
+
+
+@router.post("/{plan_id}/validate", response_model=PlanValidationResultResponse)
+async def validate_migration_plan(
+    plan_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Run standalone feasibility check on a plan blueprint."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to validate this migration plan.",
+        )
+    val_dict = await MigrationPlanService.validate_plan_by_id(session, plan)
+    return PlanValidationResultResponse(
+        is_valid=val_dict.get("is_valid", False),
+        errors=val_dict.get("errors", []),
+        warnings=val_dict.get("warnings", []),
+        explanation=val_dict.get("explanation", ""),
     )
+
+
+@router.post("/{plan_id}/approve", response_model=PlanDetailResponse)
+async def approve_migration_plan(
+    plan_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Approve a migration plan for execution."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to approve this migration plan.",
+        )
+    approved = await MigrationPlanService.approve_plan(session, plan)
+    return _to_plan_detail_response(approved)

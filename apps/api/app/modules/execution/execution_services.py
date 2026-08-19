@@ -41,6 +41,23 @@ class ExecutionService:
                 detail=f"Migration plan '{plan_id}' not found or access denied.",
             )
 
+        if plan.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Cannot execute unapproved migration plan. Plan status is '{plan.status}'. User approval is required.",
+            )
+
+        if plan.is_valid is False:
+            err_msg = (
+                plan.validation_errors.get("explanation")
+                if plan.validation_errors and isinstance(plan.validation_errors, dict)
+                else "Plan validation failed."
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Cannot execute invalid migration plan: {err_msg}",
+            )
+
         job = MigrationJob(
             id=uuid.uuid4(),
             migration_plan_id=plan.id,

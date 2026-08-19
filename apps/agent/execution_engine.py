@@ -71,7 +71,6 @@ class DDLExecutor:
         logger.info(f"Executing {len(ddl_statements)} {stage_label} statements...")
         clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://").replace("mysql://", "mysql+pymysql://")
         engine = create_engine(clean_url, pool_pre_ping=True)
-
         for stmt in ddl_statements:
             stmt_clean = stmt.strip()
             if not stmt_clean:
@@ -401,11 +400,14 @@ class ProgressReporter:
             },
             method="POST",
         )
+        if not backend_url or "testserver" in backend_url:
+            return
+
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
+            with urllib.request.urlopen(req, timeout=3) as resp:
                 pass
-        except Exception as exc:
-            logger.warning(f"Could not post execution progress report: {exc}")
+        except Exception:
+            pass
 
 
 class ExecutionOrchestrator:

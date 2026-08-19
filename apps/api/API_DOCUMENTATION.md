@@ -456,8 +456,38 @@ Handles AI plan generation using Google Gemini 3.5 Flash Lite and AST plan retri
 
 ### 5.4 Update Plan Data (User Customization)
 - **HTTP Method & Path**: `PUT /api/v1/plans/{plan_id}`
-- **Purpose**: Allows users to customize table/column mappings, DDL SQL, or deduplication rules in Web UI before execution.
+- **Purpose**: Allows users to customize table/column mappings, DDL SQL, or deduplication rules in Web UI before execution. Re-evaluates feasibility validator.
 - **Where Used**: Web UI Visual Plan Editor ("Save Plan Changes").
+- **Auth**: User JWT.
+
+---
+
+### 5.5 Refine Migration Plan with Natural Language Prompt Feedback
+- **HTTP Method & Path**: `POST /api/v1/plans/{plan_id}/refine`
+- **Purpose**: Accepts prompt feedback (e.g. *"rename table users to customer_accounts"*), invokes LLM refinement, runs feasibility validator, and updates plan.
+- **Where Used**: Web UI "AI Plan Assistant / Prompt Feedback" bar.
+- **Auth**: User JWT.
+- **Request Body**:
+```json
+{
+  "user_feedback": "Rename target table users to customer_accounts and drop password_hash"
+}
+```
+
+---
+
+### 5.6 Run Standalone Migration Feasibility Check
+- **HTTP Method & Path**: `POST /api/v1/plans/{plan_id}/validate`
+- **Purpose**: Evaluates plan blueprint against metadata snapshots and returns deterministic feasibility report (errors, warnings, explanation).
+- **Where Used**: Web UI "Check Migration Feasibility" button.
+- **Auth**: User JWT.
+
+---
+
+### 5.7 Approve Migration Plan
+- **HTTP Method & Path**: `POST /api/v1/plans/{plan_id}/approve`
+- **Purpose**: Marks plan as human-approved (`status: completed`), validating feasibility before approval.
+- **Where Used**: Web UI Plan Approval Gateway button.
 - **Auth**: User JWT.
 
 ---

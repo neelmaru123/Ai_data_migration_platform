@@ -1,0 +1,294 @@
+# Architecture Specification — AI Data Migration Platform
+
+Welcome to the **AI Data Migration Platform** architecture guide! This document provides a comprehensive, implementation-accurate overview of the platform's architectural principles, components, module responsibilities, end-to-end execution flows, and communication protocols.
+
+---
+
+## 1. Core Architectural Philosophy
+
+The platform decouples **transformation reasoning (Control Plane)** from **transformation execution (Data Plane)** under a strict **Zero Raw Data Ingestion Policy**.
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                              CONTROL PLANE (Cloud / Backend API)                       │
+ │                                                                                        │
+ │   ┌──────────────────────┐      ┌─────────────────────────┐      ┌──────────────────┐  │
+ │   │  Web UI (Next.js)    │ <──> │  FastAPI Backend API    │ <──> │  PostgreSQL DB   │  │
+ │   │  (Visual Blueprint,  │ (WS) │  (Auth, Metadata Store, │      │  (Control Plane  │  │
+ │   │   Progress & HITL)   │      │   LangGraph Engine)     │      │   Metadata Only) │  │
+ │   └──────────────────────┘      └────────────┬────────────┘      └──────────────────┘  │
+ └──────────────────────────────────────────────┼─────────────────────────────────────────┘
+                                                │ HTTPS REST API
+                                                │ (X-Agent-Token Authentication)
+                                                │ *ZERO Raw Customer Data Ever Transferred*
+ ┌──────────────────────────────────────────────┼─────────────────────────────────────────┐
+ │                                              ▼                                         │
+ │                               ON-PREMISE DATA PLANE (Customer VPC)                     │
+ │                                                                                        │
+ │   ┌────────────────────────────────────────────────────────────────────────────────┐   │
+ │   │                         Docker Agent Daemon (apps/agent)                       │   │
+ │   │                                                                                │   │
+ │   │   ┌───────────────────────────────┐     ┌──────────────────────────────────┐   │   │
+ │   │   │  AgentMetadataEngine          │     │  ExecutionOrchestrator           │   │   │
+ │   │   │  (Catalog Introspection:      │     │  (Chunked ETL, Polars AST        │   │   │
+ │   │   │   Postgres, MySQL, MongoDB)   │     │   Transforms, Bulk Loader)       │   │   │
+ │   │   └──────────────┬────────────────┘     └────────────────┬─────────────────┘   │   │
+ │   └──────────────────┼───────────────────────────────────────┼─────────────────────┘   │
+ │                      ▼                                       ▼                         │
+ │           ┌──────────────────────┐                ┌──────────────────────┐             │
+ │           │   Source Databases   │                │   Target Database    │             │
+ │           │ (Postgres, MySQL, …) │                │ (Postgres, MySQL, …) │             │
+ │           └──────────────────────┘                └──────────────────────┘             │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Architectural Pillars:
+
+1. **Zero Raw Data Ingestion**:
+   - Customer records **never** leave the customer's local infrastructure or VPC.
+   - The Control Plane only receives sanitized structural metadata ASTs (schema names, table definitions, column types, row count estimates, constraints, and foreign keys).
+
+2. **Deterministic Execution (No Dynamic Code Eval)**:
+   - AI models (Gemini 3.5 Flash Lite) are used **strictly** to reason about schema semantics and output a strongly typed Abstract Syntax Tree (`TransformationPlanAST`).
+   - ETL execution is 100% deterministic (powered by Polars, SQLAlchemy, and DuckDB). Dynamic evaluation (`eval()`, `exec()`, arbitrary Python code execution) is strictly forbidden.
+
+3. **Stateful Human-in-the-Loop (HITL) Reasoning**:
+   - Migration plans require explicit human review and approval before execution can be scheduled.
+   - Users can provide natural language refinement prompts or manually edit column mappings, triggering deterministic re-validation through LangGraph.
+
+4. **Resumable Chunked Streaming**:
+   - Data extraction and loading stream in bounded memory chunks (e.g. 50,000 rows per batch) with local checkpoint state persistence. If an agent crashes or restarts, migration resumes seamlessly from the last recorded offset without duplicate inserts.
+
+---
+
+## 2. System Components & Folder Breakdown
+
+The repository is organized as a multi-package architecture:
+
+```text
+ai-data-migration-platform/
+├── apps/
+│   ├── api/                     # Control Plane Backend (FastAPI, LangGraph, PostgreSQL)
+│   │   ├── alembic/             # Database schema migrations (001 through 006)
+│   │   ├── app/
+│   │   │   ├── core/            # Config, DB connections, Redis, WebSockets, Logging
+│   │   │   └── modules/
+│   │   │       ├── users/       # Auth, JWT, Google OAuth 2.0
+│   │   │       ├── agents/      # Agent lifecycle, tokens, heartbeat & docker run generator
+│   │   │       ├── sources/     # Logical Data Sources registry per agent
+│   │   │       ├── metadata/    # Schema snapshot catalog & sync endpoints
+│   │   │       ├── migration_plans/ # LangGraph 9-Node Engine, Gemini LLM & Validator
+│   │   │       └── execution/   # Job queue, state machine, progress & error logs
+│   │   ├── tests/               # Unit, integration, and security test suites
+│   │   └── pyproject.toml       # Python 3.11+ dependencies managed via Poetry
+│   │
+│   ├── agent/                   # On-Premise Docker Agent (Data Plane Runner)
+│   │   ├── main.py              # Agent daemon: socket diagnostics, heartbeats, job polling
+│   │   ├── metadata_engine.py   # Native SQL catalog introspection engine (Zero Raw Data)
+│   │   ├── execution_engine.py  # Local ETL engine: DDL executor, Polars transform, bulk loader
+│   │   ├── Dockerfile           # Minimal Python runtime container for customer deployment
+│   │   └── pyproject.toml       # Agent dependencies (Polars, SQLAlchemy, PyMySQL, psycopg2)
+│   │
+│   └── web/                     # Web UI Frontend (Next.js, React, TailwindCSS / CSS)
+│
+├── docs/                        # Architecture & system specifications
+├── DECISIONS.md                 # Architecture Decision Records (ADRs)
+└── EXECUTION_FLOW.md            # Detailed function-level call trees & state machines
+```
+
+---
+
+## 3. Detailed Module Responsibilities
+
+### 3.1 Control Plane Backend (`apps/api/app/modules/`)
+
+| Module | Primary Responsibility | Key Files |
+| :--- | :--- | :--- |
+| **`users`** | Handles user registration, password hashing (bcrypt), JWT session cookies, and Google OAuth 2.0 authentication. | `users_routes.py`, `users_services.py`, `users_models.py` |
+| **`agents`** | Manages Docker Agent identity, generates secure SHA-256 API tokens, receives 10s heartbeat diagnostics, and dynamically builds custom `docker run` commands with pre-filled environment variables. | `agents_routes.py`, `agents_services.py`, `agents_command_generator.py` |
+| **`sources`** | Registers logical data sources (PostgreSQL, MySQL, MongoDB, CSV, Excel, Parquet) attached to an agent and tracks live connectivity health. | `sources_routes.py`, `sources_services.py`, `sources_models.py` |
+| **`metadata`** | Ingests structural metadata snapshots from agents (`POST /api/v1/metadata/sync`), persisting versioned tables, columns, constraints, and relationships. | `metadata_routes.py`, `metadata_services.py`, `metadata_models.py` |
+| **`migration_plans`** | Houses the **LangGraph 9-Node Agent Engine**, **Gemini 3.5 Flash Lite prompt generator**, and **5-Stage Migration Feasibility Validator**. Manages plan generation, feedback refinement loops, and approval gating. | `migration_plans_graph.py`, `migration_plans_llm.py`, `migration_plans_validator.py`, `migration_plans_ast.py` |
+| **`execution`** | Manages migration job queues, enforces approval validation guards (`is_valid=True`, `status='completed'`), receives chunked ETL progress, and stores row-level diagnostic error logs. | `execution_routes.py`, `execution_services.py`, `execution_models.py` |
+
+---
+
+### 3.2 On-Premise Docker Agent (`apps/agent/`)
+
+| Component | Responsibility |
+| :--- | :--- |
+| **`main.py`** | Agent daemon process. Runs startup multi-threaded TCP socket connectivity tests against configured database URLs (`SRC_*_URL`, `DEST_*_URL`), sends periodic heartbeats (`POST /api/v1/agents/heartbeat`), triggers schema introspection, and polls for pending execution jobs (`GET /api/v1/executions/pending`). |
+| **`metadata_engine.py`** (`AgentMetadataEngine`) | Queries native database system catalogs (`information_schema.tables`, `information_schema.columns`, `table_constraints`, `pg_class`, `sqlite_master`) without reading user data rows. Builds structured JSON snapshot payloads and syncs via `POST /api/v1/metadata/sync`. |
+| **`execution_engine.py`** (`ExecutionOrchestrator`) | The local ETL execution engine: <br>1. **`DDLExecutor`**: Executes pre/post-migration DDL scripts on the target database.<br>2. **`SourceConnectorFactory`**: Reads source data in 50,000-row streaming chunks.<br>3. **`ASTTransformer`**: Applies in-memory Polars transformations (type casting, expressions, splits, concatenations).<br>4. **`TableMerger`**: Merges multi-source tables and applies deduplication strategies.<br>5. **`CheckpointManager`**: Persists row offsets locally per table for crash resilience.<br>6. **`TargetWriterFactory`**: Performs high-performance bulk insertions into target database.<br>7. **`ProgressReporter`**: Sends real-time progress updates to backend via HTTPS. |
+
+---
+
+## 4. End-to-End Application Workflows
+
+### 4.1 Workflow 1: Agent Setup & Live Diagnostic Heartbeats
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User (Browser)
+    participant UI as Web Dashboard
+    participant API as FastAPI Backend
+    participant Agent as Docker Agent Daemon
+
+    User->>UI: Register Agent & Configure Data Sources
+    UI->>API: POST /api/v1/agents
+    API-->>UI: Returns agent_id, api_token & dynamic docker run command
+    User->>Agent: Starts Docker Agent Container (docker run -d ...)
+    Agent->>Agent: Runs concurrent TCP socket probes on DB URLs
+    loop Every 10-15 Seconds
+        Agent->>API: POST /api/v1/agents/heartbeat (X-Agent-Token)
+        API->>API: Updates status (online/degraded/offline) & latency
+        API-->>UI: Broadcasts AGENT_ONLINE via WebSocket
+    end
+```
+
+---
+
+### 4.2 Workflow 2: Zero-Raw-Data Schema Introspection
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Agent as Docker Agent
+    participant DB as Customer Source DBs
+    participant API as FastAPI Backend
+    participant DBStore as PostgreSQL (Control Plane)
+
+    Agent->>DB: Query system catalogs (information_schema)
+    DB-->>Agent: Returns table names, column types, constraints, row counts
+    Agent->>Agent: Construct Zero-Raw-Data MetadataSnapshot AST
+    Agent->>API: POST /api/v1/metadata/sync (Header: X-Agent-Token)
+    API->>DBStore: Persist MetadataSnapshot, Schemas, Tables, Columns, Constraints
+    API-->>Agent: Return 201 Created (Snapshot ID & version)
+```
+
+---
+
+### 4.3 Workflow 3: AI Migration Plan Generation & Validation (LangGraph 9-Node Engine)
+
+When the user requests an AI plan generation (`POST /api/v1/plans/generate`), the request is executed by the stateful **LangGraph StateGraph** (`migration_plans_graph.py`):
+
+```mermaid
+flowchart TD
+    Start([User Request: Generate / Refine Plan]) --> N1[Node 1: serialize_context_node<br>Zero-Raw-Data Schema YAML Context]
+    N1 --> N2[Node 2: generate_plan_ast_node<br>Calls Gemini 3.5 Flash Lite LLM]
+    N2 --> N3[Node 3: validate_feasibility_node<br>5-Stage Deterministic Validator]
+    
+    N3 -->|Validation Errors Found<br>Retries < 3| N4[Node 4: auto_correct_ast_node<br>Feeds Errors back to LLM]
+    N4 --> N2
+    
+    N3 -->|Exceeded 3 Retries| N8[Node 8: explanation_generator_node<br>Builds Diagnostic Report]
+    
+    N3 -->|Validation Passed / Warnings Only| N5[Node 5: human_approval_interrupt_node<br>Pauses Graph State via interrupt]
+    
+    N5 -->|User Provided Natural Language Feedback| N6[Node 6: process_user_feedback_node]
+    N6 --> N2
+    
+    N5 -->|User Made Manual AST Edits in UI| N7[Node 7: process_manual_edits_node]
+    N7 --> N3
+    
+    N5 -->|User Approved Plan| N9[Node 9: finalize_and_persist_node<br>Sets status=completed]
+    N9 --> Persist[(Persist Plan DB Record)]
+    N8 --> Persist
+```
+
+#### The 5-Stage Feasibility Validator Checks:
+1. **Stage A (Source Table Check)**: Every source table referenced in AST exists in the metadata snapshot.
+2. **Stage B (Source Column Check)**: Every source column mapped exists in the source table schema.
+3. **Stage C (Data Type Casting Check)**: Flag illegal casts (e.g. `VARCHAR` ➔ `INTEGER` without sanitization).
+4. **Stage D (Foreign Key Reference Check)**: Foreign keys in `post_migration_ddl` reference valid target tables.
+5. **Stage E (Deduplication Key Check)**: Deduplication keys reference real mapped target columns.
+
+---
+
+### 4.4 Workflow 4: Execution & Resumable Streaming ETL
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as User
+    participant UI as Web Dashboard
+    participant API as FastAPI Backend
+    participant Agent as Docker Agent
+    participant TargetDB as Customer Target DB
+
+    User->>UI: Click "Approve & Execute Migration"
+    UI->>API: POST /api/v1/plans/{id}/approve (status: completed)
+    UI->>API: POST /api/v1/plans/{id}/execute
+    API->>API: Validates is_valid is True and status is completed, queues Job
+    
+    loop Job Polling
+        Agent->>API: GET /api/v1/executions/pending
+        API-->>Agent: Returns queued Job ID and TransformationPlanAST
+    end
+    
+    Agent->>TargetDB: Execute Pre-Migration DDL (CREATE TABLE, EXTENSION)
+    
+    loop Streaming Chunks (50,000 rows per batch)
+        Agent->>Agent: Extract source chunk, Polars AST Transform, Merge and Deduplicate
+        Agent->>TargetDB: Bulk INSERT INTO target table
+        Agent->>Agent: Save Checkpoint Offset locally per table
+        Agent->>API: POST /api/v1/executions/{id}/progress (HTTP)
+        API-->>UI: Stream progress percentage and rows via WebSocket
+    end
+    
+    Agent->>TargetDB: Execute Post-Migration DDL (Foreign Keys, Indexes)
+    Agent->>API: POST /api/v1/executions/{id}/progress (status: completed, 100%)
+    API-->>UI: Broadcasts JOB_COMPLETED via WebSocket
+```
+
+---
+
+## 5. Communication Protocols & Security Model
+
+| Channel | Protocol | Auth Mechanism | Payload / Purpose |
+| :--- | :--- | :--- | :--- |
+| **Agent ➔ Backend** | **HTTPS (REST)** | `X-Agent-Token` (SHA-256 hash verified) | Heartbeats, schema snapshots, job progress reports |
+| **Backend ➔ Web UI** | **WebSockets (`wss://`)** | JWT Bearer Token | Real-time progress bars, stage transitions, agent online status |
+| **Web UI ➔ Backend** | **HTTPS (REST)** | HTTP-only JWT Cookie (`access_token`) | CRUD operations, plan generation, HITL approval |
+| **Agent ➔ Customer DBs** | **Native SQL TCP** | Local connection strings inside Docker container | Reading source rows, bulk writing target rows |
+
+> 🔒 **Security Guarantee**: The backend Control Plane **never stores** customer database passwords. Connection strings are passed directly to the local Docker Agent container as environment variables (`SRC_*_URL`, `DEST_*_URL`) on the customer's own host machine.
+
+---
+
+## 6. Observability & Tracing (LangSmith)
+
+The Control Plane integrates with **LangSmith** for full execution observability across LangGraph nodes and Gemini LLM reasoning steps:
+
+- **Environment Variables**:
+  - `LANGCHAIN_TRACING_V2=true`
+  - `LANGCHAIN_API_KEY=lsv2_...`
+  - `LANGCHAIN_PROJECT="Data migration platform"`
+  - `LANGCHAIN_ENDPOINT="https://api.smith.langchain.com"`
+- **Traced Components**:
+  - Full StateGraph node transitions (`serialize_context` ➔ `generate_plan_ast` ➔ `validate_feasibility`).
+  - LLM prompts, temperature, token counts, and raw JSON AST outputs.
+  - Feasibility validation error feedback loops.
+
+---
+
+## 7. Database Migrations (Alembic)
+
+The Control Plane database schema is versioned using Alembic in `apps/api/alembic/versions/`:
+
+- `001_initial_control_plane_schema.py`: Initial users, connections, plans, jobs, metadata catalog.
+- `002_add_agents_and_agent_relationships.py`: Agent entities and relationships.
+- `003_add_google_auth_to_users.py`: Google OAuth 2.0 fields on `users`.
+- `004_update_database_architecture_agent_centric.py`: Decouples connections into Agent-centric `data_sources` and N:M `migration_plan_snapshots`.
+- `005_add_agent_tokens_and_datasource_diagnostics.py`: Agent API token hashing and connection diagnostics (`last_error`, `status`).
+- `006_add_feasibility_and_langgraph_to_plans.py`: Adds `is_valid`, `validation_errors`, and `langgraph_thread_id` to `migration_plans`.
+
+---
+
+## 8. Summary for New Contributors
+
+When exploring or modifying the codebase, remember the **Golden Rules**:
+1. **Never read customer data in the Control Plane**: Only metadata and AST plans live in `apps/api`.
+2. **Deterministic execution only**: Any new transformation feature must be added as a typed Pydantic spec in `migration_plans_ast.py` and executed deterministically in `execution_engine.py` using Polars/DuckDB.
+3. **Always preserve HITL approval**: No migration job may execute without passing through `human_approval_interrupt_node` and having `is_valid == True` and `status == 'completed'`.

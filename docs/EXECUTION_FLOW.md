@@ -345,7 +345,45 @@ This document maps entry points, call stack sequences, and module dependencies a
    Discovers queued job -> Loads CheckpointManager -> RESUMES AT ROW 850,000 INSTANTLY 🚀
 ```
 
+---
 
+## 9. Phase 5 LangGraph Stateful Agent & Feasibility Validation Flow
 
+```text
+  Web UI / API Client (migration_plans_routes.py)
+        │
+        │ 1. POST /api/v1/plans/generate  OR  POST /api/v1/plans/{id}/refine
+        ▼
+  LangGraph State Graph Engine (migration_plans_graph.py)
+        │
+        ├─► Node 1: serialize_context_node
+        │     - Converts MetadataSnapshots to Zero-Raw-Data YAML context string
+        │
+        ├─► Node 2: generate_plan_ast_node
+        │     - Invokes Gemini via LLMPlanGeneratorService (generates/refines AST with 3-attempt retry loop)
+        │
+        ├─► Node 3: validate_feasibility_node
+        │     - Runs MigrationPlanValidator (5-stage schema & FK reference checks)
+        │
+        ├─► Conditional Router 1 (is_valid?)
+        │     ├─► False & attempt_count < 3 ──► Node 4: auto_correct_ast_node (Feeds errors back to LLM, try/except guarded)
+        │     ├─► False & attempt_count >= 3 ─► Node 8: explanation_generator_node (Generates diagnostic report)
+        │     └─► True ───────────────────────► Node 5: human_approval_interrupt_node (Pauses Graph State)
+        │
+        ▼
+  Human Review State (Web UI Visual Editor)
+        │
+        ├─► User action: Natural language prompt ─► Node 6: process_user_feedback_node (Loops to Node 2)
+        ├─► User action: Direct UI edits ─────────► Node 7: process_manual_edits_node (Re-validates via Node 3)
+        └─► User action: Approve Plan ────────────► Node 9: finalize_and_persist_node (Persists & Emits PLAN_GENERATED WS Event)
+        │
+        ▼
+  Execution Guard (execution_routes.py & execution_services.py)
+        │
+        │ POST /api/v1/plans/{id}/execute checks:
+        │ 1. plan.status == 'completed' (HITL Approved)
+        │ 2. plan.is_valid == True (Schema Verified)
+        │ Unapproved or invalid plans blocked with HTTP 422
+```
 
 
