@@ -317,6 +317,17 @@ class AgentService:
         failed_jobs_count = 0
 
         for agent in stale_agents:
+            # Check if there is an active job updated recently AND agent was seen recently (keeps agent alive during progress reports)
+            stmt_active_job = select(MigrationJob).where(
+                MigrationJob.agent_id == agent.id,
+                MigrationJob.status.in_(["running", "preparing"]),
+                MigrationJob.updated_at >= cutoff_time,
+            )
+            res_active_job = await session.execute(stmt_active_job)
+            active_job = res_active_job.scalar_one_or_none()
+            if active_job and agent.last_seen_at and agent.last_seen_at >= cutoff_time:
+                continue
+
             agent.status = "offline"
             logger.warning(
                 f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}). Marked offline."

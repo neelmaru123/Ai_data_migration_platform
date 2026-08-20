@@ -18,15 +18,21 @@ from pydantic import BaseModel, ConfigDict, Field
 # ============================================================================
 
 COLUMN_TRANSFORMATION_TYPES = Literal[
-    "direct_copy",       # 1:1 column copy, no transformation
-    "merge_concat",      # Combine 2+ source columns into 1 target column
-    "type_cast",         # Data type conversion (VARCHAR → UUID, INT → BIGINT)
-    "split",             # Decompose 1 source column into 2+ target columns
-    "expression",        # Derive value using SQL expression
-    "lookup_join",       # Resolve FK → referenced table descriptive column
-    "default_constant",  # Fill with hardcoded constant value
-    "drop_column",       # Source column has no target equivalent — dropped
-    "new_column_added",  # New target column with no source equivalent
+    "direct_copy",        # 1:1 column copy, no transformation
+    "merge_concat",       # Combine 2+ source columns into 1 target column
+    "type_cast",          # Data type conversion (VARCHAR → UUID, INT → BIGINT)
+    "split",              # Decompose 1 source column into 2+ target columns
+    "expression",         # Derive value using SQL expression
+    "lookup_join",        # Resolve FK → referenced table descriptive column
+    "default_constant",   # Fill with hardcoded constant value
+    "drop_column",        # Source column has no target equivalent — dropped
+    "new_column_added",   # New target column with no source equivalent
+    # NoSQL & Cross-Dialect Extensions:
+    "json_flatten",       # Flatten nested document path (e.g. address.city → address_city)
+    "json_stringify",     # Convert complex object/array to JSON string
+    "array_to_csv",       # Convert Postgres array (TEXT[]) to CSV string
+    "array_to_json",      # Convert Postgres array to JSON array string
+    "nosql_field_promote",# Promote high-coverage MongoDB field to dedicated column
 ]
 
 TABLE_TRANSFORMATION_TYPES = Literal[

@@ -128,10 +128,22 @@ def run_multi_source_migration_simulation():
     # 5. EXECUTE PRE-MIGRATION DDL ON TARGET DATABASE
     # --------------------------------------------------------------------------
     target_db_url = "postgresql+psycopg2://postgres:postgres_password@localhost:5434/migration_platform"
-    print(f"[Step 5] Executing Target Pre-Migration DDL on PostgreSQL (Port 5434)...")
+    target_engine_type = "postgresql"
+
+    # Fallback to SQLite if PostgreSQL container is offline
+    try:
+        test_eng = create_engine(target_db_url, connect_args={"connect_timeout": 2})
+        with test_eng.connect() as conn:
+            pass
+        print(f"[Step 5] Executing Target Pre-Migration DDL on PostgreSQL (Port 5434)...")
+    except Exception:
+        db_file = os.path.join(os.path.dirname(__file__), "target_simulation.db")
+        target_db_url = f"sqlite:///{db_file}"
+        target_engine_type = "sqlite"
+        print(f"[Step 5] PostgreSQL container offline. Using SQLite fallback for simulation ('{db_file}')...")
 
     pre_ddl = [
-        "DROP TABLE IF EXISTS target_unified_users CASCADE;",
+        "DROP TABLE IF EXISTS target_unified_users;",
         """
         CREATE TABLE target_unified_users (
             id VARCHAR(64) PRIMARY KEY,
@@ -151,7 +163,7 @@ def run_multi_source_migration_simulation():
     print("[Step 6] Bulk Loading Merged DataFrame into Target Database...")
     succ, fail = TargetWriterFactory.bulk_load(
         db_url=target_db_url,
-        engine_type="postgresql",
+        engine_type=target_engine_type,
         table_name="target_unified_users",
         df=merged_df
     )

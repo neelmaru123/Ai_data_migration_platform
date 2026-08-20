@@ -188,6 +188,18 @@ class ExecutionService:
         if update.error_message:
             job.error_message = update.error_message
 
+        # Refresh agent last_seen_at and status to prevent heartbeat starvation during ETL execution
+        if job.agent_id:
+            stmt_agent = select(Agent).where(Agent.id == job.agent_id)
+            res_agent = await session.execute(stmt_agent)
+            agent_obj = res_agent.scalar_one_or_none()
+            if agent_obj:
+                agent_obj.last_seen_at = now
+                if update.status == "running":
+                    agent_obj.status = "busy"
+                elif update.status in ["completed", "failed"]:
+                    agent_obj.status = "online"
+
         await session.commit()
         await session.refresh(job)
 

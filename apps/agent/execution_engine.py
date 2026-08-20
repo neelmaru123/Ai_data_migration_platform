@@ -23,6 +23,37 @@ logger = logging.getLogger("docker-agent-execution")
 logger.setLevel(logging.INFO)
 
 
+def _get_engine(db_url: str):
+    """Creates a SQLAlchemy engine with connection pooling, recycle limits, and active TCP keepalives."""
+    clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://").replace("mysql://", "mysql+pymysql://")
+    connect_args = {}
+    if "postgres" in clean_url:
+        connect_args = {
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 5,
+        }
+    return create_engine(
+        clean_url,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_timeout=30,
+        connect_args=connect_args,
+    )
+
+
+def _quote_identifier(name: str, engine_type: str = "postgresql") -> str:
+    """Safely quotes table and column identifiers based on database dialect."""
+    if not name:
+        return ""
+    engine_type = engine_type.lower()
+    clean_name = name.replace("`", "").replace('"', '')
+    if "mysql" in engine_type or "mariadb" in engine_type:
+        return f"`{clean_name}`"
+    return f'"{clean_name}"'
+
+
 class CheckpointManager:
     """Manages resumable checkpointing per table to prevent restarting from zero on agent crash."""
 
@@ -70,8 +101,7 @@ class DDLExecutor:
             return
 
         logger.info(f"Executing {len(ddl_statements)} {stage_label} statements...")
-        clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://").replace("mysql://", "mysql+pymysql://")
-        engine = create_engine(clean_url, pool_pre_ping=True)
+        engine = _get_engine(db_url)
 
         for stmt in ddl_statements:
             stmt_clean = stmt.strip()
@@ -86,7 +116,7 @@ class DDLExecutor:
 
 
 class SourceConnectorFactory:
-    """Factory creating chunked stream readers for PostgreSQL, MySQL, MongoDB, CSV, and Excel."""
+    """Factory creating chunked stream readers for PostgreSQL, MySQL, MongoDB, CSV, and Excel with Keyset Pagination support."""
 
     @staticmethod
     def read_source_chunk(
@@ -94,30 +124,43 @@ class SourceConnectorFactory:
         engine_type: str,
         table_or_file_name: str,
         offset: int = 0,
-        chunk_size: int = 50000
-    ) -> Tuple[pl.DataFrame, bool]:
+        chunk_size: int = 50000,
+        pk_col: Optional[str] = None,
+        last_pk_val: Optional[Any] = None,
+    ) -> Tuple[pl.DataFrame, bool, Optional[Any]]:
         """
         Reads a chunk of rows from the source database using Polars or SQLAlchemy streaming.
-        Returns a tuple of (DataFrame, has_more_rows).
+        Supports Keyset Pagination (WHERE pk > last_pk ORDER BY pk) to eliminate offset drift on live DBs.
+        Returns a tuple of (DataFrame, has_more_rows, next_last_pk_val).
         """
         engine_type = engine_type.lower()
+        quoted_table = _quote_identifier(table_or_file_name, engine_type)
 
         # 1. SQL Relational Databases (PostgreSQL, MySQL, SQLite)
         if engine_type in ["postgresql", "postgres", "mysql", "mariadb", "sqlite"]:
-            clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://").replace("mysql://", "mysql+pymysql://")
-            query = f'SELECT * FROM "{table_or_file_name}" LIMIT {chunk_size} OFFSET {offset}'
-            if "mysql" in clean_url or "mariadb" in clean_url:
-                query = f"SELECT * FROM `{table_or_file_name}` LIMIT {chunk_size} OFFSET {offset}"
-
             try:
-                engine = create_engine(clean_url, pool_pre_ping=True)
-                with engine.connect() as conn:
-                    df = pl.read_database(query=query, connection=conn)
+                engine = _get_engine(db_url)
+                if pk_col and last_pk_val is not None:
+                    quoted_pk = _quote_identifier(pk_col, engine_type)
+                    query = f"SELECT * FROM {quoted_table} WHERE {quoted_pk} > :last_pk ORDER BY {quoted_pk} ASC LIMIT {chunk_size}"
+                    with engine.connect() as conn:
+                        df = pl.read_database(query=text(query), connection=conn, params={"last_pk": last_pk_val})
+                else:
+                    quoted_pk = _quote_identifier(pk_col, engine_type) if pk_col else None
+                    order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
+                    query = f"SELECT * FROM {quoted_table}{order_by_clause} LIMIT {chunk_size} OFFSET {offset}"
+                    with engine.connect() as conn:
+                        df = pl.read_database(query=query, connection=conn)
+
                 has_more = len(df) == chunk_size
-                return df, has_more
+                next_pk = None
+                if not df.is_empty() and pk_col and pk_col in df.columns:
+                    next_pk = df[pk_col][-1]
+
+                return df, has_more, next_pk
             except Exception as exc:
                 logger.error(f"Error reading SQL source chunk for table '{table_or_file_name}' (Offset: {offset}): {exc}")
-                return pl.DataFrame(), False
+                return pl.DataFrame(), False, last_pk_val
 
         # 2. MongoDB Collection
         elif engine_type == "mongodb":
@@ -131,7 +174,7 @@ class SourceConnectorFactory:
                 client.close()
 
                 if not docs:
-                    return pl.DataFrame(), False
+                    return pl.DataFrame(), False, None
 
                 for d in docs:
                     if "_id" in d:
@@ -139,10 +182,10 @@ class SourceConnectorFactory:
 
                 df = pl.DataFrame(docs)
                 has_more = len(df) == chunk_size
-                return df, has_more
+                return df, has_more, None
             except Exception as exc:
                 logger.error(f"Error reading MongoDB collection '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False
+                return pl.DataFrame(), False, None
 
         # 3. CSV File
         elif engine_type == "csv" or table_or_file_name.endswith(".csv"):
@@ -150,11 +193,11 @@ class SourceConnectorFactory:
                 if os.path.exists(table_or_file_name):
                     df = pl.read_csv(table_or_file_name, n_rows=chunk_size, skip_rows=offset)
                     has_more = len(df) == chunk_size
-                    return df, has_more
-                return pl.DataFrame(), False
+                    return df, has_more, None
+                return pl.DataFrame(), False, None
             except Exception as exc:
                 logger.error(f"Error reading CSV file '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False
+                return pl.DataFrame(), False, None
 
         # 4. Excel File
         elif engine_type in ["excel", "xlsx"] or table_or_file_name.endswith(".xlsx"):
@@ -163,15 +206,15 @@ class SourceConnectorFactory:
                     df = pl.read_excel(table_or_file_name)
                     df_chunk = df.slice(offset, chunk_size)
                     has_more = (offset + chunk_size) < len(df)
-                    return df_chunk, has_more
-                return pl.DataFrame(), False
+                    return df_chunk, has_more, None
+                return pl.DataFrame(), False, None
             except Exception as exc:
                 logger.error(f"Error reading Excel file '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False
+                return pl.DataFrame(), False, None
 
         else:
             logger.warning(f"Unsupported engine type '{engine_type}'. Returning empty DataFrame.")
-            return pl.DataFrame(), False
+            return pl.DataFrame(), False, None
 
 
 class ASTTransformer:
@@ -204,22 +247,43 @@ class ASTTransformer:
                 if src_name in df.columns:
                     exprs.append(pl.col(src_name).alias(target_col))
 
-            # 2. type_cast (e.g. INT -> UUID or STRING -> DATETIME)
+            # 2. type_cast (e.g. INT -> UUID, STRING -> DATETIME UTC, PREFIX_ID)
             elif trans_type == "type_cast":
-                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                src_name = source_cols[0]["column_name"] if source_cols and "column_name" in source_cols[0] else target_col
+                src_ident = source_cols[0].get("identifier", "source") if source_cols else "source"
                 target_dtype = col_spec.get("target_data_type", "varchar").lower()
+                pk_strategy = col_spec.get("primary_key_strategy", "uuid_v5")
+
                 if src_name in df.columns:
                     if "uuid" in target_dtype:
-                        # Deterministic UUID v5 namespace hashing
-                        uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                            lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, str(val))) if val else str(uuid.uuid4()),
-                            return_dtype=pl.Utf8
-                        )
+                        if pk_strategy == "uuid_v4_rekey":
+                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                                lambda val: str(uuid.uuid4()),
+                                return_dtype=pl.Utf8
+                            )
+                        elif pk_strategy == "prefix_id":
+                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                                lambda val: f"{src_ident}_{val}" if val else str(uuid.uuid4()),
+                                return_dtype=pl.Utf8
+                            )
+                        else:
+                            # Deterministic UUID v5 namespace hashing by default
+                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                                lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{src_ident}_{val}")) if val else str(uuid.uuid4()),
+                                return_dtype=pl.Utf8
+                            )
                         exprs.append(uuid_expr.alias(target_col))
                     elif "int" in target_dtype:
                         exprs.append(pl.col(src_name).cast(pl.Int64, strict=False).alias(target_col))
-                    elif "timestamp" in target_dtype or "datetime" in target_dtype:
-                        exprs.append(pl.col(src_name).cast(pl.Datetime, strict=False).alias(target_col))
+                    elif "timestamp" in target_dtype or "datetime" in target_dtype or "timestamptz" in target_dtype:
+                        # ISO-8601 UTC normalization
+                        dt_expr = (
+                            pl.col(src_name)
+                            .cast(pl.Utf8)
+                            .str.replace(r" ", "T")
+                            .str.to_datetime(strict=False)
+                        )
+                        exprs.append(dt_expr.alias(target_col))
                     else:
                         exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
 
@@ -258,7 +322,100 @@ class ASTTransformer:
                     if src_name in df.columns:
                         exprs.append(pl.col(src_name).alias(target_col))
 
-            # 8. lookup_join / fallback
+            # 8. json_flatten (e.g. address.city -> address_city)
+            elif trans_type == "json_flatten":
+                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                if src_name in df.columns:
+                    exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
+                elif "." in src_name:
+                    parts = src_name.split(".")
+                    root_col = parts[0]
+                    sub_paths = parts[1:]
+                    if root_col in df.columns:
+                        def _extract_nested(val, paths=sub_paths):
+                            curr = val
+                            if hasattr(curr, "to_dict"):
+                                curr = curr.to_dict()
+                            for p in paths:
+                                if isinstance(curr, dict):
+                                    curr = curr.get(p, "")
+                                elif isinstance(curr, str) and curr.startswith("{"):
+                                    try:
+                                        curr = json.loads(curr).get(p, "")
+                                    except Exception:
+                                        return ""
+                                else:
+                                    return ""
+                            return str(curr) if curr is not None else ""
+
+                        flatten_expr = pl.col(root_col).map_elements(
+                            _extract_nested, return_dtype=pl.Utf8
+                        )
+                        exprs.append(flatten_expr.alias(target_col))
+
+            # 9. json_stringify (e.g. dict/list -> JSON string / JSONB payload)
+            elif trans_type == "json_stringify":
+                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                if src_name in df.columns:
+                    def _safe_json_dumps(val):
+                        if hasattr(val, "to_dict"):
+                            val = val.to_dict()
+                        elif hasattr(val, "to_list"):
+                            val = val.to_list()
+                        if isinstance(val, (dict, list)):
+                            return json.dumps(val)
+                        if isinstance(val, str) and (val.startswith("{") or val.startswith("[")):
+                            return val
+                        if val is not None:
+                            return json.dumps(val)
+                        return "{}"
+
+                    stringify_expr = pl.col(src_name).map_elements(
+                        _safe_json_dumps, return_dtype=pl.Utf8
+                    )
+                    exprs.append(stringify_expr.alias(target_col))
+
+            # 10. array_to_csv (e.g. tags List -> "tag1,tag2")
+            elif trans_type == "array_to_csv":
+                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                if src_name in df.columns:
+                    def _safe_array_to_csv(val):
+                        if hasattr(val, "to_list"):
+                            val = val.to_list()
+                        if isinstance(val, (list, tuple, set)):
+                            return ",".join(map(str, val))
+                        return str(val or "")
+
+                    csv_expr = pl.col(src_name).map_elements(
+                        _safe_array_to_csv, return_dtype=pl.Utf8
+                    )
+                    exprs.append(csv_expr.alias(target_col))
+
+            # 11. array_to_json (e.g. tags List -> '["tag1", "tag2"]')
+            elif trans_type == "array_to_json":
+                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                if src_name in df.columns:
+                    def _safe_array_to_json(val):
+                        if hasattr(val, "to_list"):
+                            val = val.to_list()
+                        if isinstance(val, (list, tuple, set)):
+                            return json.dumps(val)
+                        if val is not None:
+                            return json.dumps([val])
+                        return "[]"
+
+                    json_arr_expr = pl.col(src_name).map_elements(
+                        _safe_array_to_json, return_dtype=pl.Utf8
+                    )
+                    exprs.append(json_arr_expr.alias(target_col))
+
+            # 12. nosql_field_promote
+            elif trans_type == "nosql_field_promote":
+                src_name = source_cols[0]["column_name"] if source_cols else target_col
+                if src_name in df.columns:
+                    exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
+
+            # 13. lookup_join / fallback
             else:
                 src_name = source_cols[0]["column_name"] if source_cols else target_col
                 if src_name in df.columns:
@@ -298,7 +455,11 @@ class TableMerger:
 
         if dedup_key and dedup_key in combined.columns:
             keep_opt = "first" if strategy == "first_wins" else "last"
-            combined = combined.unique(subset=[dedup_key], keep=keep_opt)
+            # Null-Exempt Deduplication: Only unique non-null/non-empty business keys
+            valid_mask = (pl.col(dedup_key).is_not_null()) & (pl.col(dedup_key).cast(pl.Utf8).str.strip_chars() != "")
+            df_valid = combined.filter(valid_mask).unique(subset=[dedup_key], keep=keep_opt)
+            df_nulls = combined.filter(~valid_mask)
+            combined = pl.concat([df_valid, df_nulls], how="vertical")
             logger.info(f"Deduplicated combined table on '{dedup_key}' using '{strategy}' strategy (Remaining rows: {len(combined)}).")
 
         return combined
@@ -340,23 +501,18 @@ class TargetWriterFactory:
 
         # 2. PostgreSQL & MySQL Target Writer
         else:
-            clean_url = db_url
-            if "postgres" in engine_type:
-                clean_url = db_url.replace("postgresql://", "postgresql+psycopg2://")
-            elif "mysql" in engine_type:
-                clean_url = db_url.replace("mysql://", "mysql+pymysql://")
-
-            engine = create_engine(clean_url, pool_pre_ping=True)
+            engine = _get_engine(db_url)
             columns = list(rows[0].keys())
 
+            quoted_table = _quote_identifier(table_name, engine_type)
+            quoted_cols = [_quote_identifier(c, engine_type) for c in columns]
+            col_names = ", ".join(quoted_cols)
+            placeholders = ", ".join([f":{c}" for c in columns])
+
             if "mysql" in engine_type:
-                col_names = ", ".join([f"`{c}`" for c in columns])
-                placeholders = ", ".join([f":{c}" for c in columns])
-                insert_sql = f'INSERT IGNORE INTO `{table_name}` ({col_names}) VALUES ({placeholders});'
+                insert_sql = f'INSERT IGNORE INTO {quoted_table} ({col_names}) VALUES ({placeholders});'
             else:
-                col_names = ", ".join([f'"{c}"' for c in columns])
-                placeholders = ", ".join([f":{c}" for c in columns])
-                insert_sql = f'INSERT INTO "{table_name}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
+                insert_sql = f'INSERT INTO {quoted_table} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
 
             try:
                 with engine.begin() as conn:
@@ -365,14 +521,26 @@ class TargetWriterFactory:
                 logger.info(f"Bulk-inserted {successful_rows} rows into target table '{table_name}'.")
             except Exception as exc:
                 logger.warning(f"Batch bulk insert notice for table '{table_name}': {exc}. Retrying per-row insertion...")
-                # Fallback to per-row insertion to maximize successful rows
+                # Fallback to per-row insertion with sample error capping and 50% abort threshold
+                MAX_SAMPLE_ERRORS = 100
+                ABORT_THRESHOLD_PERCENT = 0.50
+                ABORT_THRESHOLD_SAMPLE_SIZE = 1000
+
                 with engine.begin() as conn:
-                    for row in rows:
+                    for idx, row in enumerate(rows):
                         try:
                             conn.execute(text(insert_sql), [row])
                             successful_rows += 1
-                        except Exception:
+                        except Exception as row_exc:
                             failed_rows += 1
+                            if failed_rows <= MAX_SAMPLE_ERRORS:
+                                logger.warning(f"Row insertion notice in table '{table_name}' (Row #{idx}): {row_exc}")
+
+                            if (idx + 1) >= ABORT_THRESHOLD_SAMPLE_SIZE and (failed_rows / (idx + 1)) > ABORT_THRESHOLD_PERCENT:
+                                raise RuntimeError(
+                                    f"Migration aborted for table '{table_name}': Error rate exceeded {ABORT_THRESHOLD_PERCENT*100:.0f}% "
+                                    f"({failed_rows}/{idx+1} rows failed). Please verify target schema and column mapping specs."
+                                )
 
             return successful_rows, failed_rows
 
@@ -508,30 +676,54 @@ class ExecutionOrchestrator:
                     elif "mongo" in db_url:
                         src_engine = "mongodb"
 
-                # Resumable Checkpoint offset
+                # Detect primary key column if available for keyset pagination
+                pk_col = None
+                for col in column_mappings:
+                    if col.get("is_primary_key"):
+                        src_cols = col.get("source_columns", [])
+                        if src_cols and "column_name" in src_cols[0]:
+                            pk_col = src_cols[0]["column_name"]
+                            break
+
+                # Resumable Checkpoint offset & cursor
                 offset = CheckpointManager.get_last_offset(job_id, target_table)
+                last_pk_val = None
                 has_more = True
 
                 while has_more:
-                    df_raw, has_more = SourceConnectorFactory.read_source_chunk(
+                    df_raw, has_more, next_pk = SourceConnectorFactory.read_source_chunk(
                         db_url=db_url,
                         engine_type=src_engine,
                         table_or_file_name=src_table,
                         offset=offset,
-                        chunk_size=50000
+                        chunk_size=50000,
+                        pk_col=pk_col,
+                        last_pk_val=last_pk_val,
                     )
+                    if next_pk is not None:
+                        last_pk_val = next_pk
+
                     if df_raw.is_empty():
                         break
 
                     logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
                     df_trans, trans_errors = ASTTransformer.transform_chunk(df_raw, column_mappings)
                     total_failed += trans_errors
-                    extracted_dfs.append(df_trans)
+
+                    # If single source table, load directly to target (OOM-free streaming)
+                    if len(source_tables) == 1:
+                        succ, fail = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
+                        total_processed += (succ + fail)
+                        total_successful += succ
+                        total_failed += fail
+                    else:
+                        extracted_dfs.append(df_trans)
 
                     offset += len(df_raw)
-                    CheckpointManager.save_checkpoint(job_id, target_table, offset, total_processed + len(df_trans))
+                    CheckpointManager.save_checkpoint(job_id, target_table, offset, total_processed)
 
-            if extracted_dfs:
+            # For multi-source merges, deduplicate and load merged result
+            if len(source_tables) > 1 and extracted_dfs:
                 merged_df = TableMerger.merge_and_deduplicate(extracted_dfs, conflict_res)
                 succ, fail = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, merged_df)
                 total_processed += (succ + fail)
