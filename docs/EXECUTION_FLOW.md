@@ -438,6 +438,71 @@ This document maps entry points, call stack sequences, and module dependencies a
         └─► 10. Reconciled Mongo Introspection (sources_connectors_mongodb.py)
               - 100-doc sampling + depth-3 recursive path flattening matching agent metadata engine
 ```
+
+---
+
+## 11. Mid-Execution Job Failure & Watchdog Recovery Behavior
+
+When a migration job encounters a runtime error (e.g. DDL execution failure, database connection drop, or unresolvable schema error), or if an agent container crashes mid-migration, the system handles the failure deterministically:
+
+### 11.1 Agent-Side Failure Path (Immediate Dispatch)
+1. **Exception Interception**: `ExecutionOrchestrator.run_job` catches the top-level exception.
+2. **Progress Payload Dispatch**:
+   ```json
+   POST /api/v1/executions/{job_id}/progress
+   {
+     "status": "failed",
+     "progress": 0.0,
+     "processed_rows": 1500,
+     "successful_rows": 1000,
+     "failed_rows": 500,
+     "skipped_rows": 0,
+     "total_rows": 10000,
+     "current_stage": "failed",
+     "error_message": "Migration job 'job_99' failed: DDL execution failed for statement 'CREATE TABLE bad_syntax...': syntax error"
+   }
+   ```
+3. **Database State**: `MigrationJob.status` updates to `'failed'` and `error_message` is persisted.
+4. **User UI Feedback**: Next.js UI updates progress bar to red, displays the exact error message, and provides an actionable retry option.
+
+### 11.2 Backend Watchdog Recovery Path (Stale Agent / Container Crash)
+1. **Watchdog Invocation**: `ExecutionService.check_stale_jobs` scans active jobs.
+2. **Stale Threshold**: Checks `MigrationJob` records where `status IN ('running', 'preparing')` and `updated_at < (now - 5 minutes)`.
+3. **State Transition**:
+   - `job.status = "failed"`
+   - `job.error_message = "Migration job stalled: no progress updates received from agent for over 5 minutes."`
+   - Broadcasts `JOB_FAILED` notification via WebSocket to connected UI clients.
+
+---
+
+## 12. End-to-End Residual Unmapped Field Capture (`extra_attributes`) Flow
+
+To guarantee **zero raw data loss** for NoSQL databases (MongoDB) with dynamic or evolving schemas:
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                      END-TO-END RESIDUAL FIELD CAPTURE ARCHITECTURE                    │
+ │                                                                                        │
+ │  1. Metadata Introspection Stage:                                                      │
+ │     • Samples up to 100 documents per collection across depth = 3.                     │
+ │     • Discovers high-frequency field paths (e.g. name, email, address.city).           │
+ │                                                                                        │
+ │  2. Plan Blueprint AST Generation:                                                     │
+ │     • Generates explicit ColumnMappingSpec definitions for introspected fields.        │
+ │     • Un-sampled or newly added document fields remain absent from explicit AST maps.  │
+ │                                                                                        │
+ │  3. Execution Time Transformation Stage (ASTTransformer.transform_chunk):              │
+ │     • Identifies all mapped source column names: mapped_cols = {'name', 'email'}.       │
+ │     • Inspects actual extracted batch DataFrame for unmapped keys:                     │
+ │       unmapped_cols = df.columns - mapped_cols - {'_seq_id'}                           │
+ │     • Captures unforeseen fields (e.g. {'unknown_key': 123, 'nested': {'a': 'b'}})      │
+ │     • Serializes unmapped dict into extra_attributes JSON string column.               │
+ │                                                                                        │
+ │  4. Target Database Bulk Loading:                                                      │
+ │     • Target SQL table receives explicit target columns (name, email) PLUS              │
+ │       extra_attributes JSONB/JSON column containing all residual document fields.      │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+```
 ```
 
 

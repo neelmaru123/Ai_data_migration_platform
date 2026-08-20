@@ -515,11 +515,62 @@ Implemented three concurrency and resilience safeguards across `apps/agent/main.
 
 ---
 
-## [2026-08-20] - PK Resolution Strategies, Mongo Keyset Extraction, Residual Capture & Introspection Alignment
+## [2026-08-20] - Multi-Source Checkpoint Isolation & DuckDB Bounded Streaming (Fixes 1 & 2)
 
-### 1. Decision Summary
-Implemented four Mongo and ETL transformation enhancements across `apps/agent/execution_engine.py`, `apps/api/app/modules/sources/sources_connectors/sources_connectors_mongodb.py`, and `apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_validator.py`:
-1. **PK Conflict Resolution Strategies**: Implemented `keep_original` (type cast pass-through), `autoincrement_offset` (deterministic $10^9 \times \text{src\_idx}$ numeric offset), `prefix_id` (`{src_ident}_{val}`), and `uuid_v4_rekey` (`uuid.uuid4()`) in `ASTTransformer.transform_chunk`. Added Stage E feasibility validator warning for rekeyed PKs with multi-source merges.
-2. **Mongo Keyset Pagination**: Replaced $O(\text{offset})$ `.find().skip(offset).limit(chunk_size)` with `_id`-based keyset pagination `find({"_id": {"$gt": last_id}}).sort("_id", 1)` in `SourceConnectorFactory.read_source_chunk`, persisting `last_pk_val` in checkpoints for zero document duplication or skipping during live writes.
-3. **Residual Unmapped Field Capture**: `ASTTransformer.transform_chunk` captures all document fields missing from explicit AST column mappings and serializes them into a catch-all `extra_attributes` JSON column, preventing silent data loss for un-sampled Mongo fields.
-4. **Mongo Introspection Reconciliation**: Updated `MongoDBConnector.introspect_schema` in `sources_connectors_mongodb.py` to use 100-document sampling and depth-3 path flattening (`parent.child` nested key extraction) matching `AgentMetadataEngine._introspect_mongodb`.
+### Problem
+1. **Checkpoint Keying Collisions**: `CheckpointManager` stored progress as `(job_id, target_table)`. In multi-source merges, later sources inherited the final offset of source 1, skipping data extraction from offset 0.
+2. **Memory Growth**: Multi-source table merges accumulated transformed Polars DataFrames in Python RAM lists, creating Out-Of-Memory (OOM) crashes on large datasets.
+
+### Decision Made
+1. Keyed checkpoints strictly by `(job_id, target_table, source_identifier, source_table)` with legacy single-key fallback.
+2. Implemented DuckDB local file staging (`staging_{job_id}_{target_table}.duckdb`), writing raw source chunks to disk, discarding Python memory objects, and streaming deduplicated final batches in bounded ~50,000-row chunks.
+
+### Rejected Alternatives
+- *Redis/In-Memory Merging*: Rejected due to high RAM overhead and requirement for external daemon infrastructure in zero-data-plane environments.
+
+---
+
+## [2026-08-20] - Decoupled Heartbeats & Atomic Job Claiming (Fixes 4 & 5)
+
+### Problem
+1. Single-threaded agent execution blocked diagnostic heartbeats during multi-hour ETL jobs, causing false offline/degraded container statuses.
+2. Unlocked job polling allowed duplicate agent containers sharing credentials to claim and execute the same job twice.
+
+### Decision Made
+1. Decoupled heartbeats into a dedicated daemon thread (`start_heartbeat_thread`) using `threading.Event()` for clean signal handling.
+2. Implemented PostgreSQL row-level locking (`.with_for_update(skip_locked=True)`) in `get_pending_tasks_for_agent`, atomically updating status to `preparing` in the same transaction.
+
+### Rejected Alternatives
+- *External Message Queue (RabbitMQ/Celery)*: Rejected to preserve lightweight agent footprint and zero external dependency policy.
+
+---
+
+## [2026-08-20] - PK Strategies & Residual Unmapped Field Capture (Fixes 7 & 9)
+
+### Problem
+1. Fall-through to UUID v5 silently ignored explicit user requests for `keep_original` and `autoincrement_offset`.
+2. Un-sampled MongoDB fields missing from the explicit AST blueprint were silently dropped during ETL transformation.
+
+### Decision Made
+1. Implemented all 4 PK conflict resolution strategies (`keep_original`, `autoincrement_offset`, `prefix_id`, `uuid_v4_rekey`) in `ASTTransformer.transform_chunk`.
+2. Added execution-time unmapped column inspection, serializing unforeseen fields into a catch-all `extra_attributes` JSON column.
+
+### Rejected Alternatives
+- *Strict Schema Rejection*: Rejected because NoSQL document stores inherently contain polymorphic/dynamic attributes that should be preserved.
+
+---
+
+## [2026-08-20] - SQL Gaps & Structural AST Merge (Fixes 11 & 12)
+
+### Problem
+1. DDL errors were swallowed as warnings, allowing ETL to proceed into non-existent target tables.
+2. Small table per-row fallbacks (<1,000 rows) could not trigger the 50% abort threshold.
+3. Shallow dictionary merge `{**current_ast, **manual_edits}` in `process_manual_edits_node` wiped out unedited tables when partial UI payloads were submitted.
+
+### Decision Made
+1. Raised explicit exceptions on genuine DDL errors while logging notices for benign "already exists" warnings.
+2. Evaluated fallback per-row abort threshold proportionally against `min(1000, max(5, len(rows) // 2))`.
+3. Implemented deep structural identity merge in `process_manual_edits_node` by `target_table_name` and `target_column_name`.
+
+### Rejected Alternatives
+- *Full AST Re-transmission Requirement*: Rejected to keep web UI payload footprints lightweight during inline cell edits.

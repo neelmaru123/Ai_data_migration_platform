@@ -56,8 +56,9 @@ The platform decouples **transformation reasoning (Control Plane)** from **trans
    - Migration plans require explicit human review and approval before execution can be scheduled.
    - Users can provide natural language refinement prompts or manually edit column mappings, triggering deterministic re-validation through LangGraph.
 
-4. **Resumable Chunked Streaming**:
-   - Data extraction and loading stream in bounded memory chunks (e.g. 50,000 rows per batch) with local checkpoint state persistence. If an agent crashes or restarts, migration resumes seamlessly from the last recorded offset without duplicate inserts.
+4. **Resumable Chunked Streaming & Bounded-Memory Merges**:
+   - Data extraction and target loading stream in bounded memory chunks (50,000 rows per batch) with source-scoped checkpoint state persistence (`checkpoint_{job_id}_{target_table}_{source_identifier}_{source_table}.json`). If an agent crashes or restarts, migration resumes seamlessly from the exact source offset without duplicate inserts.
+   - Multi-source table merges stage intermediate chunks into a local DuckDB file database (`staging_{job_id}_{target_table}.duckdb`) on disk, streaming deduplicated final batches in bounded memory to prevent Out-Of-Memory (OOM) failures.
 
 ---
 
@@ -322,8 +323,19 @@ In multi-agent environments (e.g. multiple branch offices, different customer VP
 - Customer rows, PII, and financial records **never leave the local Docker container runtime**. Transformations and bulk insertions happen locally between source and target databases.
 
 #### 6. Agent Liveness Monitoring & Stale Token Invalidation
-- The agent sends diagnostic heartbeats every 10–15 seconds (`POST /api/v1/agents/heartbeat`).
+- The agent sends diagnostic heartbeats every 20 seconds via a dedicated background daemon thread (`start_heartbeat_thread`) in `apps/agent/main.py`.
 - If an agent stops heartbeating for > 30 seconds, its status transitions to `offline` or `degraded`, preventing new migration jobs from being scheduled on that agent until connectivity is restored.
+
+#### 7. Backend Stuck-Job Execution Watchdog
+- The Control Plane runs a background watchdog service (`ExecutionService.check_stale_jobs`) inside the lifespan loop and on job status reads.
+- **Trigger & Threshold**: Queries all `MigrationJob` records in `running` or `preparing` status whose `updated_at` timestamp is older than **5 minutes** (300 seconds).
+- **State Transition**: Automatically transitions stale jobs to `status = 'failed'` with an explicit error message (`"Migration job stalled: no progress updates received from agent for over 5 minutes."`). Ensures progress bars never remain frozen indefinitely after container or host crashes.
+
+#### 8. MongoDB Introspection, Majority-Vote Resolution & Residual Capture Guarantees
+- **Sampling Strategy**: `MongoDBConnector.introspect_schema` (API) and `AgentMetadataEngine._introspect_mongodb` (Agent) sample up to **100 documents** (or up to 1,000 documents) per collection.
+- **Depth-3 Recursive Path Flattening**: Evaluates nested document structures up to `Depth = 3`, generating flattened column specifications (`parent.child.grandchild`).
+- **Majority-Vote Data Type Resolution**: For schemaless collections with polymorphic field types, counts occurrence frequencies per BSON type. The highest-frequency type is assigned to `data_type`, while all observed types are documented in `native_data_type` annotations (e.g., `bson(int, string) [coverage: 95.0%]`).
+- **Residual Field Capture Guarantee**: At execution time, `ASTTransformer.transform_chunk` identifies all document keys and nested structures missing from explicit AST column mappings and serializes them into a catch-all `extra_attributes` JSON column, guaranteeing **zero data loss** for unmapped or dynamic document attributes.
 
 ---
 

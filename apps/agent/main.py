@@ -440,7 +440,11 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                     dest_url = v
 
             if not dest_url:
-                dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", "postgresql://postgres:postgres_password@localhost:5432/db_4"))
+                dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", ""))
+
+            if not dest_url:
+                logger.error("No destination database environment variables (DEST_*_URL) detected. Cannot execute migration jobs.")
+                return
 
             for task in tasks:
                 job_id = task.get("job_id")

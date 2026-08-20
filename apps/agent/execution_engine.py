@@ -143,14 +143,23 @@ class DDLExecutor:
 
         for stmt in ddl_statements:
             stmt_clean = stmt.strip()
-            if not stmt_clean:
-                continue
             try:
                 with engine.begin() as conn:
                     conn.execute(text(stmt_clean))
                 logger.info(f"Successfully executed DDL: {stmt_clean[:80]}...")
             except Exception as exc:
-                logger.warning(f"DDL execution notice/warning: {exc}")
+                exc_str = str(exc).lower()
+                benign_keywords = [
+                    "already exists",
+                    "duplicate",
+                    "if not exists",
+                    "multiple primary keys",
+                ]
+                if any(kw in exc_str for kw in benign_keywords):
+                    logger.warning(f"DDL execution notice/warning: {exc}")
+                else:
+                    logger.error(f"DDL execution error for statement '{stmt_clean}': {exc}")
+                    raise RuntimeError(f"DDL execution failed for statement '{stmt_clean}': {exc}")
 
 
 class SourceConnectorFactory:
@@ -669,11 +678,16 @@ class TargetWriterFactory:
         Bulk loads a DataFrame into target DB.
         Returns a tuple of (successful_rows, failed_rows, skipped_rows).
         """
-        if df.is_empty():
-            return 0, 0, 0
-
-        engine_type = engine_type.lower()
-        rows = df.to_dicts()
+        if hasattr(df, "is_empty"):
+            if df.is_empty():
+                return 0, 0, 0
+            rows = df.to_dicts()
+        elif isinstance(df, list):
+            if not df:
+                return 0, 0, 0
+            rows = df
+        else:
+            rows = list(df)
         if not rows:
             return 0, 0, 0
 
@@ -756,7 +770,7 @@ class TargetWriterFactory:
                 # Fallback to per-row insertion with sample error capping and 50% abort threshold
                 MAX_SAMPLE_ERRORS = 100
                 ABORT_THRESHOLD_PERCENT = 0.50
-                ABORT_THRESHOLD_SAMPLE_SIZE = 1000
+                threshold_sample_size = min(1000, max(5, len(rows) // 2))
 
                 with engine.begin() as conn:
                     for idx, row in enumerate(rows):
@@ -772,7 +786,7 @@ class TargetWriterFactory:
                             if failed_rows <= MAX_SAMPLE_ERRORS:
                                 logger.warning(f"Row insertion notice in table '{table_name}' (Row #{idx}): {row_exc}")
 
-                            if (idx + 1) >= ABORT_THRESHOLD_SAMPLE_SIZE and (failed_rows / (idx + 1)) > ABORT_THRESHOLD_PERCENT:
+                            if (idx + 1) >= threshold_sample_size and (failed_rows / (idx + 1)) > ABORT_THRESHOLD_PERCENT:
                                 raise RuntimeError(
                                     f"Migration aborted for table '{table_name}': Error rate exceeded {ABORT_THRESHOLD_PERCENT*100:.0f}% "
                                     f"({failed_rows}/{idx+1} rows failed). Please verify target schema and column mapping specs."
@@ -795,6 +809,7 @@ class ProgressReporter:
         successful_rows: int,
         failed_rows: int,
         skipped_rows: int = 0,
+        total_rows: int = 0,
         current_table: Optional[str] = None,
         current_stage: Optional[str] = None,
         error_message: Optional[str] = None,
@@ -807,6 +822,7 @@ class ProgressReporter:
             "successful_rows": successful_rows,
             "failed_rows": failed_rows,
             "skipped_rows": skipped_rows,
+            "total_rows": total_rows,
             "current_table": current_table,
             "current_stage": current_stage,
             "error_message": error_message,
@@ -856,9 +872,17 @@ class ExecutionOrchestrator:
         total_failed = 0
         total_skipped = 0
 
+        total_estimated_rows = 0
+        for tm in table_mappings:
+            for st in tm.get("source_tables", []):
+                total_estimated_rows += int(st.get("row_count", 0) or 0)
+
         try:
             # Step 1: Pre-Migration DDL
-            ProgressReporter.report(backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0, current_stage="pre_ddl")
+            ProgressReporter.report(
+                backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0,
+                total_rows=total_estimated_rows, current_stage="pre_ddl"
+            )
             DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
 
             # Step 2: Data Extraction, AST Transformation, Merge, and Target Loading
@@ -1006,7 +1030,7 @@ class ExecutionOrchestrator:
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "running", 95.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                current_stage="post_ddl"
+                total_rows=total_estimated_rows, current_stage="post_ddl"
             )
             DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
 
@@ -1014,7 +1038,7 @@ class ExecutionOrchestrator:
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "completed", 100.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                current_stage="completed"
+                total_rows=total_estimated_rows, current_stage="completed"
             )
             logger.info(f"=== MIGRATION JOB '{job_id}' COMPLETED SUCCESSFULLY! (Processed: {total_processed}, Success: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
 
@@ -1024,6 +1048,6 @@ class ExecutionOrchestrator:
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "failed", 0.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                current_stage="failed", error_message=err_msg
+                total_rows=total_estimated_rows, current_stage="failed", error_message=err_msg
             )
             raise

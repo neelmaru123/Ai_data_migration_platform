@@ -101,10 +101,11 @@ class MongoDBConnector(BaseConnector):
                         for k, v in obj.items():
                             path = f"{prefix}.{k}" if prefix else k
                             if path not in key_stats:
-                                key_stats[path] = {"count": 0, "types": set(), "is_nested": isinstance(v, (dict, list))}
+                                key_stats[path] = {"count": 0, "types": set(), "type_counts": {}, "is_nested": isinstance(v, (dict, list))}
                             key_stats[path]["count"] += 1
                             v_type = type(v).__name__ if v is not None else "null"
                             key_stats[path]["types"].add(v_type)
+                            key_stats[path]["type_counts"][v_type] = key_stats[path]["type_counts"].get(v_type, 0) + 1
 
                             if isinstance(v, dict):
                                 extract_paths(v, path, depth + 1)
@@ -117,7 +118,9 @@ class MongoDBConnector(BaseConnector):
                 columns: List[ColumnMetadata] = []
                 for field_name, stats in key_stats.items():
                     types_list = sorted(list(stats["types"]))
-                    b_type = "jsonb" if stats["is_nested"] else (types_list[0] if types_list else "varchar")
+                    type_counts = stats.get("type_counts", {})
+                    majority_type = max(type_counts.items(), key=lambda item: item[1])[0] if type_counts else "varchar"
+                    b_type = "jsonb" if stats["is_nested"] else majority_type
                     columns.append(
                         ColumnMetadata(
                             name=field_name,

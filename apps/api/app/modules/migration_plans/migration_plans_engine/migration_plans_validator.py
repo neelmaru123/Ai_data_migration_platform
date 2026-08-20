@@ -6,6 +6,7 @@ Detects missing tables/columns, illegal type conversions, broken PK/FK links, an
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel
 
@@ -106,7 +107,29 @@ class MigrationPlanValidator:
             target_cols: Set[str] = set()
             for col_map in table_map.column_mappings:
                 if col_map.target_column_name:
-                    target_cols.add(col_map.target_column_name.lower())
+                    lower_tgt = col_map.target_column_name.lower()
+                    if lower_tgt in target_cols:
+                        errors.append(
+                            f"Table mapping '{target_table_name}': Duplicate target column name '{col_map.target_column_name}' "
+                            f"defined across multiple column mappings."
+                        )
+                    else:
+                        target_cols.add(lower_tgt)
+
+                if col_map.transformation_type == "merge_concat" and col_map.target_column_name:
+                    combined_source_length = len(col_map.source_columns) * 255
+                    target_max_len = getattr(col_map, "max_length", None)
+                    if not target_max_len and col_map.target_data_type:
+                        match = re.search(r"varchar\((\d+)\)", col_map.target_data_type.lower())
+                        if match:
+                            target_max_len = int(match.group(1))
+
+                    if target_max_len and combined_source_length > target_max_len:
+                        warnings.append(
+                            f"Column '{col_map.target_column_name}' in '{target_table_name}': "
+                            f"Concatenation of source columns (combined length estimate {combined_source_length}) "
+                            f"may exceed target column max length constraint ({target_max_len})."
+                        )
 
                 for src_col in col_map.source_columns:
                     src_alias = src_col.identifier
@@ -148,7 +171,6 @@ class MigrationPlanValidator:
                     )
 
         # Stage D: Foreign Key & DDL Two-Phase Hygiene Check
-        import re
         fk_pattern = re.compile(r"REFERENCES\s+([a-zA-Z0-9_\"\.]+)", re.IGNORECASE)
 
         for ddl in ast.pre_migration_ddl:

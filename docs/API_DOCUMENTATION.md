@@ -347,19 +347,19 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
 ### 3.8 Agent Task Polling
 - **HTTP Method & Path**: `GET /api/v1/agents/tasks`
 - **Purpose**: Polled by local Docker Agent to discover queued execution jobs.
+- **Atomic Job Claiming (`SKIP LOCKED`)**: To prevent race conditions and duplicate execution when multiple agent containers share credentials, this endpoint uses PostgreSQL row-level locking (`.with_for_update(skip_locked=True)`). Returned jobs are atomically transitioned from `status = 'queued'` to `status = 'preparing'` within the same transaction, guaranteeing single-consumer task assignment.
 - **Where Used**: Local Docker Agent background task loop (`main.py`).
 - **Auth**: Agent Token (`X-Agent-Token` header).
 - **Response** (`200 OK`):
 ```json
-{
-  "pending_jobs": [
-    {
-      "job_id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
-      "plan_id": "52458d8e-889e-4244-91ec-364641262889",
-      "status": "queued"
-    }
-  ]
-}
+[
+  {
+    "job_id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
+    "migration_plan_id": "52458d8e-889e-4244-91ec-364641262889",
+    "status": "preparing",
+    "target_table": "users"
+  }
+]
 ```
 
 ---
@@ -539,10 +539,15 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, and 1-
 ```json
 {
   "status": "running",
+  "progress": 85.0,
   "processed_rows": 850000,
+  "successful_rows": 845000,
+  "failed_rows": 0,
+  "skipped_rows": 5000,
   "total_rows": 1000000,
-  "progress_percentage": 85.0,
-  "failed_rows": 3
+  "current_table": "users",
+  "current_stage": "extract_transform",
+  "error_message": null
 }
 ```
 

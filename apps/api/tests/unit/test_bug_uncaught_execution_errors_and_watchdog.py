@@ -60,7 +60,7 @@ def test_agent_run_job_uncaught_exception_reports_failure():
 
     reports_sent = []
 
-    def mock_report(url, token, j_id, status, progress, proc, succ, fail, skip=0, current_table=None, current_stage=None, error_message=None):
+    def mock_report(url, token, j_id, status, progress, proc, succ, fail, skip=0, current_table=None, current_stage=None, error_message=None, **kwargs):
         reports_sent.append({
             "status": status,
             "error_message": error_message,

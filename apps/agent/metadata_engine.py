@@ -85,7 +85,7 @@ class AgentMetadataEngine:
                         """))
                     else:
                         res_tbl = conn.execute(text("""
-                            SELECT table_schema, table_name, table_type, 0 AS estimated_rows
+                            SELECT table_schema, table_name, table_type, COALESCE(table_rows, 0) AS estimated_rows
                             FROM information_schema.tables
                             WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
                             ORDER BY table_schema, table_name;
@@ -302,10 +302,11 @@ class AgentMetadataEngine:
                         for k, v in obj.items():
                             path = f"{prefix}.{k}" if prefix else k
                             if path not in key_stats:
-                                key_stats[path] = {"count": 0, "types": set(), "is_nested": isinstance(v, (dict, list))}
+                                key_stats[path] = {"count": 0, "types": set(), "type_counts": {}, "is_nested": isinstance(v, (dict, list))}
                             key_stats[path]["count"] += 1
                             v_type = type(v).__name__ if v is not None else "null"
                             key_stats[path]["types"].add(v_type)
+                            key_stats[path]["type_counts"][v_type] = key_stats[path]["type_counts"].get(v_type, 0) + 1
 
                             if isinstance(v, dict):
                                 extract_paths(v, path, depth + 1)
@@ -319,13 +320,15 @@ class AgentMetadataEngine:
                 for ord_idx, (path, stats) in enumerate(key_stats.items(), start=1):
                     coverage_pct = round((stats["count"] / sample_size) * 100.0, 1)
                     types_list = sorted(list(stats["types"]))
+                    type_counts = stats.get("type_counts", {})
+                    majority_type = max(type_counts.items(), key=lambda item: item[1])[0] if type_counts else "varchar"
                     types_str = ", ".join(types_list)
                     is_pk = (path == "_id")
 
                     cols_payload.append({
                         "column_name": path,
                         "ordinal_position": ord_idx,
-                        "data_type": "jsonb" if stats["is_nested"] else (types_list[0] if types_list else "varchar"),
+                        "data_type": "jsonb" if stats["is_nested"] else majority_type,
                         "native_data_type": f"bson({types_str}) [coverage: {coverage_pct}%]",
                         "nullable": coverage_pct < 100.0,
                         "is_primary_key": is_pk,
