@@ -152,8 +152,44 @@ def process_manual_edits_node(state: MigrationPlanState) -> Dict[str, Any]:
     manual_edits = state.get("manual_edits") or {}
     current_ast = state.get("current_ast") or {}
 
-    # Merge top-level or table-level edits into AST
-    updated_ast = {**current_ast, **manual_edits}
+    # Perform structural deep merge of table_mappings and column_mappings by identity
+    updated_ast = dict(current_ast)
+    for key, val in manual_edits.items():
+        if key == "table_mappings" and isinstance(val, list) and "table_mappings" in current_ast:
+            existing_tables = {
+                t.get("target_table_name"): dict(t)
+                for t in current_ast.get("table_mappings", [])
+                if isinstance(t, dict) and t.get("target_table_name")
+            }
+            for edit_tbl in val:
+                if isinstance(edit_tbl, dict):
+                    t_name = edit_tbl.get("target_table_name")
+                    if t_name in existing_tables:
+                        base_tbl = existing_tables[t_name]
+                        if "column_mappings" in edit_tbl and isinstance(edit_tbl["column_mappings"], list) and "column_mappings" in base_tbl:
+                            existing_cols = {
+                                c.get("target_column_name"): dict(c)
+                                for c in base_tbl.get("column_mappings", [])
+                                if isinstance(c, dict) and c.get("target_column_name")
+                            }
+                            for edit_col in edit_tbl["column_mappings"]:
+                                if isinstance(edit_col, dict):
+                                    c_name = edit_col.get("target_column_name")
+                                    if c_name in existing_cols:
+                                        existing_cols[c_name].update(edit_col)
+                                    else:
+                                        existing_cols[c_name] = edit_col
+                            merged_cols = list(existing_cols.values())
+                            merged_tbl = {**base_tbl, **edit_tbl, "column_mappings": merged_cols}
+                            existing_tables[t_name] = merged_tbl
+                        else:
+                            existing_tables[t_name] = {**base_tbl, **edit_tbl}
+                    else:
+                        existing_tables[t_name] = edit_tbl
+            updated_ast["table_mappings"] = list(existing_tables.values())
+        else:
+            updated_ast[key] = val
+
     return {"current_ast": updated_ast, "manual_edits": None, "attempt_count": 0}
 
 

@@ -41,6 +41,10 @@ class AgentMetadataEngine:
         db_name = parsed.path.lstrip("/") if parsed.path else "database"
         scheme = parsed.scheme.lower() if parsed.scheme else "postgresql"
 
+        # Check for MongoDB scheme
+        if "mongo" in scheme or url_val.strip().startswith("mongodb"):
+            return cls._introspect_mongodb(identifier, url_val)
+
         try:
             engine = create_engine(sync_url, echo=False, pool_pre_ping=True, connect_args={"connect_timeout": 5})
             with engine.connect() as conn:
@@ -81,7 +85,7 @@ class AgentMetadataEngine:
                         """))
                     else:
                         res_tbl = conn.execute(text("""
-                            SELECT table_schema, table_name, table_type, 0 AS estimated_rows
+                            SELECT table_schema, table_name, table_type, COALESCE(table_rows, 0) AS estimated_rows
                             FROM information_schema.tables
                             WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
                             ORDER BY table_schema, table_name;
@@ -244,4 +248,119 @@ class AgentMetadataEngine:
 
         except Exception as exc:
             logger.error(f"Error during metadata introspection for '{identifier}': {exc}")
+            return None
+
+    @classmethod
+    def _introspect_mongodb(cls, identifier: str, url_val: str) -> Optional[Dict[str, Any]]:
+        """
+        Executes MongoDB document sampling introspection.
+        Samples up to 1,000 documents per collection to discover all unique field paths up to Depth = 3,
+        occurrence frequencies, coverage %, and BSON types.
+        """
+        try:
+            import pymongo
+            client = pymongo.MongoClient(url_val, serverSelectionTimeoutMS=3000)
+            db_name = url_val.rsplit("/", 1)[-1].split("?")[0] or "test"
+            db = client[db_name]
+
+            collections = db.list_collection_names()
+            tables_payload = []
+            total_cols_count = 0
+            total_rows_count = 0
+
+            for coll_name in collections:
+                if coll_name.startswith("system."):
+                    continue
+
+                coll = db[coll_name]
+                est_count = coll.estimated_document_count()
+                total_rows_count += est_count
+
+                # Sample up to 1,000 documents
+                sample_docs = list(coll.find().limit(1000))
+                sample_size = len(sample_docs)
+
+                if sample_size == 0:
+                    tables_payload.append({
+                        "schema_name": "public",
+                        "table_name": coll_name,
+                        "table_type": "collection",
+                        "row_count": est_count,
+                        "size_bytes": 0,
+                        "columns": [],
+                        "constraints": [],
+                    })
+                    continue
+
+                # Discover key paths up to depth 3
+                key_stats: Dict[str, Dict[str, Any]] = {}
+
+                def extract_paths(obj: Any, prefix: str = "", depth: int = 1):
+                    if depth > 3:
+                        return
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            path = f"{prefix}.{k}" if prefix else k
+                            if path not in key_stats:
+                                key_stats[path] = {"count": 0, "types": set(), "type_counts": {}, "is_nested": isinstance(v, (dict, list))}
+                            key_stats[path]["count"] += 1
+                            v_type = type(v).__name__ if v is not None else "null"
+                            key_stats[path]["types"].add(v_type)
+                            key_stats[path]["type_counts"][v_type] = key_stats[path]["type_counts"].get(v_type, 0) + 1
+
+                            if isinstance(v, dict):
+                                extract_paths(v, path, depth + 1)
+                            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                                extract_paths(v[0], path, depth + 1)
+
+                for doc in sample_docs:
+                    extract_paths(doc)
+
+                cols_payload = []
+                for ord_idx, (path, stats) in enumerate(key_stats.items(), start=1):
+                    coverage_pct = round((stats["count"] / sample_size) * 100.0, 1)
+                    types_list = sorted(list(stats["types"]))
+                    type_counts = stats.get("type_counts", {})
+                    majority_type = max(type_counts.items(), key=lambda item: item[1])[0] if type_counts else "varchar"
+                    types_str = ", ".join(types_list)
+                    is_pk = (path == "_id")
+
+                    cols_payload.append({
+                        "column_name": path,
+                        "ordinal_position": ord_idx,
+                        "data_type": "jsonb" if stats["is_nested"] else majority_type,
+                        "native_data_type": f"bson({types_str}) [coverage: {coverage_pct}%]",
+                        "nullable": coverage_pct < 100.0,
+                        "is_primary_key": is_pk,
+                        "is_unique": is_pk,
+                        "default_value": None,
+                        "max_length": None,
+                        "numeric_precision": None,
+                        "numeric_scale": None,
+                    })
+
+                total_cols_count += len(cols_payload)
+                tables_payload.append({
+                    "schema_name": "public",
+                    "table_name": coll_name,
+                    "table_type": "collection",
+                    "row_count": est_count,
+                    "size_bytes": 0,
+                    "columns": cols_payload,
+                    "constraints": [{"constraint_name": f"pk_{coll_name}", "constraint_type": "primary key"}] if "_id" in key_stats else [],
+                })
+
+            client.close()
+            return {
+                "identifier": identifier,
+                "database_name": db_name,
+                "database_version": "MongoDB Document Store",
+                "total_tables": len(tables_payload),
+                "total_columns": total_cols_count,
+                "total_rows": total_rows_count,
+                "tables": tables_payload,
+                "relationships": [],
+            }
+        except Exception as exc:
+            logger.error(f"Error during MongoDB metadata introspection for '{identifier}': {exc}")
             return None

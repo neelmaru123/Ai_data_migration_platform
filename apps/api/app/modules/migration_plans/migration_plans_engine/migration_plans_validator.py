@@ -6,6 +6,7 @@ Detects missing tables/columns, illegal type conversions, broken PK/FK links, an
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel
 
@@ -106,7 +107,29 @@ class MigrationPlanValidator:
             target_cols: Set[str] = set()
             for col_map in table_map.column_mappings:
                 if col_map.target_column_name:
-                    target_cols.add(col_map.target_column_name.lower())
+                    lower_tgt = col_map.target_column_name.lower()
+                    if lower_tgt in target_cols:
+                        errors.append(
+                            f"Table mapping '{target_table_name}': Duplicate target column name '{col_map.target_column_name}' "
+                            f"defined across multiple column mappings."
+                        )
+                    else:
+                        target_cols.add(lower_tgt)
+
+                if col_map.transformation_type == "merge_concat" and col_map.target_column_name:
+                    combined_source_length = len(col_map.source_columns) * 255
+                    target_max_len = getattr(col_map, "max_length", None)
+                    if not target_max_len and col_map.target_data_type:
+                        match = re.search(r"varchar\((\d+)\)", col_map.target_data_type.lower())
+                        if match:
+                            target_max_len = int(match.group(1))
+
+                    if target_max_len and combined_source_length > target_max_len:
+                        warnings.append(
+                            f"Column '{col_map.target_column_name}' in '{target_table_name}': "
+                            f"Concatenation of source columns (combined length estimate {combined_source_length}) "
+                            f"may exceed target column max length constraint ({target_max_len})."
+                        )
 
                 for src_col in col_map.source_columns:
                     src_alias = src_col.identifier
@@ -147,9 +170,16 @@ class MigrationPlanValidator:
                         f"is not mapped as a target column."
                     )
 
-        # Stage D: Foreign Key & Referenced Target Table Integrity Check
-        import re
+        # Stage D: Foreign Key & DDL Two-Phase Hygiene Check
         fk_pattern = re.compile(r"REFERENCES\s+([a-zA-Z0-9_\"\.]+)", re.IGNORECASE)
+
+        for ddl in ast.pre_migration_ddl:
+            if "FOREIGN KEY" in ddl.upper() or "REFERENCES " in ddl.upper():
+                errors.append(
+                    f"Pre-migration DDL Hygiene Error: Statement '{ddl[:60]}...' contains a FOREIGN KEY constraint. "
+                    f"All foreign keys must be executed in post_migration_ddl after data streaming is complete."
+                )
+
         for ddl in ast.post_migration_ddl:
             matches = fk_pattern.findall(ddl)
             for ref_tbl in matches:
@@ -161,6 +191,36 @@ class MigrationPlanValidator:
                         errors.append(
                             f"Post-migration DDL FK constraint references non-existent target table '{clean_tbl}'."
                         )
+
+        # Stage E: Industry Database Architecture Standards Validation
+        snake_case_pattern = re.compile(r"^[a-z0-9_]+$")
+        for table_map in ast.table_mappings:
+            tgt_tbl = table_map.target_table_name
+            if table_map.conflict_resolution and table_map.conflict_resolution.primary_key_strategy:
+                pk_strat = table_map.conflict_resolution.primary_key_strategy
+                if pk_strat in ["uuid_v4_rekey", "prefix_id", "autoincrement_offset"] and len(table_map.source_tables) > 1:
+                    warnings.append(
+                        f"Table Architecture Notice: Target table '{tgt_tbl}' merges multiple sources using primary key strategy '{pk_strat}'. "
+                        f"Dependent tables referencing '{tgt_tbl}' via foreign keys may require FK reconciliation."
+                    )
+
+            if not snake_case_pattern.match(tgt_tbl):
+                warnings.append(
+                    f"Table Architecture Standard Notice: Target table '{tgt_tbl}' is not in standard lowercase snake_case."
+                )
+
+            col_names = [col.target_column_name for col in table_map.column_mappings if col.target_column_name]
+            has_id = any(c.lower() == "id" for c in col_names)
+            if not has_id:
+                warnings.append(
+                    f"Table Architecture Standard Notice: Target table '{tgt_tbl}' lacks a standard 'id' primary key column."
+                )
+
+            for col in table_map.column_mappings:
+                if col.target_column_name and not snake_case_pattern.match(col.target_column_name):
+                    warnings.append(
+                        f"Column Architecture Standard Notice: Target column '{col.target_column_name}' in table '{tgt_tbl}' is not in standard lowercase snake_case."
+                    )
         is_valid = len(errors) == 0
         if is_valid:
             if warnings:

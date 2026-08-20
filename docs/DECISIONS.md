@@ -473,3 +473,104 @@ Applied 7 critical bug fixes and architectural hardening updates across the Phas
 Resolved 2 static type checker (Pyright/MyPy) warnings:
 1. **LangGraph State Schema Compatibility (`migration_plans_graph.py`)**: Imported `TypedDict` from `typing_extensions` instead of standard `typing` so `MigrationPlanState` is recognized as a valid `TypedDictLike` by `StateGraph`.
 2. **Variable Shadowing Elimination (`migration_plans_validator.py`)**: Renamed local dictionary `col_map` (used in snapshot introspection on L70) to `column_type_map`. This resolved the type collision where Pyright bound `col_map` as `dict[str, str]` instead of `ColumnMappingSpec` during the `for col_map in table_map.column_mappings:` iteration.
+
+---
+
+## [2026-08-20] - Migration Engine Reliability Edge Case Fixes & DB Write Outcome Verification
+
+### 1. Decision Summary
+Fixed three critical data loss, memory, and write-reporting edge cases in `apps/agent/execution_engine.py` and `apps/api/app/modules/execution/execution_schemas.py`:
+1. **Multi-Source Merge Checkpoint Isolation**: Checkpoint state is now tracked independently per `(job_id, target_table, source_identifier, source_table)` to prevent multi-source merges from overwriting shared offsets and dropping rows. Includes legacy `checkpoint_{job_id}_{table_name}.json` fallback support.
+2. **DuckDB Local Staging Bounded-Memory Merges**: Replaced in-memory dataset buffering (`extracted_dfs`) with a DuckDB local staging table file. Multi-source merge chunks are appended to DuckDB and deduplicated streaming out of DuckDB in bounded batches (`~50,000` rows), keeping peak RAM usage bounded to 1 chunk regardless of dataset size.
+3. **DB Write Outcome Verification**: SQL bulk inserts inspect `result.rowcount` to calculate actual inserted rows vs skipped conflict rows (`ON CONFLICT DO NOTHING` / `INSERT IGNORE`). MongoDB bulk inserts explicitly catch `pymongo.errors.BulkWriteError` to parse `.details["writeErrors"]` and return accurate `successful_rows` and `failed_rows`. Added `skipped_rows` to `ExecutionProgressUpdate`.
+
+### 2. Why This Approach? (Rationale)
+- **Data Loss Prevention**: Shared checkpoint files caused source 2+ of a merge table to start reading at source 1's end offset instead of 0, silently skipping entire source datasets. Per-source isolated keying guarantees accurate resume points.
+- **Bounded Memory Overhead**: In-memory list buffering of extracted DataFrames caused OOM crashes when merging large datasets (>100k rows across multiple DBs). DuckDB's local file staging offloads data to disk and streams deduplicated results back in small Polars batches.
+- **Accurate Observability**: Assuming `len(rows)` was inserted without checking `rowcount` or swallowing PyMongo `BulkWriteError` hid silent conflict skips and reported 0/N success on partial MongoDB errors.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Holding Merged Data in Target DB Scratch Tables**: Rejected because it requires write/DDL privileges to create temporary tables on customer target databases and varies across target SQL dialects.
+- **Alternative B: In-Memory Python Dictionary Deduplication**: Rejected because storing dicts of hundreds of thousands of rows causes high Python object overhead and memory fragmentation.
+
+### 4. Trade-offs & Future Considerations
+- DuckDB local staging creates a temporary `.duckdb` file in `CHECKPOINT_DIR` during multi-source execution, which is cleaned up automatically in a `finally` block upon completion.
+
+---
+
+## [2026-08-20] - Agent Decoupled Heartbeats, Atomic Job Claiming & Execution Error Watchdog
+
+### 1. Decision Summary
+Implemented three concurrency and resilience safeguards across `apps/agent/main.py`, `apps/agent/execution_engine.py`, `apps/api/app/modules/execution/execution_services.py`, and `apps/api/app/modules/agents/agents_services.py`:
+1. **Decoupled Agent Heartbeats**: Refactored `apps/agent/main.py` daemon loop to execute `send_heartbeat` inside a dedicated background daemon thread (`start_heartbeat_thread`) using `threading.Event()` for clean `SIGINT`/`SIGTERM` shutdown. Heartbeats now fire continuously every 20 seconds even during multi-hour ETL runs.
+2. **Atomic Job Claiming (SKIP LOCKED)**: Updated `ExecutionService.get_pending_tasks_for_agent` to use row-level locking (`.with_for_update(skip_locked=True)`) on queued jobs, atomically transitioning status to `'preparing'` in the same transaction before returning. Prevents concurrent agent processes sharing a token from double-executing jobs.
+3. **Execution Error Watchdog & Agent-Side Exception Propagation**:
+   - Agent-side `ExecutionOrchestrator.run_job` catches top-level exceptions and dispatches `ProgressReporter.report(..., status="failed", error_message=str(exc))` to Control Plane.
+   - Backend `ExecutionService.check_stale_jobs` queries jobs in `running` or `preparing` status updated > 5 minutes ago and fails them with an explicit error message (`"Migration job stalled: no progress updates received from agent for over 5 minutes."`).
+
+### 2. Why This Approach? (Rationale)
+- **Agent Offline False Positives**: Synchronous single-threaded execution caused agents to miss heartbeats during long migrations, triggering false offline/degraded warnings. Background threading maintains continuous heartbeat reachability.
+- **Race Condition Data Corruption**: Unlocked task polling allowed duplicate agent containers to pick up the same job. Row-level locking guarantees single-consumer task distribution.
+- **Stuck UI Progress Bars**: Mid-migration crashes left Control Plane job records stuck in `running` forever. Dual-layer reporting (agent-side error dispatch + backend stale job watchdog) guarantees every failure is communicated clearly to the user.
+
+---
+
+## [2026-08-20] - Multi-Source Checkpoint Isolation & DuckDB Bounded Streaming (Fixes 1 & 2)
+
+### Problem
+1. **Checkpoint Keying Collisions**: `CheckpointManager` stored progress as `(job_id, target_table)`. In multi-source merges, later sources inherited the final offset of source 1, skipping data extraction from offset 0.
+2. **Memory Growth**: Multi-source table merges accumulated transformed Polars DataFrames in Python RAM lists, creating Out-Of-Memory (OOM) crashes on large datasets.
+
+### Decision Made
+1. Keyed checkpoints strictly by `(job_id, target_table, source_identifier, source_table)` with legacy single-key fallback.
+2. Implemented DuckDB local file staging (`staging_{job_id}_{target_table}.duckdb`), writing raw source chunks to disk, discarding Python memory objects, and streaming deduplicated final batches in bounded ~50,000-row chunks.
+
+### Rejected Alternatives
+- *Redis/In-Memory Merging*: Rejected due to high RAM overhead and requirement for external daemon infrastructure in zero-data-plane environments.
+
+---
+
+## [2026-08-20] - Decoupled Heartbeats & Atomic Job Claiming (Fixes 4 & 5)
+
+### Problem
+1. Single-threaded agent execution blocked diagnostic heartbeats during multi-hour ETL jobs, causing false offline/degraded container statuses.
+2. Unlocked job polling allowed duplicate agent containers sharing credentials to claim and execute the same job twice.
+
+### Decision Made
+1. Decoupled heartbeats into a dedicated daemon thread (`start_heartbeat_thread`) using `threading.Event()` for clean signal handling.
+2. Implemented PostgreSQL row-level locking (`.with_for_update(skip_locked=True)`) in `get_pending_tasks_for_agent`, atomically updating status to `preparing` in the same transaction.
+
+### Rejected Alternatives
+- *External Message Queue (RabbitMQ/Celery)*: Rejected to preserve lightweight agent footprint and zero external dependency policy.
+
+---
+
+## [2026-08-20] - PK Strategies & Residual Unmapped Field Capture (Fixes 7 & 9)
+
+### Problem
+1. Fall-through to UUID v5 silently ignored explicit user requests for `keep_original` and `autoincrement_offset`.
+2. Un-sampled MongoDB fields missing from the explicit AST blueprint were silently dropped during ETL transformation.
+
+### Decision Made
+1. Implemented all 4 PK conflict resolution strategies (`keep_original`, `autoincrement_offset`, `prefix_id`, `uuid_v4_rekey`) in `ASTTransformer.transform_chunk`.
+2. Added execution-time unmapped column inspection, serializing unforeseen fields into a catch-all `extra_attributes` JSON column.
+
+### Rejected Alternatives
+- *Strict Schema Rejection*: Rejected because NoSQL document stores inherently contain polymorphic/dynamic attributes that should be preserved.
+
+---
+
+## [2026-08-20] - SQL Gaps & Structural AST Merge (Fixes 11 & 12)
+
+### Problem
+1. DDL errors were swallowed as warnings, allowing ETL to proceed into non-existent target tables.
+2. Small table per-row fallbacks (<1,000 rows) could not trigger the 50% abort threshold.
+3. Shallow dictionary merge `{**current_ast, **manual_edits}` in `process_manual_edits_node` wiped out unedited tables when partial UI payloads were submitted.
+
+### Decision Made
+1. Raised explicit exceptions on genuine DDL errors while logging notices for benign "already exists" warnings.
+2. Evaluated fallback per-row abort threshold proportionally against `min(1000, max(5, len(rows) // 2))`.
+3. Implemented deep structural identity merge in `process_manual_edits_node` by `target_table_name` and `target_column_name`.
+
+### Rejected Alternatives
+- *Full AST Re-transmission Requirement*: Rejected to keep web UI payload footprints lightweight during inline cell edits.

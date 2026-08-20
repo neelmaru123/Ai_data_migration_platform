@@ -187,57 +187,61 @@ async def google_oauth_callback(
     Verifies CSRF state, exchanges authorization code for tokens, verifies Google ID token,
     creates/links application user, sets HTTP-only session cookies, and redirects to frontend.
     """
-    if error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Google OAuth authorization failed: {error}",
-        )
-
-    if not code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Authorization code missing from Google callback.",
-        )
-
-    saved_state = request.cookies.get("oauth_state")
-    if saved_state and state and not secrets.compare_digest(saved_state, state):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="OAuth state verification failed (CSRF mismatch).",
-        )
-
-    token_url = "https://oauth2.googleapis.com/token"
-    token_data = {
-        "code": code,
-        "client_id": settings.GOOGLE_CLIENT_ID,
-        "client_secret": settings.GOOGLE_CLIENT_SECRET,
-        "redirect_uri": settings.GOOGLE_REDIRECT_URI,
-        "grant_type": "authorization_code",
-    }
-
     try:
+        if error:
+            err_msg = f"Google authorization failed: {error}"
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(err_msg)}",
+                status_code=status.HTTP_302_FOUND
+            )
+
+        if not code:
+            err_msg = "Authorization code missing from Google callback."
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(err_msg)}",
+                status_code=status.HTTP_302_FOUND
+            )
+
+        saved_state = request.cookies.get("oauth_state")
+        if saved_state and state and not secrets.compare_digest(saved_state, state):
+            err_msg = "OAuth state verification failed (CSRF mismatch)."
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(err_msg)}",
+                status_code=status.HTTP_302_FOUND
+            )
+
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "code": code,
+            "client_id": settings.GOOGLE_CLIENT_ID,
+            "client_secret": settings.GOOGLE_CLIENT_SECRET,
+            "redirect_uri": settings.GOOGLE_REDIRECT_URI,
+            "grant_type": "authorization_code",
+        }
+
         async with httpx.AsyncClient() as client:
             res = await client.post(token_url, data=token_data)
             res_data = res.json()
 
         if res.status_code != 200:
             err_msg = res_data.get("error_description") or res_data.get("error") or "Failed token exchange"
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Google Token Exchange Error: {err_msg}",
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(f'Google Token Exchange Error: {err_msg}')}",
+                status_code=status.HTTP_302_FOUND
             )
 
         google_id_token = res_data.get("id_token")
         if not google_id_token:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Google response did not include id_token.",
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote('Google response did not include id_token.')}",
+                status_code=status.HTTP_302_FOUND
             )
 
         id_info = id_token.verify_oauth2_token(
             google_id_token,
             google_requests.Request(),
             settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID else None,
+            clock_skew_in_seconds=10,
         )
 
         google_sub = id_info.get("sub")
@@ -246,9 +250,9 @@ async def google_oauth_callback(
         email_verified = id_info.get("email_verified", True)
 
         if not google_sub or not email:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Google token missing sub or email claims.",
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote('Google token missing sub or email claims.')}",
+                status_code=status.HTTP_302_FOUND
             )
 
         user = await UserService.get_or_create_google_user(
@@ -267,12 +271,15 @@ async def google_oauth_callback(
 
         return redirect_response
 
-    except HTTPException:
-        raise
+    except HTTPException as http_exc:
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(http_exc.detail)}",
+            status_code=status.HTTP_302_FOUND
+        )
     except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Google authentication failed: {str(exc)}",
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/login?error={urllib.parse.quote(f'Google authentication failed: {str(exc)}')}",
+            status_code=status.HTTP_302_FOUND
         )
 
 
@@ -296,6 +303,7 @@ async def google_auth_credential(
             payload.id_token,
             google_requests.Request(),
             settings.GOOGLE_CLIENT_ID if settings.GOOGLE_CLIENT_ID else None,
+            clock_skew_in_seconds=10,
         )
 
         google_sub = id_info.get("sub")

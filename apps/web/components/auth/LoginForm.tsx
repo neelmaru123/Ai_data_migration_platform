@@ -1,17 +1,28 @@
 'use client';
 
-import React from 'react';
+import React, { useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { useLogin } from '../../hooks/mutations/useAuthMutations';
 import { UserLoginPayload } from '../../types/auth';
 import GoogleAuthButton from './GoogleAuthButton';
 import { ArrowRight, Lock, Mail } from 'lucide-react';
+import toast from 'react-hot-toast';
 
 export default function LoginForm() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const loginMutation = useLogin();
+
+  useEffect(() => {
+    const errorParam = searchParams.get('error');
+    if (errorParam) {
+      toast.error(decodeURIComponent(errorParam));
+      // Clean up error from URL without refreshing
+      window.history.replaceState({}, '', '/login');
+    }
+  }, [searchParams]);
 
   const {
     register,

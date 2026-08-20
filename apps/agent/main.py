@@ -440,7 +440,11 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                     dest_url = v
 
             if not dest_url:
-                dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", "postgresql://postgres:postgres_password@localhost:5432/db_4"))
+                dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", ""))
+
+            if not dest_url:
+                logger.error("No destination database environment variables (DEST_*_URL) detected. Cannot execute migration jobs.")
+                return
 
             for task in tasks:
                 job_id = task.get("job_id")
@@ -471,6 +475,35 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
         logger.warning(f"Task polling check exception: {exc}")
 
 
+import threading
+
+
+def start_heartbeat_thread(
+    backend_url: str,
+    agent_token: str,
+    version: str,
+    interval: int,
+    stop_event: threading.Event,
+) -> threading.Thread:
+    """
+    Launches a dedicated daemon background thread that sends periodic heartbeats
+    at regular intervals, independent of job execution.
+    """
+    def _run():
+        logger.info(f"Background heartbeat loop started (interval: {interval}s).")
+        while not stop_event.is_set():
+            try:
+                send_heartbeat(backend_url, agent_token, version)
+            except Exception as exc:
+                logger.warning(f"Background heartbeat exception: {exc}")
+            stop_event.wait(timeout=interval)
+        logger.info("Background heartbeat loop terminated cleanly.")
+
+    t = threading.Thread(target=_run, daemon=True, name="HeartbeatThread")
+    t.start()
+    return t
+
+
 def main():
     logger.info("Initializing Docker Agent process...")
     backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
@@ -478,6 +511,7 @@ def main():
     version = os.getenv("AGENT_VERSION", "1.0.0")
     run_once = os.getenv("AGENT_RUN_ONCE", "false").lower() == "true"
     interval = int(os.getenv("HEARTBEAT_INTERVAL", "20"))
+    poll_interval = int(os.getenv("TASK_POLL_INTERVAL", "10"))
 
     log_configured_databases()
 
@@ -489,7 +523,7 @@ def main():
         logger.error("Could not obtain AGENT_TOKEN. Docker Agent cannot start unauthenticated.")
         return
 
-    # Register graceful shutdown handlers
+    stop_event = threading.Event()
     is_shutting_down = False
 
     def signal_handler(signum, frame):
@@ -498,6 +532,7 @@ def main():
             return
         is_shutting_down = True
         logger.info(f"Received termination signal ({signum}). Initiating graceful shutdown...")
+        stop_event.set()
         graceful_shutdown(backend_url, agent_token, version)
         sys.exit(0)
 
@@ -534,22 +569,26 @@ def main():
         logger.warning(f"Metadata auto-introspection encountered an error: {meta_err}")
 
     if run_once:
-        logger.info("AGENT_RUN_ONCE is enabled. Exiting startup routine.")
+        logger.info("AGENT_RUN_ONCE is enabled. Running single task poll routine.")
+        poll_and_execute_tasks(backend_url, agent_token)
         return
 
-    # Continuous background heartbeat loop for automatic self-healing recovery & task polling
-    logger.info(f"Starting continuous background health check & task polling loop (interval: {interval}s)...")
+    # Start dedicated background heartbeat thread so heartbeats continue during long ETL jobs
+    start_heartbeat_thread(backend_url, agent_token, version, interval, stop_event)
+
+    # Continuous task polling loop in main thread
+    logger.info(f"Starting continuous task polling loop (interval: {poll_interval}s)...")
     try:
-        while True:
-            time.sleep(interval)
-            success = send_heartbeat(backend_url, agent_token, version)
-            if success:
+        while not stop_event.is_set():
+            try:
                 poll_and_execute_tasks(backend_url, agent_token)
-            else:
-                logger.warning("Heartbeat failed in loop. Will retry sooner in 5 seconds...")
-                time.sleep(5)
+            except Exception as exc:
+                logger.warning(f"Task polling exception: {exc}")
+            stop_event.wait(timeout=poll_interval)
     except KeyboardInterrupt:
         logger.info("Docker Agent process stopping on user signal.")
+    finally:
+        stop_event.set()
         graceful_shutdown(backend_url, agent_token, version)
 
 

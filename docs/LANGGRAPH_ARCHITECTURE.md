@@ -117,12 +117,12 @@ class MigrationPlanState(TypedDict):
 
 #### **Node 3: `validate_feasibility_node`**
 - **Role**: Executes the **Deterministic Schema Validator** (`MigrationPlanValidator`).
-- **Functionality**:
-  1. Checks if every source table referenced in mappings exists in metadata snapshots.
-  2. Checks if mapped source columns exist in source tables.
-  3. Checks data type casting feasibility (flags impossible direct casts like `text` $\rightarrow$ `integer` without conversion rules).
-  4. Checks primary key and deduplication column validity.
-  5. Checks foreign key target table references.
+- **Functionality**: Performs a multi-stage feasibility check against introspected metadata snapshots:
+  1. **Stage A**: Source Table & Schema Existence check.
+  2. **Stage B**: Source Column Existence, Type Compatibility, **Target Column Collision Check** (flags duplicate `target_column_name` entries within the same table mapping as errors), and **Concatenation Length-Overflow Check** (warns when `merge_concat` combined source max lengths exceed `varchar(N)` target max length constraints).
+  3. **Stage C**: Primary Key & Deduplication Key Validity check.
+  4. **Stage D**: Foreign Key & DDL Two-Phase Hygiene check (verifies all foreign keys are placed in `post_migration_ddl`).
+  5. **Stage E**: Architecture Standards & **PK Rekey FK Remap Warning** (warns when multi-source table merges rekey primary keys while foreign key dependent tables exist in the plan).
 - **Output**: Sets `state["validation_result"]` with `is_valid: bool`, `errors: List[str]`, `warnings: List[str]`.
 
 #### **Router 1: `check_validation_router` (Conditional Edge)**
@@ -149,7 +149,8 @@ class MigrationPlanState(TypedDict):
 - **Role**: Merges natural language prompt feedback into `state["user_feedback"]` and re-routes back to **Node 2 (`generate_plan_ast_node`)** for Gemini re-generation.
 
 #### **Node 7: `process_manual_edits_node`**
-- **Role**: Directly applies user's manual UI modifications (renaming table/file names, dropping column mappings, changing data types) to `state["current_ast"]` and re-routes to **Node 3 (`validate_feasibility_node`)** for instant schema validation.
+- **Role**: Applies user's manual UI modifications to `state["current_ast"]` and re-routes to **Node 3 (`validate_feasibility_node`)** for instant re-validation.
+- **Merge Strategy**: Executes a **Deep Structural Identity Merge** keyed by `target_table_name` and `target_column_name`. If a partial edit payload is submitted touching only 1 table or 1 column, all unedited tables in `table_mappings` and unedited columns in `column_mappings` remain present and unchanged (preventing shallow merge data loss).
 
 #### **Node 8: `explanation_generator_node`**
 - **Role**: **Feasibility Failure Reporter**.

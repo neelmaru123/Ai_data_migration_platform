@@ -235,6 +235,22 @@ class MigrationPlanService:
         return list(res.scalars().all())
 
     @staticmethod
+    async def _check_active_execution_lock(session: AsyncSession, plan_id: uuid.UUID):
+        """Verifies that no active execution job is running for the given migration plan."""
+        from app.modules.execution.execution_models import MigrationJob
+        stmt = select(MigrationJob).where(
+            MigrationJob.migration_plan_id == plan_id,
+            MigrationJob.status.in_(["queued", "preparing", "running"]),
+        )
+        res = await session.execute(stmt)
+        active_job = res.scalar_one_or_none()
+        if active_job:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot edit migration plan while execution job '{active_job.id}' is active (status: '{active_job.status}').",
+            )
+
+    @staticmethod
     async def update_plan_data(
         session: AsyncSession,
         plan: MigrationPlan,
@@ -244,6 +260,8 @@ class MigrationPlanService:
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
+
+        await MigrationPlanService._check_active_execution_lock(session, plan.id)
 
         plan.plan_data = plan_data
         if plan.agent:
@@ -271,6 +289,8 @@ class MigrationPlanService:
         from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
             MigrationPlanValidator,
         )
+
+        await MigrationPlanService._check_active_execution_lock(session, plan.id)
 
         if not plan.agent:
             raise HTTPException(

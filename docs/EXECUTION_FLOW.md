@@ -384,6 +384,125 @@ This document maps entry points, call stack sequences, and module dependencies a
         │ 1. plan.status == 'completed' (HITL Approved)
         │ 2. plan.is_valid == True (Schema Verified)
         │ Unapproved or invalid plans blocked with HTTP 422
+
+
+---
+
+## 10. Multi-Source Bounded ETL Execution & Outcome Verification Flow
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/execution_engine.py:ExecutionOrchestrator.run_job)
+        │
+        ├─► 1. Checkpoint Key Isolation
+        │     - Checkpoint path: checkpoint_{job_id}_{target_table}_{source_identifier}_{source_table}.json
+        │     - Falls back to legacy checkpoint_{job_id}_{target_table}.json for legacy runs
+        │     - Resumes each source independently from its own last_offset
+        │
+        ├─► 2. Multi-Source Staging & Bounded Streaming (DuckDB)
+        │     - Creates temporary DuckDB staging database: staging_{job_id}_{target_table}.duckdb
+        │     - As source chunks are read and transformed, appends to DuckDB with _seq_id
+        │     - Discards extracted Polars DataFrames immediately (RAM stays bounded to 1 chunk ~50k rows)
+        │     - Runs SQL deduplication (first_wins / last_updated_wins) out of DuckDB staging
+        │     - Streams deduplicated chunks out of DuckDB into TargetWriterFactory.bulk_load
+        │
+        ├─► 3. Database Write Outcome Verification & Reporting
+        │     - SQL Sink (Postgres/MySQL): Inspects result.rowcount to calculate exact inserted vs skipped conflict rows
+        │     - Mongo Sink: Catches pymongo.errors.BulkWriteError to parse details["writeErrors"] for exact success/failure counts
+        │     - ProgressReporter sends payload with successful_rows, failed_rows, and skipped_rows to Control Plane
+        │
+        ├─► 4. Decoupled Background Heartbeat Loop (main.py:start_heartbeat_thread)
+        │     - Background daemon thread sends periodic send_heartbeat every 20s
+        │     - Continues firing heartbeats during long ETL jobs (prevents false offline status)
+        │     - Responds to stop_event for clean SIGINT/SIGTERM process termination
+        │
+        ├─► 5. Atomic Job Claiming (execution_services.py:get_pending_tasks_for_agent)
+        │     - SELECT ... WHERE status = 'queued' WITH FOR UPDATE SKIP LOCKED
+        │     - Atomically updates claimed job status to 'preparing' before returning
+        │     - Prevents duplicate agent processes from executing the same job
+        │
+        ├─► 6. Exception Propagation & Backend Watchdog (execution_services.py:check_stale_jobs)
+        │     - Agent-side: Top-level try/except catches fatal execution errors and sends status="failed" with error_message
+        │     - Backend Watchdog: Detects jobs stuck in 'running'/'preparing' updated > 5 min ago and fails them automatically
+        │
+        ├─► 7. Primary Key Conflict-Resolution Strategies (execution_engine.py:ASTTransformer)
+        │     - Implements keep_original, autoincrement_offset, prefix_id, and uuid_v4_rekey
+        │     - Emits validator warning when rekeying PKs for multi-source merges
+        │
+        ├─► 8. Mongo Keyset Pagination (execution_engine.py:SourceConnectorFactory)
+        │     - find({"_id": {"$gt": last_id}}).sort("_id", 1).limit(chunk_size)
+        │     - Eliminates O(offset) skip drift during concurrent live writes
+        │
+        ├─► 9. Residual Unmapped Field Capture (execution_engine.py:ASTTransformer)
+        │     - Collects unmapped document fields and serializes into extra_attributes JSON column
+        │
+        └─► 10. Reconciled Mongo Introspection (sources_connectors_mongodb.py)
+              - 100-doc sampling + depth-3 recursive path flattening matching agent metadata engine
+```
+
+---
+
+## 11. Mid-Execution Job Failure & Watchdog Recovery Behavior
+
+When a migration job encounters a runtime error (e.g. DDL execution failure, database connection drop, or unresolvable schema error), or if an agent container crashes mid-migration, the system handles the failure deterministically:
+
+### 11.1 Agent-Side Failure Path (Immediate Dispatch)
+1. **Exception Interception**: `ExecutionOrchestrator.run_job` catches the top-level exception.
+2. **Progress Payload Dispatch**:
+   ```json
+   POST /api/v1/executions/{job_id}/progress
+   {
+     "status": "failed",
+     "progress": 0.0,
+     "processed_rows": 1500,
+     "successful_rows": 1000,
+     "failed_rows": 500,
+     "skipped_rows": 0,
+     "total_rows": 10000,
+     "current_stage": "failed",
+     "error_message": "Migration job 'job_99' failed: DDL execution failed for statement 'CREATE TABLE bad_syntax...': syntax error"
+   }
+   ```
+3. **Database State**: `MigrationJob.status` updates to `'failed'` and `error_message` is persisted.
+4. **User UI Feedback**: Next.js UI updates progress bar to red, displays the exact error message, and provides an actionable retry option.
+
+### 11.2 Backend Watchdog Recovery Path (Stale Agent / Container Crash)
+1. **Watchdog Invocation**: `ExecutionService.check_stale_jobs` scans active jobs.
+2. **Stale Threshold**: Checks `MigrationJob` records where `status IN ('running', 'preparing')` and `updated_at < (now - 5 minutes)`.
+3. **State Transition**:
+   - `job.status = "failed"`
+   - `job.error_message = "Migration job stalled: no progress updates received from agent for over 5 minutes."`
+   - Broadcasts `JOB_FAILED` notification via WebSocket to connected UI clients.
+
+---
+
+## 12. End-to-End Residual Unmapped Field Capture (`extra_attributes`) Flow
+
+To guarantee **zero raw data loss** for NoSQL databases (MongoDB) with dynamic or evolving schemas:
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────────────────────┐
+ │                      END-TO-END RESIDUAL FIELD CAPTURE ARCHITECTURE                    │
+ │                                                                                        │
+ │  1. Metadata Introspection Stage:                                                      │
+ │     • Samples up to 100 documents per collection across depth = 3.                     │
+ │     • Discovers high-frequency field paths (e.g. name, email, address.city).           │
+ │                                                                                        │
+ │  2. Plan Blueprint AST Generation:                                                     │
+ │     • Generates explicit ColumnMappingSpec definitions for introspected fields.        │
+ │     • Un-sampled or newly added document fields remain absent from explicit AST maps.  │
+ │                                                                                        │
+ │  3. Execution Time Transformation Stage (ASTTransformer.transform_chunk):              │
+ │     • Identifies all mapped source column names: mapped_cols = {'name', 'email'}.       │
+ │     • Inspects actual extracted batch DataFrame for unmapped keys:                     │
+ │       unmapped_cols = df.columns - mapped_cols - {'_seq_id'}                           │
+ │     • Captures unforeseen fields (e.g. {'unknown_key': 123, 'nested': {'a': 'b'}})      │
+ │     • Serializes unmapped dict into extra_attributes JSON string column.               │
+ │                                                                                        │
+ │  4. Target Database Bulk Loading:                                                      │
+ │     • Target SQL table receives explicit target columns (name, email) PLUS              │
+ │       extra_attributes JSONB/JSON column containing all residual document fields.      │
+ └────────────────────────────────────────────────────────────────────────────────────────┘
+```
 ```
 
 
