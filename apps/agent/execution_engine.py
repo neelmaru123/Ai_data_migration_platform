@@ -34,13 +34,14 @@ def _get_engine(db_url: str):
             "keepalives_interval": 10,
             "keepalives_count": 5,
         }
-    return create_engine(
-        clean_url,
-        pool_pre_ping=True,
-        pool_recycle=300,
-        pool_timeout=30,
-        connect_args=connect_args,
-    )
+    kwargs = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+        "connect_args": connect_args,
+    }
+    if "sqlite" not in clean_url:
+        kwargs["pool_timeout"] = 30
+    return create_engine(clean_url, **kwargs)
 
 
 def _quote_identifier(name: str, engine_type: str = "postgresql") -> str:
@@ -197,7 +198,7 @@ class SourceConnectorFactory:
                     order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
                     query = f"SELECT * FROM {quoted_table}{order_by_clause} LIMIT {chunk_size} OFFSET {offset}"
                     with engine.connect() as conn:
-                        df = pl.read_database(query=query, connection=conn)
+                        df = pl.read_database(query=text(query), connection=conn)
 
                 has_more = len(df) == chunk_size
                 next_pk = None
@@ -281,7 +282,11 @@ class ASTTransformer:
     """Applies all 9 AST column transformation types to a Polars DataFrame in-memory."""
 
     @staticmethod
-    def transform_chunk(df: pl.DataFrame, column_mappings: List[Dict[str, Any]]) -> Tuple[pl.DataFrame, int]:
+    def transform_chunk(
+        df: pl.DataFrame,
+        column_mappings: List[Dict[str, Any]],
+        primary_key_strategy: Optional[str] = None,
+    ) -> Tuple[pl.DataFrame, int]:
         if df.is_empty():
             return df, 0
 
@@ -312,7 +317,7 @@ class ASTTransformer:
                 src_name = source_cols[0]["column_name"] if source_cols and "column_name" in source_cols[0] else target_col
                 src_ident = source_cols[0].get("identifier", "source") if source_cols else "source"
                 target_dtype = col_spec.get("target_data_type", "varchar").lower()
-                pk_strategy = col_spec.get("primary_key_strategy", "uuid_v5")
+                pk_strategy = primary_key_strategy or col_spec.get("primary_key_strategy", "uuid_v5")
 
                 if src_name in df.columns:
                     if col_spec.get("is_primary_key"):
@@ -628,8 +633,8 @@ class TableMerger:
         quoted_cols = [f'"{c}"' for c in cols]
         col_select = ", ".join(quoted_cols)
 
-        dedup_key = conflict_res.get("deduplication_key") if conflict_res else None
-        strategy = conflict_res.get("deduplication_strategy", "first_wins") if conflict_res else "first_wins"
+        dedup_key = (conflict_res.get("deduplication_key") if isinstance(conflict_res, dict) else getattr(conflict_res, "deduplication_key", None)) if conflict_res else None
+        strategy = (conflict_res.get("deduplication_strategy", "first_wins") if isinstance(conflict_res, dict) else getattr(conflict_res, "deduplication_strategy", "first_wins")) if conflict_res else "first_wins"
 
         if dedup_key and dedup_key in cols:
             quoted_key = f'"{dedup_key}"'
@@ -746,6 +751,8 @@ class TargetWriterFactory:
 
             if "mysql" in engine_type:
                 insert_sql = f'INSERT IGNORE INTO {quoted_table} ({col_names}) VALUES ({placeholders});'
+            elif "sqlite" in engine_type:
+                insert_sql = f'INSERT OR IGNORE INTO {quoted_table} ({col_names}) VALUES ({placeholders});'
             else:
                 insert_sql = f'INSERT INTO {quoted_table} ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING;'
 
@@ -757,8 +764,7 @@ class TargetWriterFactory:
                         successful_rows = raw_rowcount
                         skipped_rows = max(0, len(rows) - successful_rows)
                     else:
-                        successful_rows = len(rows)
-                        skipped_rows = 0
+                        successful_rows, skipped_rows = len(rows), 0
 
                 logger.info(
                     f"Bulk-inserted {successful_rows} rows into target table '{table_name}' "
@@ -954,6 +960,8 @@ class ExecutionOrchestrator:
                                 src_engine = "mysql"
                             elif "mongo" in db_url:
                                 src_engine = "mongodb"
+                            elif "sqlite" in db_url:
+                                src_engine = "sqlite"
 
                         # Detect primary key column if available for keyset pagination
                         pk_col = None
