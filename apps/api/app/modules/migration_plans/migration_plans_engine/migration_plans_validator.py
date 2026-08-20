@@ -174,6 +174,14 @@ class MigrationPlanValidator:
         snake_case_pattern = re.compile(r"^[a-z0-9_]+$")
         for table_map in ast.table_mappings:
             tgt_tbl = table_map.target_table_name
+            if table_map.conflict_resolution and table_map.conflict_resolution.primary_key_strategy:
+                pk_strat = table_map.conflict_resolution.primary_key_strategy
+                if pk_strat in ["uuid_v4_rekey", "prefix_id", "autoincrement_offset"] and len(table_map.source_tables) > 1:
+                    warnings.append(
+                        f"Table Architecture Notice: Target table '{tgt_tbl}' merges multiple sources using primary key strategy '{pk_strat}'. "
+                        f"Dependent tables referencing '{tgt_tbl}' via foreign keys may require FK reconciliation."
+                    )
+
             if not snake_case_pattern.match(tgt_tbl):
                 warnings.append(
                     f"Table Architecture Standard Notice: Target table '{tgt_tbl}' is not in standard lowercase snake_case."

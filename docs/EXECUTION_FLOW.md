@@ -420,9 +420,23 @@ This document maps entry points, call stack sequences, and module dependencies a
         │     - Atomically updates claimed job status to 'preparing' before returning
         │     - Prevents duplicate agent processes from executing the same job
         │
-        └─► 6. Exception Propagation & Backend Watchdog (execution_services.py:check_stale_jobs)
-              - Agent-side: Top-level try/except catches fatal execution errors and sends status="failed" with error_message
-              - Backend Watchdog: Detects jobs stuck in 'running'/'preparing' updated > 5 min ago and fails them automatically
+        ├─► 6. Exception Propagation & Backend Watchdog (execution_services.py:check_stale_jobs)
+        │     - Agent-side: Top-level try/except catches fatal execution errors and sends status="failed" with error_message
+        │     - Backend Watchdog: Detects jobs stuck in 'running'/'preparing' updated > 5 min ago and fails them automatically
+        │
+        ├─► 7. Primary Key Conflict-Resolution Strategies (execution_engine.py:ASTTransformer)
+        │     - Implements keep_original, autoincrement_offset, prefix_id, and uuid_v4_rekey
+        │     - Emits validator warning when rekeying PKs for multi-source merges
+        │
+        ├─► 8. Mongo Keyset Pagination (execution_engine.py:SourceConnectorFactory)
+        │     - find({"_id": {"$gt": last_id}}).sort("_id", 1).limit(chunk_size)
+        │     - Eliminates O(offset) skip drift during concurrent live writes
+        │
+        ├─► 9. Residual Unmapped Field Capture (execution_engine.py:ASTTransformer)
+        │     - Collects unmapped document fields and serializes into extra_attributes JSON column
+        │
+        └─► 10. Reconciled Mongo Introspection (sources_connectors_mongodb.py)
+              - 100-doc sampling + depth-3 recursive path flattening matching agent metadata engine
 ```
 ```
 

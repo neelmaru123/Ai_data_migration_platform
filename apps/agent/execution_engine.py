@@ -204,15 +204,28 @@ class SourceConnectorFactory:
         elif engine_type == "mongodb":
             try:
                 from pymongo import MongoClient
+                from bson import ObjectId
+
                 client = MongoClient(db_url)
-                db_name = db_url.split("/")[-1].split("?")[0] or "test"
+                db_name = db_url.rsplit("/", 1)[-1].split("?")[0] or "test"
                 db = client[db_name]
-                cursor = db[table_or_file_name].find().skip(offset).limit(chunk_size)
+
+                query = {}
+                if last_pk_val is not None and str(last_pk_val).strip() != "":
+                    try:
+                        query_id = ObjectId(str(last_pk_val))
+                    except Exception:
+                        query_id = str(last_pk_val)
+                    query = {"_id": {"$gt": query_id}}
+
+                cursor = db[table_or_file_name].find(query).sort("_id", 1).limit(chunk_size)
                 docs = list(cursor)
                 client.close()
 
                 if not docs:
-                    return pl.DataFrame(), False, None
+                    return pl.DataFrame(), False, last_pk_val
+
+                next_pk = str(docs[-1]["_id"]) if "_id" in docs[-1] else last_pk_val
 
                 for d in docs:
                     if "_id" in d:
@@ -220,10 +233,10 @@ class SourceConnectorFactory:
 
                 df = pl.DataFrame(docs)
                 has_more = len(df) == chunk_size
-                return df, has_more, None
+                return df, has_more, next_pk
             except Exception as exc:
                 logger.error(f"Error reading MongoDB collection '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False, None
+                return pl.DataFrame(), False, last_pk_val
 
         # 3. CSV File
         elif engine_type == "csv" or table_or_file_name.endswith(".csv"):
@@ -293,24 +306,37 @@ class ASTTransformer:
                 pk_strategy = col_spec.get("primary_key_strategy", "uuid_v5")
 
                 if src_name in df.columns:
-                    if "uuid" in target_dtype:
-                        if pk_strategy == "uuid_v4_rekey":
-                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                    if col_spec.get("is_primary_key"):
+                        if pk_strategy == "keep_original":
+                            if "int" in target_dtype:
+                                pk_expr = pl.col(src_name).cast(pl.Int64, strict=False)
+                            else:
+                                pk_expr = pl.col(src_name).cast(pl.Utf8)
+                        elif pk_strategy == "autoincrement_offset":
+                            src_idx = col_spec.get("source_index", 0)
+                            if not src_idx and src_ident:
+                                nums = re.findall(r'\d+', str(src_ident))
+                                if nums:
+                                    src_idx = max(0, int(nums[-1]) - 1)
+                            offset_val = 1_000_000_000 * int(src_idx)
+                            pk_expr = (pl.col(src_name).cast(pl.Int64, strict=False) + offset_val).cast(pl.Int64)
+                        elif pk_strategy == "uuid_v4_rekey":
+                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
                                 lambda val: str(uuid.uuid4()),
                                 return_dtype=pl.Utf8
                             )
                         elif pk_strategy == "prefix_id":
-                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda val: f"{src_ident}_{val}" if val else str(uuid.uuid4()),
+                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                                lambda val: f"{src_ident}_{val}" if val is not None and str(val) != "" else str(uuid.uuid4()),
                                 return_dtype=pl.Utf8
                             )
                         else:
                             # Deterministic UUID v5 namespace hashing by default
-                            uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{src_ident}_{val}")) if val else str(uuid.uuid4()),
+                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                                lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{src_ident}_{val}")) if val is not None and str(val) != "" else str(uuid.uuid4()),
                                 return_dtype=pl.Utf8
                             )
-                        exprs.append(uuid_expr.alias(target_col))
+                        exprs.append(pk_expr.alias(target_col))
                     elif "int" in target_dtype:
                         exprs.append(pl.col(src_name).cast(pl.Int64, strict=False).alias(target_col))
                     elif "timestamp" in target_dtype or "datetime" in target_dtype or "timestamptz" in target_dtype:
@@ -458,6 +484,42 @@ class ASTTransformer:
                 src_name = source_cols[0]["column_name"] if source_cols else target_col
                 if src_name in df.columns:
                     exprs.append(pl.col(src_name).alias(target_col))
+
+        # Residual/unmapped field capture (Fix 9)
+        mapped_src_cols = set()
+        for col_spec in column_mappings:
+            if col_spec.get("target_column_name") and col_spec.get("transformation_type") != "drop_column":
+                for sc in col_spec.get("source_columns", []):
+                    if "column_name" in sc:
+                        c_name = sc["column_name"]
+                        mapped_src_cols.add(c_name)
+                        if "." in c_name:
+                            mapped_src_cols.add(c_name.split(".")[0])
+
+        unmapped_cols = [c for c in df.columns if c not in mapped_src_cols and c not in ("_seq_id",)]
+        if unmapped_cols:
+            if "extra_attributes" not in keep_columns:
+                keep_columns.append("extra_attributes")
+
+            def _serialize_residual(struct_val, cols=unmapped_cols):
+                res_dict = {}
+                if isinstance(struct_val, dict):
+                    for k, v in struct_val.items():
+                        if v is not None:
+                            if hasattr(v, "to_dict"):
+                                v = v.to_dict()
+                            elif hasattr(v, "to_list"):
+                                v = v.to_list()
+                            res_dict[k] = v
+                return json.dumps(res_dict) if res_dict else "{}"
+
+            try:
+                extra_attr_expr = pl.struct([pl.col(c) for c in unmapped_cols if c in df.columns]).map_elements(
+                    _serialize_residual, return_dtype=pl.Utf8
+                )
+                exprs.append(extra_attr_expr.alias("extra_attributes"))
+            except Exception as exc:
+                logger.warning(f"Residual field capture warning: {exc}")
 
         if exprs:
             try:
@@ -877,6 +939,9 @@ class ExecutionOrchestrator:
                                 if src_cols and "column_name" in src_cols[0]:
                                     pk_col = src_cols[0]["column_name"]
                                     break
+
+                        if src_engine == "mongodb" and not pk_col:
+                            pk_col = "_id"
 
                         # Resumable Checkpoint offset & cursor
                         offset = CheckpointManager.get_last_offset(job_id, target_table, source_identifier=src_ident, source_table=src_table)

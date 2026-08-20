@@ -83,24 +83,49 @@ class MongoDBConnector(BaseConnector):
 
                 # Sample up to 10 documents and merge all field names to handle
                 # schema drift in schemaless collections (fix #7: single doc was insufficient).
-                pipeline = [{"$sample": {"size": 10}}]
-                sample_docs = await collection.aggregate(pipeline).to_list(length=10)
+                pipeline = [{"$sample": {"size": 100}}]
+                try:
+                    sample_docs = await collection.aggregate(pipeline).to_list(length=100)
+                except Exception:
+                    sample_docs = []
+                if not sample_docs:
+                    cursor = collection.find().limit(100)
+                    sample_docs = await cursor.to_list(length=100)
 
-                merged_fields: Dict[str, str] = {}
+                key_stats: Dict[str, Dict[str, Any]] = {}
+
+                def extract_paths(obj: Any, prefix: str = "", depth: int = 1):
+                    if depth > 3:
+                        return
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            path = f"{prefix}.{k}" if prefix else k
+                            if path not in key_stats:
+                                key_stats[path] = {"count": 0, "types": set(), "is_nested": isinstance(v, (dict, list))}
+                            key_stats[path]["count"] += 1
+                            v_type = type(v).__name__ if v is not None else "null"
+                            key_stats[path]["types"].add(v_type)
+
+                            if isinstance(v, dict):
+                                extract_paths(v, path, depth + 1)
+                            elif isinstance(v, list) and v and isinstance(v[0], dict):
+                                extract_paths(v[0], path, depth + 1)
+
                 for doc in sample_docs:
-                    for field_name, value in doc.items():
-                        if field_name not in merged_fields:
-                            merged_fields[field_name] = type(value).__name__
+                    extract_paths(doc)
 
-                columns: List[ColumnMetadata] = [
-                    ColumnMetadata(
-                        name=field_name,
-                        data_type=b_type,
-                        native_type=b_type,
-                        is_primary_key=(field_name == "_id"),
+                columns: List[ColumnMetadata] = []
+                for field_name, stats in key_stats.items():
+                    types_list = sorted(list(stats["types"]))
+                    b_type = "jsonb" if stats["is_nested"] else (types_list[0] if types_list else "varchar")
+                    columns.append(
+                        ColumnMetadata(
+                            name=field_name,
+                            data_type=b_type,
+                            native_type=f"bson({', '.join(types_list)})",
+                            is_primary_key=(field_name == "_id"),
+                        )
                     )
-                    for field_name, b_type in merged_fields.items()
-                ]
                 total_columns += len(columns)
 
                 tables.append(

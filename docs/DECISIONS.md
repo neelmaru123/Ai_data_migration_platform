@@ -512,3 +512,14 @@ Implemented three concurrency and resilience safeguards across `apps/agent/main.
 - **Agent Offline False Positives**: Synchronous single-threaded execution caused agents to miss heartbeats during long migrations, triggering false offline/degraded warnings. Background threading maintains continuous heartbeat reachability.
 - **Race Condition Data Corruption**: Unlocked task polling allowed duplicate agent containers to pick up the same job. Row-level locking guarantees single-consumer task distribution.
 - **Stuck UI Progress Bars**: Mid-migration crashes left Control Plane job records stuck in `running` forever. Dual-layer reporting (agent-side error dispatch + backend stale job watchdog) guarantees every failure is communicated clearly to the user.
+
+---
+
+## [2026-08-20] - PK Resolution Strategies, Mongo Keyset Extraction, Residual Capture & Introspection Alignment
+
+### 1. Decision Summary
+Implemented four Mongo and ETL transformation enhancements across `apps/agent/execution_engine.py`, `apps/api/app/modules/sources/sources_connectors/sources_connectors_mongodb.py`, and `apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_validator.py`:
+1. **PK Conflict Resolution Strategies**: Implemented `keep_original` (type cast pass-through), `autoincrement_offset` (deterministic $10^9 \times \text{src\_idx}$ numeric offset), `prefix_id` (`{src_ident}_{val}`), and `uuid_v4_rekey` (`uuid.uuid4()`) in `ASTTransformer.transform_chunk`. Added Stage E feasibility validator warning for rekeyed PKs with multi-source merges.
+2. **Mongo Keyset Pagination**: Replaced $O(\text{offset})$ `.find().skip(offset).limit(chunk_size)` with `_id`-based keyset pagination `find({"_id": {"$gt": last_id}}).sort("_id", 1)` in `SourceConnectorFactory.read_source_chunk`, persisting `last_pk_val` in checkpoints for zero document duplication or skipping during live writes.
+3. **Residual Unmapped Field Capture**: `ASTTransformer.transform_chunk` captures all document fields missing from explicit AST column mappings and serializes them into a catch-all `extra_attributes` JSON column, preventing silent data loss for un-sampled Mongo fields.
+4. **Mongo Introspection Reconciliation**: Updated `MongoDBConnector.introspect_schema` in `sources_connectors_mongodb.py` to use 100-document sampling and depth-3 path flattening (`parent.child` nested key extraction) matching `AgentMetadataEngine._introspect_mongodb`.
