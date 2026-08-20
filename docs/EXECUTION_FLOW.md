@@ -410,9 +410,19 @@ This document maps entry points, call stack sequences, and module dependencies a
         │     - Mongo Sink: Catches pymongo.errors.BulkWriteError to parse details["writeErrors"] for exact success/failure counts
         │     - ProgressReporter sends payload with successful_rows, failed_rows, and skipped_rows to Control Plane
         │
-        └─► 4. Exception Propagation
-              - Top-level try/except catches fatal execution errors
-              - Sends status="failed" with explicit error_message to Control Plane before re-raising
+        ├─► 4. Decoupled Background Heartbeat Loop (main.py:start_heartbeat_thread)
+        │     - Background daemon thread sends periodic send_heartbeat every 20s
+        │     - Continues firing heartbeats during long ETL jobs (prevents false offline status)
+        │     - Responds to stop_event for clean SIGINT/SIGTERM process termination
+        │
+        ├─► 5. Atomic Job Claiming (execution_services.py:get_pending_tasks_for_agent)
+        │     - SELECT ... WHERE status = 'queued' WITH FOR UPDATE SKIP LOCKED
+        │     - Atomically updates claimed job status to 'preparing' before returning
+        │     - Prevents duplicate agent processes from executing the same job
+        │
+        └─► 6. Exception Propagation & Backend Watchdog (execution_services.py:check_stale_jobs)
+              - Agent-side: Top-level try/except catches fatal execution errors and sends status="failed" with error_message
+              - Backend Watchdog: Detects jobs stuck in 'running'/'preparing' updated > 5 min ago and fails them automatically
 ```
 ```
 

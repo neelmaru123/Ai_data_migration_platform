@@ -374,12 +374,15 @@ class AgentService:
                     },
                 )
 
+        from app.modules.execution.execution_services import ExecutionService
+        stale_job_failures = await ExecutionService.check_stale_jobs(session, stale_threshold_seconds=300)
+
         if stale_agent_count > 0 or failed_jobs_count > 0:
             await session.commit()
 
         return {
             "stale_agents_marked_offline": stale_agent_count,
-            "failed_jobs_recovered": failed_jobs_count,
+            "failed_jobs_recovered": failed_jobs_count + stale_job_failures,
         }
 
     @staticmethod

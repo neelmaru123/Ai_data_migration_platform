@@ -3,10 +3,10 @@ Execution Domain Business Services
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.agents.agents_models import Agent
@@ -16,6 +16,7 @@ from app.modules.execution.execution_schemas import (
     ExecutionStartRequest,
 )
 from app.modules.migration_plans.migration_plans_models import MigrationPlan
+from app.core.logging import logger
 from app.core.websocket_manager import manager
 
 
@@ -95,18 +96,88 @@ class ExecutionService:
         session: AsyncSession, agent_id: uuid.UUID
     ) -> List[MigrationJob]:
         """
-        Returns queued or preparing migration jobs assigned to a specific Docker Agent.
+        Returns queued migration jobs assigned to a specific Docker Agent,
+        atomically claiming them with row-level locking (SKIP LOCKED) and transitioning
+        status to 'preparing' within the same transaction to prevent double execution.
         """
-        stmt = (
-            select(MigrationJob)
+        stmt_select = (
+            select(MigrationJob.id)
             .where(
                 MigrationJob.agent_id == agent_id,
-                MigrationJob.status.in_(["queued", "preparing"]),
+                MigrationJob.status == "queued",
             )
             .order_by(MigrationJob.created_at.asc())
+            .with_for_update(skip_locked=True)
+        )
+        res_ids = await session.execute(stmt_select)
+        job_ids = list(res_ids.scalars().all())
+
+        if not job_ids:
+            return []
+
+        stmt_update = (
+            update(MigrationJob)
+            .where(
+                MigrationJob.id.in_(job_ids),
+                MigrationJob.status == "queued",
+            )
+            .values(status="preparing")
+        )
+        res_update = await session.execute(stmt_update)
+        if res_update.rowcount == 0:
+            await session.rollback()
+            return []
+
+        await session.commit()
+
+        stmt_fetch = select(MigrationJob).where(MigrationJob.id.in_(job_ids))
+        res_fetch = await session.execute(stmt_fetch)
+        return list(res_fetch.scalars().all())
+
+    @staticmethod
+    async def check_stale_jobs(
+        session: AsyncSession, stale_threshold_seconds: int = 300
+    ) -> int:
+        """
+        Backend Watchdog: Detects execution jobs stuck in 'running' or 'preparing'
+        with no progress update for longer than stale_threshold_seconds (default 5 minutes).
+        Transitions stuck jobs to 'failed' with an explicit error message.
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
+        stmt = select(MigrationJob).where(
+            MigrationJob.status.in_(["running", "preparing"]),
+            MigrationJob.updated_at < cutoff,
         )
         res = await session.execute(stmt)
-        return list(res.scalars().all())
+        stale_jobs = list(res.scalars().all())
+
+        if not stale_jobs:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        for job in stale_jobs:
+            job.status = "failed"
+            job.completed_at = now
+            job.error_message = (
+                f"Migration job stalled: no progress updates received from agent for over {stale_threshold_seconds} seconds."
+            )
+            logger.error(
+                f"Watchdog failed stale job '{job.id}' (last updated: {job.updated_at})."
+            )
+            if job.agent_id:
+                await manager.broadcast_to_agent(
+                    str(job.agent_id),
+                    {
+                        "event": "JOB_FAILED",
+                        "agent_id": str(job.agent_id),
+                        "job_id": str(job.id),
+                        "status": "failed",
+                        "error_message": job.error_message,
+                    },
+                )
+
+        await session.commit()
+        return len(stale_jobs)
 
     @staticmethod
     async def get_job_by_id(
@@ -115,6 +186,7 @@ class ExecutionService:
         """
         Fetches a MigrationJob by ID, verifying user ownership via attached MigrationPlan.
         """
+        await ExecutionService.check_stale_jobs(session)
         stmt = (
             select(MigrationJob)
             .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
@@ -136,6 +208,7 @@ class ExecutionService:
         """
         Lists all execution jobs for a user across all migration plans.
         """
+        await ExecutionService.check_stale_jobs(session)
         stmt = (
             select(MigrationJob)
             .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)

@@ -495,3 +495,20 @@ Fixed three critical data loss, memory, and write-reporting edge cases in `apps/
 
 ### 4. Trade-offs & Future Considerations
 - DuckDB local staging creates a temporary `.duckdb` file in `CHECKPOINT_DIR` during multi-source execution, which is cleaned up automatically in a `finally` block upon completion.
+
+---
+
+## [2026-08-20] - Agent Decoupled Heartbeats, Atomic Job Claiming & Execution Error Watchdog
+
+### 1. Decision Summary
+Implemented three concurrency and resilience safeguards across `apps/agent/main.py`, `apps/agent/execution_engine.py`, `apps/api/app/modules/execution/execution_services.py`, and `apps/api/app/modules/agents/agents_services.py`:
+1. **Decoupled Agent Heartbeats**: Refactored `apps/agent/main.py` daemon loop to execute `send_heartbeat` inside a dedicated background daemon thread (`start_heartbeat_thread`) using `threading.Event()` for clean `SIGINT`/`SIGTERM` shutdown. Heartbeats now fire continuously every 20 seconds even during multi-hour ETL runs.
+2. **Atomic Job Claiming (SKIP LOCKED)**: Updated `ExecutionService.get_pending_tasks_for_agent` to use row-level locking (`.with_for_update(skip_locked=True)`) on queued jobs, atomically transitioning status to `'preparing'` in the same transaction before returning. Prevents concurrent agent processes sharing a token from double-executing jobs.
+3. **Execution Error Watchdog & Agent-Side Exception Propagation**:
+   - Agent-side `ExecutionOrchestrator.run_job` catches top-level exceptions and dispatches `ProgressReporter.report(..., status="failed", error_message=str(exc))` to Control Plane.
+   - Backend `ExecutionService.check_stale_jobs` queries jobs in `running` or `preparing` status updated > 5 minutes ago and fails them with an explicit error message (`"Migration job stalled: no progress updates received from agent for over 5 minutes."`).
+
+### 2. Why This Approach? (Rationale)
+- **Agent Offline False Positives**: Synchronous single-threaded execution caused agents to miss heartbeats during long migrations, triggering false offline/degraded warnings. Background threading maintains continuous heartbeat reachability.
+- **Race Condition Data Corruption**: Unlocked task polling allowed duplicate agent containers to pick up the same job. Row-level locking guarantees single-consumer task distribution.
+- **Stuck UI Progress Bars**: Mid-migration crashes left Control Plane job records stuck in `running` forever. Dual-layer reporting (agent-side error dispatch + backend stale job watchdog) guarantees every failure is communicated clearly to the user.
