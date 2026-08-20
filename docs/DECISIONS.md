@@ -473,3 +473,25 @@ Applied 7 critical bug fixes and architectural hardening updates across the Phas
 Resolved 2 static type checker (Pyright/MyPy) warnings:
 1. **LangGraph State Schema Compatibility (`migration_plans_graph.py`)**: Imported `TypedDict` from `typing_extensions` instead of standard `typing` so `MigrationPlanState` is recognized as a valid `TypedDictLike` by `StateGraph`.
 2. **Variable Shadowing Elimination (`migration_plans_validator.py`)**: Renamed local dictionary `col_map` (used in snapshot introspection on L70) to `column_type_map`. This resolved the type collision where Pyright bound `col_map` as `dict[str, str]` instead of `ColumnMappingSpec` during the `for col_map in table_map.column_mappings:` iteration.
+
+---
+
+## [2026-08-20] - Migration Engine Reliability Edge Case Fixes & DB Write Outcome Verification
+
+### 1. Decision Summary
+Fixed three critical data loss, memory, and write-reporting edge cases in `apps/agent/execution_engine.py` and `apps/api/app/modules/execution/execution_schemas.py`:
+1. **Multi-Source Merge Checkpoint Isolation**: Checkpoint state is now tracked independently per `(job_id, target_table, source_identifier, source_table)` to prevent multi-source merges from overwriting shared offsets and dropping rows. Includes legacy `checkpoint_{job_id}_{table_name}.json` fallback support.
+2. **DuckDB Local Staging Bounded-Memory Merges**: Replaced in-memory dataset buffering (`extracted_dfs`) with a DuckDB local staging table file. Multi-source merge chunks are appended to DuckDB and deduplicated streaming out of DuckDB in bounded batches (`~50,000` rows), keeping peak RAM usage bounded to 1 chunk regardless of dataset size.
+3. **DB Write Outcome Verification**: SQL bulk inserts inspect `result.rowcount` to calculate actual inserted rows vs skipped conflict rows (`ON CONFLICT DO NOTHING` / `INSERT IGNORE`). MongoDB bulk inserts explicitly catch `pymongo.errors.BulkWriteError` to parse `.details["writeErrors"]` and return accurate `successful_rows` and `failed_rows`. Added `skipped_rows` to `ExecutionProgressUpdate`.
+
+### 2. Why This Approach? (Rationale)
+- **Data Loss Prevention**: Shared checkpoint files caused source 2+ of a merge table to start reading at source 1's end offset instead of 0, silently skipping entire source datasets. Per-source isolated keying guarantees accurate resume points.
+- **Bounded Memory Overhead**: In-memory list buffering of extracted DataFrames caused OOM crashes when merging large datasets (>100k rows across multiple DBs). DuckDB's local file staging offloads data to disk and streams deduplicated results back in small Polars batches.
+- **Accurate Observability**: Assuming `len(rows)` was inserted without checking `rowcount` or swallowing PyMongo `BulkWriteError` hid silent conflict skips and reported 0/N success on partial MongoDB errors.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Holding Merged Data in Target DB Scratch Tables**: Rejected because it requires write/DDL privileges to create temporary tables on customer target databases and varies across target SQL dialects.
+- **Alternative B: In-Memory Python Dictionary Deduplication**: Rejected because storing dicts of hundreds of thousands of rows causes high Python object overhead and memory fragmentation.
+
+### 4. Trade-offs & Future Considerations
+- DuckDB local staging creates a temporary `.duckdb` file in `CHECKPOINT_DIR` during multi-source execution, which is cleaned up automatically in a `finally` block upon completion.

@@ -21,6 +21,7 @@ class ExecutionProgressUpdate(BaseModel):
     processed_rows: int = Field(default=0, ge=0)
     successful_rows: int = Field(default=0, ge=0)
     failed_rows: int = Field(default=0, ge=0)
+    skipped_rows: int = Field(default=0, ge=0)
     current_table: Optional[str] = Field(default=None)
     current_stage: Optional[str] = Field(default=None)
     error_message: Optional[str] = Field(default=None)

@@ -384,6 +384,36 @@ This document maps entry points, call stack sequences, and module dependencies a
         │ 1. plan.status == 'completed' (HITL Approved)
         │ 2. plan.is_valid == True (Schema Verified)
         │ Unapproved or invalid plans blocked with HTTP 422
+
+
+---
+
+## 10. Multi-Source Bounded ETL Execution & Outcome Verification Flow
+
+```text
+  Customer On-Premise Docker Agent (apps/agent/execution_engine.py:ExecutionOrchestrator.run_job)
+        │
+        ├─► 1. Checkpoint Key Isolation
+        │     - Checkpoint path: checkpoint_{job_id}_{target_table}_{source_identifier}_{source_table}.json
+        │     - Falls back to legacy checkpoint_{job_id}_{target_table}.json for legacy runs
+        │     - Resumes each source independently from its own last_offset
+        │
+        ├─► 2. Multi-Source Staging & Bounded Streaming (DuckDB)
+        │     - Creates temporary DuckDB staging database: staging_{job_id}_{target_table}.duckdb
+        │     - As source chunks are read and transformed, appends to DuckDB with _seq_id
+        │     - Discards extracted Polars DataFrames immediately (RAM stays bounded to 1 chunk ~50k rows)
+        │     - Runs SQL deduplication (first_wins / last_updated_wins) out of DuckDB staging
+        │     - Streams deduplicated chunks out of DuckDB into TargetWriterFactory.bulk_load
+        │
+        ├─► 3. Database Write Outcome Verification & Reporting
+        │     - SQL Sink (Postgres/MySQL): Inspects result.rowcount to calculate exact inserted vs skipped conflict rows
+        │     - Mongo Sink: Catches pymongo.errors.BulkWriteError to parse details["writeErrors"] for exact success/failure counts
+        │     - ProgressReporter sends payload with successful_rows, failed_rows, and skipped_rows to Control Plane
+        │
+        └─► 4. Exception Propagation
+              - Top-level try/except catches fatal execution errors
+              - Sends status="failed" with explicit error_message to Control Plane before re-raising
+```
 ```
 
 

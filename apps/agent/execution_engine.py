@@ -55,40 +55,78 @@ def _quote_identifier(name: str, engine_type: str = "postgresql") -> str:
 
 
 class CheckpointManager:
-    """Manages resumable checkpointing per table to prevent restarting from zero on agent crash."""
+    """Manages resumable checkpointing per table and per source to prevent restarting from zero on agent crash."""
 
     @staticmethod
-    def get_checkpoint_path(job_id: str, table_name: str) -> str:
+    def get_checkpoint_path(
+        job_id: str,
+        table_name: str,
+        source_identifier: Optional[str] = None,
+        source_table: Optional[str] = None,
+    ) -> str:
         tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
         os.makedirs(tmp_dir, exist_ok=True)
+        if source_identifier or source_table:
+            src_id = (source_identifier or "default").replace("/", "_").replace("\\", "_")
+            src_tbl = (source_table or "default").replace("/", "_").replace("\\", "_")
+            return os.path.join(tmp_dir, f"checkpoint_{job_id}_{table_name}_{src_id}_{src_tbl}.json")
         return os.path.join(tmp_dir, f"checkpoint_{job_id}_{table_name}.json")
 
     @classmethod
-    def get_last_offset(cls, job_id: str, table_name: str) -> int:
-        path = cls.get_checkpoint_path(job_id, table_name)
+    def get_last_offset(
+        cls,
+        job_id: str,
+        table_name: str,
+        source_identifier: Optional[str] = None,
+        source_table: Optional[str] = None,
+    ) -> int:
+        path = cls.get_checkpoint_path(job_id, table_name, source_identifier, source_table)
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     return data.get("last_offset", 0)
-            except Exception:
+            except Exception as exc:
+                logger.warning(f"Could not read checkpoint file '{path}': {exc}")
                 return 0
+
+        # Backward compatibility for legacy checkpoint naming without source suffix
+        legacy_path = os.path.join(os.getenv("CHECKPOINT_DIR", "/tmp"), f"checkpoint_{job_id}_{table_name}.json")
+        if os.path.exists(legacy_path):
+            try:
+                with open(legacy_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("last_offset", 0)
+            except Exception as exc:
+                logger.warning(f"Could not read legacy checkpoint file '{legacy_path}': {exc}")
+                return 0
+ 
         return 0
 
     @classmethod
-    def save_checkpoint(cls, job_id: str, table_name: str, offset: int, rows_processed: int):
-        path = cls.get_checkpoint_path(job_id, table_name)
+    def save_checkpoint(
+        cls,
+        job_id: str,
+        table_name: str,
+        offset: int,
+        rows_processed: int,
+        source_identifier: Optional[str] = None,
+        source_table: Optional[str] = None,
+    ):
+        path = cls.get_checkpoint_path(job_id, table_name, source_identifier, source_table)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({
                     "job_id": job_id,
                     "table_name": table_name,
+                    "source_identifier": source_identifier,
+                    "source_table": source_table,
                     "last_offset": offset,
                     "rows_processed": rows_processed,
                     "updated_at": datetime.now(timezone.utc).isoformat()
                 }, f, indent=2)
         except Exception as exc:
-            logger.warning(f"Could not write checkpoint for table '{table_name}': {exc}")
+            logger.warning(f"Could not write checkpoint for table '{table_name}' source '{source_identifier}.{source_table}': {exc}")
 
 
 class DDLExecutor:
@@ -464,22 +502,122 @@ class TableMerger:
 
         return combined
 
+    @staticmethod
+    def append_to_duckdb_staging(
+        conn: duckdb.DuckDBPyConnection,
+        staging_table_name: str,
+        df: pl.DataFrame,
+        start_seq: int = 0,
+    ) -> int:
+        if df.is_empty():
+            return start_seq
+
+        num_rows = len(df)
+        seq_series = pl.Series("_seq_id", range(start_seq, start_seq + num_rows), dtype=pl.Int64)
+        df_with_seq = df.with_columns(seq_series)
+
+        conn.register("df_chunk_temp", df_with_seq)
+
+        table_exists = conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [staging_table_name]
+        ).fetchone()[0] > 0
+
+        if not table_exists:
+            conn.execute(f"CREATE TABLE {staging_table_name} AS SELECT * FROM df_chunk_temp")
+        else:
+            existing_cols = [r[0] for r in conn.execute(f"DESCRIBE {staging_table_name}").fetchall()]
+            new_cols = [c for c in df_with_seq.columns if c not in existing_cols]
+            for c in new_cols:
+                conn.execute(f'ALTER TABLE {staging_table_name} ADD COLUMN "{c}" VARCHAR')
+
+            conn.execute(f"INSERT INTO {staging_table_name} BY NAME SELECT * FROM df_chunk_temp")
+
+        conn.unregister("df_chunk_temp")
+        return start_seq + num_rows
+
+    @classmethod
+    def stream_deduplicated_chunks(
+        cls,
+        conn: duckdb.DuckDBPyConnection,
+        staging_table_name: str,
+        conflict_res: Optional[Dict[str, Any]] = None,
+        chunk_size: int = 50000,
+    ):
+        table_exists = conn.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", [staging_table_name]
+        ).fetchone()[0] > 0
+
+        if not table_exists:
+            return
+
+        cols = [r[0] for r in conn.execute(f"DESCRIBE {staging_table_name}").fetchall() if r[0] != "_seq_id"]
+        if not cols:
+            return
+
+        quoted_cols = [f'"{c}"' for c in cols]
+        col_select = ", ".join(quoted_cols)
+
+        dedup_key = conflict_res.get("deduplication_key") if conflict_res else None
+        strategy = conflict_res.get("deduplication_strategy", "first_wins") if conflict_res else "first_wins"
+
+        if dedup_key and dedup_key in cols:
+            quoted_key = f'"{dedup_key}"'
+            order_dir = "ASC" if strategy == "first_wins" else "DESC"
+
+            dedup_sql = f"""
+                CREATE TEMP TABLE _dedup_final AS
+                WITH valid_rows AS (
+                    SELECT {col_select}, _seq_id,
+                           ROW_NUMBER() OVER (PARTITION BY {quoted_key} ORDER BY _seq_id {order_dir}) as _rn
+                    FROM {staging_table_name}
+                    WHERE {quoted_key} IS NOT NULL AND TRIM(CAST({quoted_key} AS VARCHAR)) != ''
+                ),
+                null_rows AS (
+                    SELECT {col_select}, _seq_id
+                    FROM {staging_table_name}
+                    WHERE {quoted_key} IS NULL OR TRIM(CAST({quoted_key} AS VARCHAR)) = ''
+                )
+                SELECT {col_select}, _seq_id FROM valid_rows WHERE _rn = 1
+                UNION ALL
+                SELECT {col_select}, _seq_id FROM null_rows
+                ORDER BY _seq_id ASC
+            """
+            conn.execute("DROP TABLE IF EXISTS _dedup_final")
+            conn.execute(dedup_sql)
+            target_relation = "_dedup_final"
+        else:
+            target_relation = staging_table_name
+
+        total_rows = conn.execute(f"SELECT COUNT(*) FROM {target_relation}").fetchone()[0]
+        logger.info(f"Streaming {total_rows} deduplicated rows from DuckDB staging area in chunks of {chunk_size}...")
+
+        for offset in range(0, total_rows, chunk_size):
+            chunk_df = conn.execute(
+                f"SELECT {col_select} FROM {target_relation} ORDER BY _seq_id ASC LIMIT {chunk_size} OFFSET {offset}"
+            ).pl()
+            yield chunk_df
+
 
 class TargetWriterFactory:
     """Bulk-inserts transformed Polars DataFrames into PostgreSQL, MySQL, or MongoDB target databases."""
 
     @staticmethod
-    def bulk_load(db_url: str, engine_type: str, table_name: str, df: pl.DataFrame) -> Tuple[int, int]:
+    def bulk_load(db_url: str, engine_type: str, table_name: str, df: pl.DataFrame) -> Tuple[int, int, int]:
+        """
+        Bulk loads a DataFrame into target DB.
+        Returns a tuple of (successful_rows, failed_rows, skipped_rows).
+        """
         if df.is_empty():
-            return 0, 0
+            return 0, 0, 0
 
         engine_type = engine_type.lower()
         rows = df.to_dicts()
         if not rows:
-            return 0, 0
+            return 0, 0, 0
 
         successful_rows = 0
         failed_rows = 0
+        skipped_rows = 0
 
         # 1. MongoDB Target Writer
         if engine_type in ["mongodb", "mongo"]:
@@ -494,10 +632,31 @@ class TargetWriterFactory:
                 res = coll.insert_many(rows, ordered=False)
                 successful_rows = len(res.inserted_ids)
                 logger.info(f"Bulk-inserted {successful_rows} documents into MongoDB collection '{table_name}'.")
-                return successful_rows, 0
+                return successful_rows, 0, 0
             except Exception as exc:
+                is_bulk_err = False
+                try:
+                    import importlib
+                    pymongo = importlib.import_module("pymongo")
+                    if isinstance(exc, pymongo.errors.BulkWriteError):
+                        is_bulk_err = True
+                except Exception:
+                    pass
+
+                if is_bulk_err or (hasattr(exc, "details") and isinstance(getattr(exc, "details"), dict)):
+                    details = getattr(exc, "details", {})
+                    write_errors = details.get("writeErrors", [])
+                    failed_rows = len(write_errors)
+                    n_inserted = details.get("nInserted", len(rows) - failed_rows)
+                    successful_rows = max(0, n_inserted)
+                    logger.warning(
+                        f"MongoDB partial bulk insert notice for collection '{table_name}': "
+                        f"{successful_rows} successful, {failed_rows} failed."
+                    )
+                    return successful_rows, failed_rows, 0
+
                 logger.error(f"MongoDB bulk insert error for collection '{table_name}': {exc}")
-                return 0, len(rows)
+                return 0, len(rows), 0
 
         # 2. PostgreSQL & MySQL Target Writer
         else:
@@ -516,9 +675,20 @@ class TargetWriterFactory:
 
             try:
                 with engine.begin() as conn:
-                    conn.execute(text(insert_sql), rows)
-                successful_rows = len(rows)
-                logger.info(f"Bulk-inserted {successful_rows} rows into target table '{table_name}'.")
+                    result = conn.execute(text(insert_sql), rows)
+                    raw_rowcount = getattr(result, "rowcount", -1)
+                    if raw_rowcount >= 0:
+                        successful_rows = raw_rowcount
+                        skipped_rows = max(0, len(rows) - successful_rows)
+                    else:
+                        successful_rows = len(rows)
+                        skipped_rows = 0
+
+                logger.info(
+                    f"Bulk-inserted {successful_rows} rows into target table '{table_name}' "
+                    f"(Skipped due to conflict: {skipped_rows})."
+                )
+                return successful_rows, 0, skipped_rows
             except Exception as exc:
                 logger.warning(f"Batch bulk insert notice for table '{table_name}': {exc}. Retrying per-row insertion...")
                 # Fallback to per-row insertion with sample error capping and 50% abort threshold
@@ -529,8 +699,12 @@ class TargetWriterFactory:
                 with engine.begin() as conn:
                     for idx, row in enumerate(rows):
                         try:
-                            conn.execute(text(insert_sql), [row])
-                            successful_rows += 1
+                            res_row = conn.execute(text(insert_sql), [row])
+                            r_cnt = getattr(res_row, "rowcount", -1)
+                            if r_cnt == 0:
+                                skipped_rows += 1
+                            else:
+                                successful_rows += 1
                         except Exception as row_exc:
                             failed_rows += 1
                             if failed_rows <= MAX_SAMPLE_ERRORS:
@@ -542,7 +716,7 @@ class TargetWriterFactory:
                                     f"({failed_rows}/{idx+1} rows failed). Please verify target schema and column mapping specs."
                                 )
 
-            return successful_rows, failed_rows
+                return successful_rows, failed_rows, skipped_rows
 
 
 class ProgressReporter:
@@ -558,6 +732,7 @@ class ProgressReporter:
         processed_rows: int,
         successful_rows: int,
         failed_rows: int,
+        skipped_rows: int = 0,
         current_table: Optional[str] = None,
         current_stage: Optional[str] = None,
         error_message: Optional[str] = None,
@@ -569,6 +744,7 @@ class ProgressReporter:
             "processed_rows": processed_rows,
             "successful_rows": successful_rows,
             "failed_rows": failed_rows,
+            "skipped_rows": skipped_rows,
             "current_table": current_table,
             "current_stage": current_stage,
             "error_message": error_message,
@@ -612,136 +788,177 @@ class ExecutionOrchestrator:
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
 
-        # Step 1: Pre-Migration DDL
-        ProgressReporter.report(backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, current_stage="pre_ddl")
-        DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
-
         total_tables = len(table_mappings)
         total_processed = 0
         total_successful = 0
         total_failed = 0
+        total_skipped = 0
 
-        # Step 2: Data Extraction, AST Transformation, Merge, and Target Loading
-        for idx, table_spec in enumerate(table_mappings, start=1):
-            target_table = table_spec.get("target_table_name")
-            source_tables = table_spec.get("source_tables", [])
-            column_mappings = table_spec.get("column_mappings", [])
-            conflict_res = table_spec.get("conflict_resolution")
+        try:
+            # Step 1: Pre-Migration DDL
+            ProgressReporter.report(backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0, current_stage="pre_ddl")
+            DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
 
-            logger.info(f"Processing table [{idx}/{total_tables}]: '{target_table}'...")
-            pct = 10.0 + (float(idx) / float(total_tables) * 80.0)
-            ProgressReporter.report(
-                backend_url, agent_token, job_id, "running", pct,
-                total_processed, total_successful, total_failed,
-                current_table=target_table, current_stage="data_streaming"
-            )
+            # Step 2: Data Extraction, AST Transformation, Merge, and Target Loading
+            for idx, table_spec in enumerate(table_mappings, start=1):
+                target_table = table_spec.get("target_table_name")
+                source_tables = table_spec.get("source_tables", [])
+                column_mappings = table_spec.get("column_mappings", [])
+                conflict_res = table_spec.get("conflict_resolution")
 
-            extracted_dfs = []
+                logger.info(f"Processing table [{idx}/{total_tables}]: '{target_table}'...")
+                pct = 10.0 + (float(idx) / float(total_tables) * 80.0)
+                ProgressReporter.report(
+                    backend_url, agent_token, job_id, "running", pct,
+                    total_processed, total_successful, total_failed, total_skipped,
+                    current_table=target_table, current_stage="data_streaming"
+                )
 
-            for src_ref in source_tables:
-                src_ident = src_ref.get("identifier")
-                src_table = src_ref.get("table_name")
+                staging_conn = None
+                staging_db_file = None
+                staging_table_name = "staging_data"
+                start_seq = 0
 
-                # Match source DB URL and engine type
-                db_url = None
-                if src_ident:
-                    clean_id = str(src_ident).lower().strip()
-                    norm_id = re.sub(r'^(src_|dest_|source_|target_)', '', clean_id)
+                if len(source_tables) > 1:
+                    staging_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
+                    os.makedirs(staging_dir, exist_ok=True)
+                    staging_db_file = os.path.join(staging_dir, f"staging_{job_id}_{target_table}.duckdb")
+                    if os.path.exists(staging_db_file):
+                        try:
+                            os.remove(staging_db_file)
+                        except Exception:
+                            pass
+                    staging_conn = duckdb.connect(staging_db_file)
 
-                    # 1. Exact or normalized match
-                    for k, v in source_db_urls.items():
-                        k_norm = re.sub(r'^(src_|dest_|source_|target_)', '', str(k).lower().strip())
-                        if str(k).lower().strip() == clean_id or k_norm == norm_id:
-                            db_url = v
-                            break
+                try:
+                    for src_ref in source_tables:
+                        src_ident = src_ref.get("identifier")
+                        src_table = src_ref.get("table_name")
 
-                    # 2. Numbered suffix match (e.g. "source_db_2" -> "db_2")
-                    if not db_url:
-                        id_numbers = re.findall(r'\d+', norm_id)
-                        if id_numbers:
-                            target_num = id_numbers[-1]
+                        # Match source DB URL and engine type
+                        db_url = None
+                        if src_ident:
+                            clean_id = str(src_ident).lower().strip()
+                            norm_id = re.sub(r'^(src_|dest_|source_|target_)', '', clean_id)
+
+                            # 1. Exact or normalized match
                             for k, v in source_db_urls.items():
-                                k_numbers = re.findall(r'\d+', str(k))
-                                if k_numbers and k_numbers[-1] == target_num:
+                                k_norm = re.sub(r'^(src_|dest_|source_|target_)', '', str(k).lower().strip())
+                                if str(k).lower().strip() == clean_id or k_norm == norm_id:
                                     db_url = v
                                     break
 
-                if not db_url and source_db_urls:
-                    db_url = list(source_db_urls.values())[0]
+                            # 2. Numbered suffix match (e.g. "source_db_2" -> "db_2")
+                            if not db_url:
+                                id_numbers = re.findall(r'\d+', norm_id)
+                                if id_numbers:
+                                    target_num = id_numbers[-1]
+                                    for k, v in source_db_urls.items():
+                                        k_numbers = re.findall(r'\d+', str(k))
+                                        if k_numbers and k_numbers[-1] == target_num:
+                                            db_url = v
+                                            break
 
-                src_engine = "postgresql"
-                if db_url:
-                    if "mysql" in db_url:
-                        src_engine = "mysql"
-                    elif "mongo" in db_url:
-                        src_engine = "mongodb"
+                        if not db_url and source_db_urls:
+                            db_url = list(source_db_urls.values())[0]
 
-                # Detect primary key column if available for keyset pagination
-                pk_col = None
-                for col in column_mappings:
-                    if col.get("is_primary_key"):
-                        src_cols = col.get("source_columns", [])
-                        if src_cols and "column_name" in src_cols[0]:
-                            pk_col = src_cols[0]["column_name"]
-                            break
+                        src_engine = "postgresql"
+                        if db_url:
+                            if "mysql" in db_url:
+                                src_engine = "mysql"
+                            elif "mongo" in db_url:
+                                src_engine = "mongodb"
 
-                # Resumable Checkpoint offset & cursor
-                offset = CheckpointManager.get_last_offset(job_id, target_table)
-                last_pk_val = None
-                has_more = True
+                        # Detect primary key column if available for keyset pagination
+                        pk_col = None
+                        for col in column_mappings:
+                            if col.get("is_primary_key"):
+                                src_cols = col.get("source_columns", [])
+                                if src_cols and "column_name" in src_cols[0]:
+                                    pk_col = src_cols[0]["column_name"]
+                                    break
 
-                while has_more:
-                    df_raw, has_more, next_pk = SourceConnectorFactory.read_source_chunk(
-                        db_url=db_url,
-                        engine_type=src_engine,
-                        table_or_file_name=src_table,
-                        offset=offset,
-                        chunk_size=50000,
-                        pk_col=pk_col,
-                        last_pk_val=last_pk_val,
-                    )
-                    if next_pk is not None:
-                        last_pk_val = next_pk
+                        # Resumable Checkpoint offset & cursor
+                        offset = CheckpointManager.get_last_offset(job_id, target_table, source_identifier=src_ident, source_table=src_table)
+                        last_pk_val = None
+                        has_more = True
 
-                    if df_raw.is_empty():
-                        break
+                        while has_more:
+                            df_raw, has_more, next_pk = SourceConnectorFactory.read_source_chunk(
+                                db_url=db_url,
+                                engine_type=src_engine,
+                                table_or_file_name=src_table,
+                                offset=offset,
+                                chunk_size=50000,
+                                pk_col=pk_col,
+                                last_pk_val=last_pk_val,
+                            )
+                            if next_pk is not None:
+                                last_pk_val = next_pk
 
-                    logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
-                    df_trans, trans_errors = ASTTransformer.transform_chunk(df_raw, column_mappings)
-                    total_failed += trans_errors
+                            if df_raw.is_empty():
+                                break
 
-                    # If single source table, load directly to target (OOM-free streaming)
-                    if len(source_tables) == 1:
-                        succ, fail = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
-                        total_processed += (succ + fail)
-                        total_successful += succ
-                        total_failed += fail
-                    else:
-                        extracted_dfs.append(df_trans)
+                            logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
+                            df_trans, trans_errors = ASTTransformer.transform_chunk(df_raw, column_mappings)
+                            total_failed += trans_errors
 
-                    offset += len(df_raw)
-                    CheckpointManager.save_checkpoint(job_id, target_table, offset, total_processed)
+                            # If single source table, load directly to target (OOM-free streaming)
+                            if len(source_tables) == 1:
+                                succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
+                                total_processed += (succ + fail + skip)
+                                total_successful += succ
+                                total_failed += fail
+                                total_skipped += skip
+                            else:
+                                start_seq = TableMerger.append_to_duckdb_staging(staging_conn, staging_table_name, df_trans, start_seq)
 
-            # For multi-source merges, deduplicate and load merged result
-            if len(source_tables) > 1 and extracted_dfs:
-                merged_df = TableMerger.merge_and_deduplicate(extracted_dfs, conflict_res)
-                succ, fail = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, merged_df)
-                total_processed += (succ + fail)
-                total_successful += succ
-                total_failed += fail
+                            offset += len(df_raw)
+                            CheckpointManager.save_checkpoint(job_id, target_table, offset, total_processed, source_identifier=src_ident, source_table=src_table)
 
-        # Step 3: Post-Migration DDL (Foreign Keys)
-        ProgressReporter.report(
-            backend_url, agent_token, job_id, "running", 95.0,
-            total_processed, total_successful, total_failed,
-            current_stage="post_ddl"
-        )
-        DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+                    # For multi-source merges, stream deduplicated results from DuckDB staging area in bounded batches
+                    if len(source_tables) > 1 and staging_conn:
+                        for chunk_df in TableMerger.stream_deduplicated_chunks(staging_conn, staging_table_name, conflict_res, chunk_size=50000):
+                            succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, chunk_df)
+                            total_processed += (succ + fail + skip)
+                            total_successful += succ
+                            total_failed += fail
+                            total_skipped += skip
 
-        # Step 4: Mark Job Complete
-        ProgressReporter.report(
-            backend_url, agent_token, job_id, "completed", 100.0,
-            total_processed, total_successful, total_failed,
-            current_stage="completed"
-        )
-        logger.info(f"=== MIGRATION JOB '{job_id}' COMPLETED SUCCESSFULLY! (Processed: {total_processed}, Success: {total_successful}, Failed: {total_failed}) ===")
+                finally:
+                    if staging_conn:
+                        try:
+                            staging_conn.close()
+                        except Exception:
+                            pass
+                    if staging_db_file and os.path.exists(staging_db_file):
+                        try:
+                            os.remove(staging_db_file)
+                        except Exception:
+                            pass
+
+            # Step 3: Post-Migration DDL (Foreign Keys)
+            ProgressReporter.report(
+                backend_url, agent_token, job_id, "running", 95.0,
+                total_processed, total_successful, total_failed, total_skipped,
+                current_stage="post_ddl"
+            )
+            DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+
+            # Step 4: Mark Job Complete
+            ProgressReporter.report(
+                backend_url, agent_token, job_id, "completed", 100.0,
+                total_processed, total_successful, total_failed, total_skipped,
+                current_stage="completed"
+            )
+            logger.info(f"=== MIGRATION JOB '{job_id}' COMPLETED SUCCESSFULLY! (Processed: {total_processed}, Success: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
+
+        except Exception as exc:
+            err_msg = f"Migration job '{job_id}' failed: {exc}"
+            logger.error(err_msg, exc_info=True)
+            ProgressReporter.report(
+                backend_url, agent_token, job_id, "failed", 0.0,
+                total_processed, total_successful, total_failed, total_skipped,
+                current_stage="failed", error_message=err_msg
+            )
+            raise
