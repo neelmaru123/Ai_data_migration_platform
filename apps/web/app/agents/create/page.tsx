@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 import TopologySelector, { TOPOLOGY_OPTIONS } from '../../../components/agents/TopologySelector';
 import DatabaseConfigForm from '../../../components/agents/DatabaseConfigForm';
 import DockerCommandOutput from '../../../components/agents/DockerCommandOutput';
@@ -12,7 +13,7 @@ import {
 } from '../../../types/agent';
 import agentService from '../../../services/agentService';
 import toast from 'react-hot-toast';
-
+import { ArrowLeft, ChevronRight } from 'lucide-react';
 
 export default function AgentCreatePage() {
   const [step, setStep] = useState<1 | 2 | 3>(1);
@@ -88,7 +89,17 @@ export default function AgentCreatePage() {
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-96 bg-gradient-to-b from-sky-400/15 via-sky-500/5 to-transparent blur-3xl pointer-events-none -z-10" />
 
       {/* Main Container */}
-      <main className="container mx-auto px-4 py-8 md:py-12 max-w-6xl space-y-10">
+      <main className="container mx-auto px-4 py-8 md:py-12 max-w-6xl space-y-8 font-mono">
+        {/* Top Breadcrumb Navigation */}
+        <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
+          <Link href="/dashboard" className="text-sky-400 hover:text-sky-300 flex items-center gap-1 font-bold">
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Dashboard</span>
+          </Link>
+          <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
+          <span className="text-white font-bold">Register New Agent</span>
+        </div>
+
         {/* Wizard Progress Bar */}
         <div className="w-full max-w-3xl mx-auto">
           <div className="flex items-center justify-between relative">

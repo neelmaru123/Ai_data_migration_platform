@@ -1,9 +1,11 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
 import { ExecutionJobResponse } from '../../types/execution';
 import executionService from '../../services/executionService';
 import JobExecutionBanner from '../../components/plans/JobExecutionBanner';
+import { ArrowLeft, ChevronRight, RefreshCw } from 'lucide-react';
 
 export default function ExecutionPage() {
   const [executions, setExecutions] = useState<ExecutionJobResponse[]>([]);
@@ -41,9 +43,19 @@ export default function ExecutionPage() {
       {/* Background Glow */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-96 bg-gradient-to-b from-sky-400/15 via-sky-500/5 to-transparent blur-3xl pointer-events-none -z-10" />
 
-      <main className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 flex-1">
+      <main className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 flex-1 font-mono">
+        {/* Top Breadcrumb Navigation */}
+        <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
+          <Link href="/dashboard" className="text-sky-400 hover:text-sky-300 flex items-center gap-1 font-bold">
+            <ArrowLeft className="w-3.5 h-3.5" />
+            <span>Dashboard</span>
+          </Link>
+          <ChevronRight className="w-3.5 h-3.5 text-zinc-600" />
+          <span className="text-white font-bold">Migration Execution Monitor</span>
+        </div>
+
         {/* Header */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-6">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-6 font-sans">
           <div>
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-none text-[11px] font-mono font-bold uppercase tracking-widest bg-sky-400/10 text-sky-400 border border-sky-400/30 mb-2">
               TARGET DB INSERTION ENGINE
@@ -51,7 +63,7 @@ export default function ExecutionPage() {
             <h1 className="text-3xl font-extrabold text-white tracking-tight sm:text-4xl uppercase font-sans">
               Migration Execution Monitor
             </h1>
-            <p className="text-zinc-400 text-xs sm:text-sm max-w-2xl mt-1 leading-relaxed">
+            <p className="text-zinc-400 text-xs sm:text-sm max-w-2xl mt-1 leading-relaxed font-mono">
               Real-time progression monitor tracking chunked target database insertions, stream throughput, and agent execution logs.
             </p>
           </div>
@@ -59,9 +71,10 @@ export default function ExecutionPage() {
           <button
             type="button"
             onClick={fetchExecutions}
-            className="py-3 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/30 transition-colors shadow-lg"
+            className="py-3 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/30 transition-colors shadow-lg flex items-center gap-2"
           >
-            ↻ Refresh Jobs
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Refresh Jobs</span>
           </button>
         </div>
 
@@ -99,99 +112,89 @@ export default function ExecutionPage() {
               <span className="w-2 h-2 rounded-none bg-sky-400 inline-block animate-pulse" />
               Active Job Live Progression: {selectedJob.id}
             </div>
-            <JobExecutionBanner
-              job={selectedJob}
-              onJobUpdated={(updated) => {
-                setExecutions((prev) => prev.map((j) => (j.id === updated.id ? updated : j)));
-                if (selectedJob?.id === updated.id) setSelectedJob(updated);
-              }}
-            />
+            <JobExecutionBanner job={selectedJob} />
           </div>
         )}
 
-        {/* Job History List */}
+        {/* Executions History Table */}
         <div className="space-y-4 font-mono">
-          <div className="flex items-center justify-between">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider flex items-center gap-2">
-              <span className="w-2 h-2 rounded-none bg-blue-500 inline-block" />
-              All Execution History Jobs
-            </h3>
+          <div className="text-xs font-mono font-bold text-white uppercase tracking-wider flex items-center gap-2">
+            <span className="w-2 h-2 rounded-none bg-sky-400 inline-block" />
+            Execution Job History ({executions.length})
           </div>
 
           {loading ? (
-            <div className="p-12 text-center bg-black border border-zinc-800 text-zinc-400 text-xs">
-              Fetching execution jobs...
+            <div className="p-12 text-center bg-black border border-zinc-800 text-zinc-400 text-xs font-mono">
+              Loading execution jobs history...
             </div>
           ) : errorMsg ? (
-            <div className="p-8 text-center bg-black border border-rose-500/30 text-rose-400 text-xs">
+            <div className="p-6 bg-black border border-rose-500/30 text-rose-400 text-xs font-mono">
               {errorMsg}
             </div>
           ) : executions.length === 0 ? (
-            <div className="p-12 text-center bg-black border border-zinc-800 text-zinc-400 text-xs">
-              No execution jobs dispatched yet. Approve a plan from the Transformation Plan page to trigger a job.
+            <div className="p-12 text-center bg-black border border-zinc-800 text-zinc-500 text-xs font-mono">
+              No target insertion jobs dispatched yet. Approve a migration plan to execute streaming ETL.
             </div>
           ) : (
-            <div className="overflow-x-auto border border-zinc-800 bg-black shadow-xl">
-              <table className="w-full text-left text-xs font-mono">
+            <div className="border border-zinc-800 bg-black overflow-x-auto">
+              <table className="w-full text-left text-xs font-mono border-collapse">
                 <thead>
-                  <tr className="border-b border-zinc-800 text-zinc-400 uppercase text-[10px] tracking-wider bg-zinc-950">
-                    <th className="p-3.5">Job ID</th>
-                    <th className="p-3.5">Plan ID</th>
-                    <th className="p-3.5">Status</th>
-                    <th className="p-3.5">Insertion Progress</th>
-                    <th className="p-3.5">Rows Migrated</th>
-                    <th className="p-3.5">Created At</th>
-                    <th className="p-3.5 text-right">Action</th>
+                  <tr className="border-b border-zinc-800 bg-zinc-950 text-zinc-400 text-[10px] uppercase font-bold tracking-wider">
+                    <th className="p-3">Job ID</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3">Current Stage</th>
+                    <th className="p-3">Target Rows</th>
+                    <th className="p-3">Failed Rows</th>
+                    <th className="p-3">Dispatched At</th>
+                    <th className="p-3 text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-900">
-                  {executions.map((jobItem) => {
-                    const isSelected = selectedJob?.id === jobItem.id;
-                    const st = (jobItem.status || '').toLowerCase();
+                  {executions.map((j) => {
+                    const isSel = selectedJob?.id === j.id;
+                    const stLower = (j.status || 'pending').toLowerCase();
+                    const isDone = stLower === 'completed';
+                    const isErr = stLower === 'failed';
 
                     return (
                       <tr
-                        key={jobItem.id}
-                        onClick={() => setSelectedJob(jobItem)}
-                        className={`cursor-pointer transition-colors ${
-                          isSelected ? 'bg-sky-400/10 text-white' : 'hover:bg-zinc-950'
+                        key={j.id}
+                        className={`hover:bg-zinc-950/80 transition-colors ${
+                          isSel ? 'bg-sky-400/5 border-l-2 border-l-sky-400' : ''
                         }`}
                       >
-                        <td className="p-3.5 font-bold text-sky-400">
-                          {jobItem.id.slice(0, 8)}...
-                        </td>
-                        <td className="p-3.5 text-zinc-300">
-                          {jobItem.migration_plan_id.slice(0, 8)}...
-                        </td>
-                        <td className="p-3.5">
+                        <td className="p-3 font-bold text-sky-400 truncate max-w-[120px]">{j.id}</td>
+                        <td className="p-3">
                           <span
                             className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded-none border ${
-                              st === 'completed'
+                              isDone
                                 ? 'bg-emerald-400/10 text-emerald-400 border-emerald-400/30'
-                                : st === 'failed'
+                                : isErr
                                 ? 'bg-rose-500/10 text-rose-400 border-rose-500/30'
                                 : 'bg-sky-400/10 text-sky-400 border-sky-400/30'
                             }`}
                           >
-                            {st}
+                            {stLower.toUpperCase()}
                           </span>
                         </td>
-                        <td className="p-3.5 text-white font-bold">
-                          {Math.round(jobItem.progress || 0)}%
+                        <td className="p-3 text-zinc-300 text-[11px]">{j.current_stage || 'processing'}</td>
+                        <td className="p-3 font-bold text-white">{(j.successful_rows || 0).toLocaleString()}</td>
+                        <td className="p-3">
+                          <span className={(j.failed_rows || 0) > 0 ? 'text-rose-400 font-bold' : 'text-zinc-500'}>
+                            {(j.failed_rows || 0).toLocaleString()}
+                          </span>
                         </td>
-                        <td className="p-3.5 text-emerald-400 font-bold">
-                          {(jobItem.successful_rows || 0).toLocaleString()} / {(jobItem.total_rows || 0).toLocaleString()}
+                        <td className="p-3 text-zinc-400 text-[11px]">
+                          {j.created_at ? new Date(j.created_at).toLocaleString() : 'N/A'}
                         </td>
-                        <td className="p-3.5 text-zinc-500 text-[11px]">
-                          {new Date(jobItem.created_at).toLocaleString()}
-                        </td>
-                        <td className="p-3.5 text-right">
-                          <a
-                            href={`/transformation-plan?planId=${jobItem.migration_plan_id}`}
-                            className="py-1 px-3 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-[10px] font-bold uppercase border border-zinc-800 inline-block"
+                        <td className="p-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedJob(j)}
+                            className="px-3 py-1 bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-[10px] font-bold uppercase border border-zinc-800"
                           >
-                            View Plan
-                          </a>
+                            View Job
+                          </button>
                         </td>
                       </tr>
                     );

@@ -263,7 +263,7 @@ async def google_oauth_callback(
         refresh_token = create_refresh_token(subject=user.id)
 
         redirect_response = RedirectResponse(
-            url=f"{settings.FRONTEND_URL}/agents/create",
+            url=f"{settings.FRONTEND_URL}/dashboard",
             status_code=status.HTTP_302_FOUND
         )
         redirect_response.delete_cookie(key="oauth_state", path="/")

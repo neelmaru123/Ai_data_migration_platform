@@ -2,9 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { AgentDetailResponse } from '../../types/agent';
+import { AgentDetailResponse, AgentDockerCommandResponse } from '../../types/agent';
 import agentService from '../../services/agentService';
-import { Activity, Database, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert, Monitor, Code, FileCode } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 export default function DashboardPage() {
@@ -14,6 +14,9 @@ export default function DashboardPage() {
 
   // Modal State for Docker Commands
   const [selectedAgentForCmd, setSelectedAgentForCmd] = useState<AgentDetailResponse | null>(null);
+  const [dockerCmdData, setDockerCmdData] = useState<AgentDockerCommandResponse | null>(null);
+  const [loadingCmd, setLoadingCmd] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'powershell' | 'bash' | 'oneline' | 'env'>('powershell');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   // Modal State for Agent Deletion
@@ -38,12 +41,27 @@ export default function DashboardPage() {
     fetchAgents();
   }, []);
 
+  const handleOpenDockerCmdModal = async (ag: AgentDetailResponse) => {
+    setSelectedAgentForCmd(ag);
+    setDockerCmdData(null);
+    setLoadingCmd(true);
+    try {
+      const cmdRes = await agentService.getAgentDockerCommand(ag.id);
+      setDockerCmdData(cmdRes);
+    } catch {
+      toast.error('Failed to fetch Docker commands for this agent.');
+    } finally {
+      setLoadingCmd(false);
+    }
+  };
+
   const totalAgents = agents.length;
   const onlineAgents = agents.filter((ag) => (ag.status || '').toLowerCase() === 'online').length;
   const degradedAgents = agents.filter((ag) => (ag.status || '').toLowerCase() === 'degraded').length;
   const totalDataSources = agents.reduce((acc, ag) => acc + (ag.data_sources?.length || 0), 0);
 
   const handleCopyText = (text: string, key: string) => {
+    if (!text) return;
     navigator.clipboard.writeText(text);
     setCopiedKey(key);
     toast.success('Copied to clipboard!');
@@ -62,6 +80,22 @@ export default function DashboardPage() {
       toast.error(err.response?.data?.detail || 'Failed to delete agent.');
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const getDisplayedCommand = (): string => {
+    if (!dockerCmdData) return '';
+    switch (activeTab) {
+      case 'powershell':
+        return dockerCmdData.docker_command_powershell || dockerCmdData.docker_command;
+      case 'bash':
+        return dockerCmdData.docker_command;
+      case 'oneline':
+        return dockerCmdData.docker_command_oneline || dockerCmdData.docker_command;
+      case 'env':
+        return dockerCmdData.env_template;
+      default:
+        return dockerCmdData.docker_command_powershell || dockerCmdData.docker_command;
     }
   };
 
@@ -181,8 +215,6 @@ export default function DashboardPage() {
                 const stLower = (ag.status || 'offline').toLowerCase();
                 const isOnline = stLower === 'online';
                 const isDegraded = stLower === 'degraded';
-                const sourceDS = (ag.data_sources || []).filter((ds) => ds.role === 'source' || ds.role === 'both');
-                const targetDS = (ag.data_sources || []).find((ds) => ds.role === 'target');
 
                 return (
                   <div
@@ -299,7 +331,7 @@ export default function DashboardPage() {
 
                       <button
                         type="button"
-                        onClick={() => setSelectedAgentForCmd(ag)}
+                        onClick={() => handleOpenDockerCmdModal(ag)}
                         className="w-full py-2 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-[11px] font-mono font-bold uppercase tracking-wider border border-zinc-800 transition-colors flex items-center justify-center gap-2"
                       >
                         <Terminal className="w-3.5 h-3.5 text-sky-400" />
@@ -341,15 +373,64 @@ export default function DashboardPage() {
                 Run this command on your host server to boot the Docker migration agent daemon.
               </p>
 
+              {/* Format Tabs (PowerShell, Bash, Single Line, .env) */}
+              <div className="flex items-center gap-1.5 flex-wrap border-b border-zinc-900 pb-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('powershell')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-semibold uppercase ${
+                    activeTab === 'powershell'
+                      ? 'bg-sky-400/20 text-sky-400 border border-sky-400/30'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Monitor className="w-3.5 h-3.5" /> PowerShell
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('bash')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-semibold uppercase ${
+                    activeTab === 'bash'
+                      ? 'bg-sky-400/20 text-sky-400 border border-sky-400/30'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Terminal className="w-3.5 h-3.5" /> Bash / Linux
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('oneline')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-semibold uppercase ${
+                    activeTab === 'oneline'
+                      ? 'bg-sky-400/20 text-sky-400 border border-sky-400/30'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5" /> Single Line
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('env')}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-[11px] font-mono font-semibold uppercase ${
+                    activeTab === 'env'
+                      ? 'bg-sky-400/20 text-sky-400 border border-sky-400/30'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  <FileCode className="w-3.5 h-3.5" /> .env File
+                </button>
+              </div>
+
               {/* Command Box */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-[10px] font-bold text-zinc-400 uppercase">
-                  <span>PowerShell Command Line:</span>
+                  <span>{activeTab.toUpperCase()} COMMAND LINE:</span>
                   <button
                     type="button"
-                    onClick={() =>
-                      handleCopyText(selectedAgentForCmd.docker_command_powershell || selectedAgentForCmd.docker_command_oneline || '', 'cmd_modal')
-                    }
+                    onClick={() => handleCopyText(getDisplayedCommand(), 'cmd_modal')}
                     className="text-sky-400 hover:text-sky-300 flex items-center gap-1"
                   >
                     {copiedKey === 'cmd_modal' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
@@ -357,9 +438,16 @@ export default function DashboardPage() {
                   </button>
                 </div>
 
-                <pre className="p-4 bg-zinc-950 border border-zinc-900 text-sky-300 overflow-x-auto whitespace-pre-wrap text-[11px] font-mono max-h-60">
-                  {selectedAgentForCmd.docker_command_powershell || selectedAgentForCmd.docker_command_oneline || 'Generating command...'}
-                </pre>
+                {loadingCmd ? (
+                  <div className="p-8 text-center bg-zinc-950 border border-zinc-900 text-sky-400 text-xs flex items-center justify-center gap-2 font-mono">
+                    <div className="w-4 h-4 border-2 border-sky-400 border-t-transparent animate-spin" />
+                    <span>Fetching Docker CLI setup commands...</span>
+                  </div>
+                ) : (
+                  <pre className="p-4 bg-zinc-950 border border-zinc-900 text-sky-300 overflow-x-auto whitespace-pre-wrap text-[11px] font-mono max-h-60">
+                    {getDisplayedCommand() || 'No command available.'}
+                  </pre>
+                )}
               </div>
 
               <div className="p-3 bg-sky-400/10 border border-sky-400/30 text-sky-300 text-[11px] leading-relaxed">

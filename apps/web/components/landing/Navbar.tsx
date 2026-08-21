@@ -78,18 +78,6 @@ export default function Navbar() {
           {/* Action CTAs */}
           <div className="hidden md:flex items-center gap-3">
             <Link
-              href="/dashboard"
-              className="text-xs font-mono font-bold uppercase tracking-wider text-sky-400 hover:text-white px-3.5 py-1.5 rounded-none border border-sky-400/30 hover:border-sky-400 bg-sky-400/10 transition-all"
-            >
-              Dashboard
-            </Link>
-            <Link
-              href="/execution"
-              className="text-xs font-mono font-bold uppercase tracking-wider text-zinc-300 hover:text-white px-3.5 py-1.5 rounded-none border border-zinc-800 hover:border-zinc-700 bg-zinc-950 transition-all"
-            >
-              Executions
-            </Link>
-            <Link
               href="/login"
               className="text-xs font-semibold uppercase tracking-wider text-sky-200 hover:text-white px-4 py-2 rounded-none border border-sky-400/20 hover:border-sky-400/50 bg-sky-400/10 backdrop-blur-xl transition-all"
             >
