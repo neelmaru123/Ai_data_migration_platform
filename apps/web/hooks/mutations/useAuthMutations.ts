@@ -1,4 +1,5 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import Cookies from 'js-cookie';
 import authService from '../../services/authService';
 import {
   UserRegisterPayload,
@@ -24,6 +25,7 @@ export function useRegister() {
   return useMutation<TokenResponse, any, UserRegisterPayload>({
     mutationFn: (payload) => authService.register(payload),
     onSuccess: (data) => {
+      Cookies.set('logged_in', 'true', { expires: 7, path: '/' });
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Account created successfully!');
@@ -45,6 +47,7 @@ export function useLogin() {
   return useMutation<TokenResponse, any, UserLoginPayload>({
     mutationFn: (payload) => authService.login(payload),
     onSuccess: (data) => {
+      Cookies.set('logged_in', 'true', { expires: 7, path: '/' });
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Login successful!');
@@ -66,6 +69,7 @@ export function useGoogleAuth() {
   return useMutation<TokenResponse, any, GoogleAuthRequestPayload>({
     mutationFn: (payload) => authService.googleAuth(payload),
     onSuccess: (data) => {
+      Cookies.set('logged_in', 'true', { expires: 7, path: '/' });
       dispatch(setUser(data.user));
       queryClient.invalidateQueries({ queryKey: AUTH_USER_QUERY_KEY });
       toast.success(data.message || 'Google authentication successful!');
@@ -87,6 +91,7 @@ export function useLogout() {
   return useMutation<MessageResponse, any, void>({
     mutationFn: () => authService.logout(),
     onSuccess: (data) => {
+      Cookies.remove('logged_in', { path: '/' });
       dispatch(logoutAction());
       queryClient.clear();
       toast.success(data.message || 'Logged out successfully');
