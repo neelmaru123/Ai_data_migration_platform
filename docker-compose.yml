@@ -87,6 +87,42 @@ services:
       retries: 5
     restart: unless-stopped
 
+  postgres_ecommerce:
+    image: postgres:16-alpine
+    container_name: migration_platform_postgres_ecommerce
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_password
+      - POSTGRES_DB=ecommerce_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_ecommerce_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ecommerce_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  postgres_crm:
+    image: postgres:16-alpine
+    container_name: migration_platform_postgres_crm
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_password
+      - POSTGRES_DB=crm_db
+    ports:
+      - "5436:5432"
+    volumes:
+      - postgres_crm_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d crm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: migration_platform_redis
@@ -101,3 +137,5 @@ services:
 
 volumes:
   postgres_data:
+  postgres_ecommerce_data:
+  postgres_crm_data:

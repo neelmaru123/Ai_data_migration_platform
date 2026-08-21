@@ -1,8 +1,13 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import planService from '../../services/planService';
+import executionService from '../../services/executionService';
+import { PlanResponse } from '../../types/migrationPlan';
+import { ExecutionJobResponse } from '../../types/execution';
+import { CheckCircle2, Lock, ArrowRight, Activity, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
 
 interface GeneratePlanActionProps {
   agentId: string;
@@ -14,6 +19,53 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
   const [customInstructions, setCustomInstructions] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Execution & Existing Plan State
+  const [existingPlan, setExistingPlan] = useState<PlanResponse | null>(null);
+  const [executionJob, setExecutionJob] = useState<ExecutionJobResponse | null>(null);
+  const [checkingStatus, setCheckingStatus] = useState<boolean>(true);
+
+  useEffect(() => {
+    if (!agentId) return;
+
+    let isMounted = true;
+    setCheckingStatus(true);
+
+    const checkAgentExecutionState = async () => {
+      try {
+        const [plansList, executionsList] = await Promise.all([
+          planService.listPlans(),
+          executionService.listUserExecutions(),
+        ]);
+
+        if (!isMounted) return;
+
+        // Find plans linked to this agent
+        const matchedPlans = plansList.filter((p) => p.agent_id === agentId);
+        const latestPlan = matchedPlans.length > 0 ? matchedPlans[0] : null;
+        setExistingPlan(latestPlan);
+
+        // Find executions linked to matched plans or agent
+        if (matchedPlans.length > 0) {
+          const planIds = new Set(matchedPlans.map((p) => p.id));
+          const matchedExecution = executionsList.find((ex) => planIds.has(ex.migration_plan_id));
+          setExecutionJob(matchedExecution || null);
+        } else {
+          setExecutionJob(null);
+        }
+      } catch {
+        // Fallback to unlocked
+      } finally {
+        if (isMounted) setCheckingStatus(false);
+      }
+    };
+
+    checkAgentExecutionState();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [agentId]);
 
   const handleGeneratePlan = async () => {
     if (!agentId) return;
@@ -40,8 +92,104 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
     }
   };
 
+  const isExecuted =
+    executionJob &&
+    (executionJob.status === 'completed' || executionJob.status === 'running' || executionJob.status === 'ddl_executing');
+
+  if (checkingStatus) {
+    return (
+      <div className="p-6 rounded-none bg-black border border-zinc-800 text-center text-xs font-mono text-zinc-500">
+        Checking agent execution history...
+      </div>
+    );
+  }
+
+  // IF AGENT HAS ALREADY EXECUTED A MIGRATION -> RENDER EXECUTED MIGRATION LOCK BANNER
+  if (isExecuted) {
+    const succRows = executionJob.successful_rows || 0;
+    const totalRows = executionJob.total_rows || succRows;
+    const isCompleted = executionJob.status === 'completed';
+
+    return (
+      <div className="p-6 rounded-none bg-black border border-emerald-500/40 backdrop-blur-xl space-y-6 shadow-[0_0_30px_rgba(52,211,153,0.15)] font-mono animate-fadeIn relative overflow-hidden">
+        {/* Background Ambient Grid Accent */}
+        <div className="absolute inset-0 bg-[radial-gradient(#34d399_1px,transparent_1px)] [background-size:16px_16px] opacity-5 pointer-events-none" />
+
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-4">
+          <div>
+            <div className="flex flex-wrap items-center gap-2 mb-2">
+              <span className="text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5" />
+                MIGRATION EXECUTED & LOCKED
+              </span>
+              <span className="text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase bg-zinc-900 text-zinc-300 border border-zinc-800 flex items-center gap-1">
+                <Lock className="w-3 h-3 text-amber-400" /> RE-EXECUTION PREVENTED
+              </span>
+            </div>
+            <h3 className="text-xl font-extrabold text-white uppercase font-sans tracking-tight">
+              Target Database Migration Executed
+            </h3>
+            <p className="text-zinc-400 text-xs max-w-2xl mt-1 leading-relaxed">
+              This agent has completed its database schema translation and data insertion stream into the target database. Re-running is locked to protect target data integrity.
+            </p>
+          </div>
+
+          <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-right font-mono">
+            <div className="text-[10px] text-zinc-500 uppercase font-bold">COMMITTED ROWS</div>
+            <div className="text-xl font-bold text-emerald-400">{succRows.toLocaleString()}</div>
+          </div>
+        </div>
+
+        {/* Target Details Grid */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-900 space-y-1">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase block">EXECUTION STATUS</span>
+            <span className="text-sm font-bold text-emerald-400 flex items-center gap-1.5">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              {isCompleted ? '100% VERIFIED & COMPLETED' : executionJob.status.toUpperCase()}
+            </span>
+          </div>
+
+          <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-900 space-y-1">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase block font-mono">TARGET DB INSERTIONS</span>
+            <span className="text-sm font-bold text-white font-mono">
+              {succRows.toLocaleString()} / {totalRows.toLocaleString()} rows
+            </span>
+          </div>
+
+          <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-900 space-y-1">
+            <span className="text-[10px] text-zinc-500 font-bold uppercase block font-mono">JOB IDENTIFIER</span>
+            <span className="text-xs font-bold text-sky-400 font-mono truncate block">{executionJob.id}</span>
+          </div>
+        </div>
+
+        {/* Action Buttons */}
+        <div className="flex flex-col sm:flex-row items-center justify-end gap-3 pt-2 border-t border-zinc-900">
+          {existingPlan && (
+            <Link
+              href={`/transformation-plan?planId=${existingPlan.id}`}
+              className="w-full sm:w-auto inline-flex items-center justify-center gap-2 py-3 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase border border-sky-400/30 transition-colors shadow-md"
+            >
+              <span>View Transformation Blueprint</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </Link>
+          )}
+
+          <Link
+            href="/execution"
+            className="w-full sm:w-auto inline-flex items-center justify-center gap-2 py-3 px-6 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-lg shadow-emerald-950/50"
+          >
+            <Activity className="w-4 h-4" />
+            <span>View Live Execution Monitor</span>
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  // UN-EXECUTED AGENT -> RENDER NORMAL GENERATE AI MIGRATION PLAN BOX
   return (
-    <div className="p-6 rounded-none bg-black border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_25px_rgba(56,189,248,0.15)] relative overflow-hidden">
+    <div className="p-6 rounded-none bg-black border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_25px_rgba(56,189,248,0.15)] relative overflow-hidden font-mono">
       {/* Background Accent Grid */}
       <div className="absolute inset-0 bg-[radial-gradient(#38bdf8_1px,transparent_1px)] [background-size:16px_16px] opacity-5 pointer-events-none" />
 
@@ -83,7 +231,7 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
           type="button"
           onClick={handleGeneratePlan}
           disabled={isGenerating}
-          className="w-full sm:w-auto inline-flex items-center justify-center gap-3 py-3.5 px-10 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-all shadow-lg shadow-sky-950/50 hover:scale-[1.01] disabled:opacity-50"
+          className="w-full sm:w-auto inline-flex items-center justify-center gap-3 py-3.5 px-10 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-all shadow-lg shadow-sky-950/50 hover:scale-[1.01] disabled:opacity-50 font-mono"
         >
           {isGenerating ? (
             <>

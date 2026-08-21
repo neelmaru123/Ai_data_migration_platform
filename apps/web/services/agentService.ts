@@ -40,6 +40,13 @@ export const agentService = {
   },
 
   /**
+   * Delete an existing agent and un-link its attached data sources
+   */
+  async deleteAgent(agentId: string): Promise<void> {
+    await apiClient.delete(`/agents/${agentId}`);
+  },
+
+  /**
    * Initialize WebSocket subscription for live Agent heartbeats
    */
   connectAgentWebSocket(

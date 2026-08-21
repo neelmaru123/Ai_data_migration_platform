@@ -18,7 +18,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const status = (job.status || 'pending').toLowerCase();
-  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing';
+  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
 
@@ -29,9 +29,10 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
     }
   }, []);
 
-  // Poll job status every 1.5 seconds while job is active
+  // Poll job status every 3.0 seconds ONLY while job is active
   useEffect(() => {
     let isSubscribed = true;
+    let intervalId: NodeJS.Timeout | null = null;
 
     const fetchStatus = async () => {
       try {
@@ -49,22 +50,32 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           return [...prev.slice(-49), logMsg];
         });
 
+        // STOP POLLING IMMEDIATELY WHEN JOB COMPLETS OR FAILS
+        const updatedStatus = (updated.status || '').toLowerCase();
+        if (updatedStatus === 'completed' || updatedStatus === 'failed' || updatedStatus === 'cancelled') {
+          if (intervalId) clearInterval(intervalId);
+        }
+
       } catch {
         // Polling retry
       }
     };
 
+    const currentStatus = (job.status || '').toLowerCase();
+    const isJobActive = currentStatus === 'running' || currentStatus === 'pending' || currentStatus === 'ddl_executing' || currentStatus === 'preparing';
+
+    if (!isJobActive) {
+      return;
+    }
+
     fetchStatus();
-
-    if (!isRunning) return;
-
-    const interval = setInterval(fetchStatus, 1500);
+    intervalId = setInterval(fetchStatus, 3000);
 
     return () => {
       isSubscribed = false;
-      clearInterval(interval);
+      if (intervalId) clearInterval(intervalId);
     };
-  }, [job.id, isRunning, onJobUpdated]);
+  }, [job.id, job.status, onJobUpdated]);
 
   const progressPercent = Math.min(100, Math.max(0, Math.round(job.progress || 0)));
   const totalRows = job.total_rows || 0;
