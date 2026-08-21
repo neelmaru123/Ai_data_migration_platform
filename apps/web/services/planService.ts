@@ -1,0 +1,72 @@
+import { apiClient } from './axios';
+import {
+  PlanDetailResponse,
+  PlanResponse,
+  PlanValidationResultResponse,
+  TargetDatabaseConfig,
+} from '../types/migrationPlan';
+
+export const planService = {
+  /**
+   * Create and generate an AI migration plan for an agent
+   */
+  async createPlan(agentId: string, targetConfig: TargetDatabaseConfig): Promise<PlanDetailResponse> {
+    const response = await apiClient.post<PlanDetailResponse>('/plans/generate', {
+      agent_id: agentId,
+      target_config: targetConfig,
+    });
+    return response.data;
+  },
+
+  /**
+   * Fetch all migration plans for the current authenticated user
+   */
+  async listPlans(): Promise<PlanResponse[]> {
+    const response = await apiClient.get<PlanResponse[]>('/plans');
+    return response.data;
+  },
+
+  /**
+   * Fetch details of a specific migration plan by ID
+   */
+  async getPlan(planId: string): Promise<PlanDetailResponse> {
+    const response = await apiClient.get<PlanDetailResponse>(`/plans/${planId}`);
+    return response.data;
+  },
+
+  /**
+   * Update plan AST manually
+   */
+  async updatePlan(planId: string, planData: Record<string, any>): Promise<PlanDetailResponse> {
+    const response = await apiClient.put<PlanDetailResponse>(`/plans/${planId}`, planData);
+    return response.data;
+  },
+
+  /**
+   * Refine an existing migration plan using natural language prompt feedback
+   */
+  async refinePlan(planId: string, userFeedback: string): Promise<PlanDetailResponse> {
+    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/refine`, {
+      user_feedback: userFeedback,
+    });
+    return response.data;
+  },
+
+  /**
+   * Validate plan feasibility against latest data source snapshots
+   */
+  async validatePlan(planId: string): Promise<PlanValidationResultResponse> {
+    const response = await apiClient.post<PlanValidationResultResponse>(`/plans/${planId}/validate`);
+    return response.data;
+  },
+
+  /**
+   * Approve plan for execution
+   */
+  async approvePlan(planId: string): Promise<PlanDetailResponse> {
+    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/approve`);
+    return response.data;
+  },
+};
+
+export default planService;

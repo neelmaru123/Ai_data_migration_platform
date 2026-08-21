@@ -1,0 +1,30 @@
+import { apiClient } from './axios';
+import { ExecutionJobResponse } from '../types/execution';
+
+export const executionService = {
+  /**
+   * Trigger execution of an approved migration plan on the assigned Docker agent
+   */
+  async startPlanExecution(planId: string): Promise<ExecutionJobResponse> {
+    const response = await apiClient.post<ExecutionJobResponse>(`/plans/${planId}/execute`);
+    return response.data;
+  },
+
+  /**
+   * Fetch real-time progress details of a specific execution job by ID
+   */
+  async getExecutionDetails(jobId: string): Promise<ExecutionJobResponse> {
+    const response = await apiClient.get<ExecutionJobResponse>(`/executions/${jobId}`);
+    return response.data;
+  },
+
+  /**
+   * List all execution jobs for the current user
+   */
+  async listUserExecutions(): Promise<ExecutionJobResponse[]> {
+    const response = await apiClient.get<ExecutionJobResponse[]>('/executions');
+    return response.data;
+  },
+};
+
+export default executionService;
