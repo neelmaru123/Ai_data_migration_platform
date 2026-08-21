@@ -525,7 +525,7 @@ class ASTTransformer:
                             elif hasattr(v, "to_list"):
                                 v = v.to_list()
                             res_dict[k] = v
-                return json.dumps(res_dict) if res_dict else "{}"
+                return json.dumps(res_dict, default=str) if res_dict else "{}"
 
             try:
                 extra_attr_expr = pl.struct([pl.col(c) for c in unmapped_cols if c in df.columns]).map_elements(
@@ -778,25 +778,25 @@ class TargetWriterFactory:
                 ABORT_THRESHOLD_PERCENT = 0.50
                 threshold_sample_size = min(1000, max(5, len(rows) // 2))
 
-                with engine.begin() as conn:
-                    for idx, row in enumerate(rows):
-                        try:
+                for idx, row in enumerate(rows):
+                    try:
+                        with engine.begin() as conn:
                             res_row = conn.execute(text(insert_sql), [row])
                             r_cnt = getattr(res_row, "rowcount", -1)
                             if r_cnt == 0:
                                 skipped_rows += 1
                             else:
                                 successful_rows += 1
-                        except Exception as row_exc:
-                            failed_rows += 1
-                            if failed_rows <= MAX_SAMPLE_ERRORS:
-                                logger.warning(f"Row insertion notice in table '{table_name}' (Row #{idx}): {row_exc}")
+                    except Exception as row_exc:
+                        failed_rows += 1
+                        if failed_rows <= MAX_SAMPLE_ERRORS:
+                            logger.warning(f"Row insertion notice in table '{table_name}' (Row #{idx}): {row_exc}")
 
-                            if (idx + 1) >= threshold_sample_size and (failed_rows / (idx + 1)) > ABORT_THRESHOLD_PERCENT:
-                                raise RuntimeError(
-                                    f"Migration aborted for table '{table_name}': Error rate exceeded {ABORT_THRESHOLD_PERCENT*100:.0f}% "
-                                    f"({failed_rows}/{idx+1} rows failed). Please verify target schema and column mapping specs."
-                                )
+                        if (idx + 1) >= threshold_sample_size and (failed_rows / (idx + 1)) > ABORT_THRESHOLD_PERCENT:
+                            raise RuntimeError(
+                                f"Migration aborted for table '{table_name}': Error rate exceeded {ABORT_THRESHOLD_PERCENT*100:.0f}% "
+                                f"({failed_rows}/{idx+1} rows failed). Please verify target schema and column mapping specs."
+                            )
 
                 return successful_rows, failed_rows, skipped_rows
 

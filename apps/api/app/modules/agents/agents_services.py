@@ -57,6 +57,36 @@ class AgentService:
                 detail=f"You already have an agent with identifier '{data.agent_identifier}'.",
             )
 
+        # 1b. Check for target DB uniqueness across user agents
+        if data.data_sources:
+            dest_identifiers = [
+                ds.identifier.strip().lower()
+                for ds in data.data_sources
+                if ds.role and ds.role.lower().strip() in ("destination", "target", "dest")
+            ]
+            if dest_identifiers:
+                stmt_existing_dest = (
+                    select(DataSource, Agent)
+                    .join(Agent, DataSource.agent_id == Agent.id)
+                    .where(
+                        Agent.user_id == user_id,
+                        DataSource.role.in_(["destination", "target", "dest"]),
+                        DataSource.identifier.in_(dest_identifiers),
+                    )
+                )
+                res_dest = await session.execute(stmt_existing_dest)
+                existing_match = res_dest.first()
+                if existing_match:
+                    existing_ds, existing_agent = existing_match
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"Target database '{existing_ds.name}' (identifier: '{existing_ds.identifier}') "
+                            f"is already registered and in use by Agent '{existing_agent.name}'. "
+                            f"To prevent data corruption, please specify a unique target database for this new agent."
+                        ),
+                    )
+
         # 2. Generate secure agent API token & SHA-256 hash
         raw_token = f"ag_live_{secrets.token_urlsafe(32)}"
         token_hash = hash_agent_token(raw_token)
