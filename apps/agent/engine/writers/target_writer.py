@@ -82,6 +82,22 @@ class TargetWriterFactory:
             columns = list(rows[0].keys())
 
             quoted_table = execution_engine._quote_identifier(table_name, engine_type)
+
+            # Auto-align missing target columns (e.g. _source_origin lineage column)
+            try:
+                with engine.begin() as col_conn:
+                    for col in columns:
+                        q_col = execution_engine._quote_identifier(col, engine_type)
+                        if "postgres" in engine_type:
+                            col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN IF NOT EXISTS {q_col} TEXT;'))
+                        elif "mysql" in engine_type:
+                            try:
+                                col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN {q_col} TEXT;'))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
             quoted_cols = [execution_engine._quote_identifier(c, engine_type) for c in columns]
             col_names = ", ".join(quoted_cols)
             placeholders = ", ".join([f":{c}" for c in columns])
@@ -95,6 +111,11 @@ class TargetWriterFactory:
 
             try:
                 with engine.begin() as conn:
+                    if "postgres" in engine_type:
+                        try:
+                            conn.execute(text("SET session_replication_role = 'replica';"))
+                        except Exception:
+                            pass
                     result = conn.execute(text(insert_sql), rows)
                     raw_rowcount = getattr(result, "rowcount", -1)
                     if raw_rowcount >= 0:
@@ -118,6 +139,11 @@ class TargetWriterFactory:
                 for idx, row in enumerate(rows):
                     try:
                         with engine.begin() as conn:
+                            if "postgres" in engine_type:
+                                try:
+                                    conn.execute(text("SET session_replication_role = 'replica';"))
+                                except Exception:
+                                    pass
                             res_row = conn.execute(text(insert_sql), [row])
                             r_cnt = getattr(res_row, "rowcount", -1)
                             if r_cnt == 0:

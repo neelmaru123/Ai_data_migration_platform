@@ -17,8 +17,8 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   const [logs, setLogs] = useState<string[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const status = (job.status || 'pending').toLowerCase();
-  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing';
+  const status = (job.status || 'queued').toLowerCase();
+  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing' || status === 'queued';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
 
@@ -29,7 +29,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
     }
   }, []);
 
-  // Poll job status every 3.0 seconds ONLY while job is active
+  // Poll job status every 2.0 seconds ONLY while job is active
   useEffect(() => {
     let isSubscribed = true;
     let intervalId: NodeJS.Timeout | null = null;
@@ -43,8 +43,9 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
         if (onJobUpdated) onJobUpdated(updated);
 
         // Append log line if stage changes or new progress
-        const logMsg = `[${new Date().toLocaleTimeString()}] Stage: ${updated.current_stage || 'processing'} | Table: ${updated.current_table || 'N/A'} | Inserted: ${updated.successful_rows || 0} / ${updated.total_rows || 0} rows (${Math.round(updated.progress || 0)}%)`;
-        
+        const totalTarget = (updated.total_rows && updated.total_rows > 0) ? updated.total_rows : (updated.successful_rows || 0);
+        const logMsg = `[${new Date().toLocaleTimeString()}] Stage: ${updated.current_stage || 'processing'} | Table: ${updated.current_table || 'N/A'} | Inserted: ${updated.successful_rows || 0} / ${totalTarget} rows (${Math.round(updated.progress || 0)}%)`;
+
         setLogs((prev) => {
           if (prev.length > 0 && prev[prev.length - 1] === logMsg) return prev;
           return [...prev.slice(-49), logMsg];
@@ -62,14 +63,14 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
     };
 
     const currentStatus = (job.status || '').toLowerCase();
-    const isJobActive = currentStatus === 'running' || currentStatus === 'pending' || currentStatus === 'ddl_executing' || currentStatus === 'preparing';
+    const isJobActive = currentStatus === 'running' || currentStatus === 'pending' || currentStatus === 'ddl_executing' || currentStatus === 'preparing' || currentStatus === 'queued';
 
     if (!isJobActive) {
       return;
     }
 
     fetchStatus();
-    intervalId = setInterval(fetchStatus, 3000);
+    intervalId = setInterval(fetchStatus, 2000);
 
     return () => {
       isSubscribed = false;
@@ -116,13 +117,12 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               TARGET DB INSERTION DAEMON
             </span>
             <span
-              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${
-                isCompleted
+              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${isCompleted
                   ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
                   : isFailed
-                  ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
-                  : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
-              }`}
+                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                    : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
+                }`}
             >
               STATUS: {status.toUpperCase()}
             </span>
@@ -148,28 +148,26 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
         <div className="flex items-center justify-between text-xs font-bold font-mono">
           <span className="text-zinc-300 uppercase flex items-center gap-2">
             <span
-              className={`w-2 h-2 rounded-none ${
-                isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400 animate-ping'
-              }`}
+              className={`w-2 h-2 rounded-none ${isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400 animate-ping'
+                }`}
             />
             {isCompleted
               ? '✓ Target Database Insertion Completed'
               : isFailed
-              ? '🚨 Target Insertion Failed'
-              : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
+                ? '🚨 Target Insertion Failed'
+                : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
           </span>
           <span className="text-sky-400 font-extrabold">{progressPercent}%</span>
         </div>
 
         <div className="w-full h-4 bg-zinc-950 border border-zinc-800 rounded-none overflow-hidden relative p-0.5">
           <div
-            className={`h-full transition-all duration-700 ${
-              isCompleted
+            className={`h-full transition-all duration-700 ${isCompleted
                 ? 'bg-gradient-to-r from-emerald-500 to-teal-300 shadow-[0_0_15px_rgba(52,211,153,0.5)]'
                 : isFailed
-                ? 'bg-rose-500'
-                : 'bg-gradient-to-r from-sky-500 via-blue-400 to-sky-300 shadow-[0_0_15px_rgba(56,189,248,0.5)]'
-            }`}
+                  ? 'bg-rose-500'
+                  : 'bg-gradient-to-r from-sky-500 via-blue-400 to-sky-300 shadow-[0_0_15px_rgba(56,189,248,0.5)]'
+              }`}
             style={{ width: `${progressPercent}%` }}
           />
         </div>
@@ -219,13 +217,12 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
             return (
               <div
                 key={stg.key}
-                className={`p-3 rounded-none border transition-all ${
-                  isDone
+                className={`p-3 rounded-none border transition-all ${isDone
                     ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
                     : isCurrent
-                    ? 'bg-sky-400/15 border-sky-400 text-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.2)] animate-pulse'
-                    : 'bg-black border-zinc-900 text-zinc-600'
-                }`}
+                      ? 'bg-sky-400/15 border-sky-400 text-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.2)] animate-pulse'
+                      : 'bg-black border-zinc-900 text-zinc-600'
+                  }`}
               >
                 <div className="flex items-center justify-between text-[10px] font-bold uppercase mb-1">
                   <span>{stg.label}</span>

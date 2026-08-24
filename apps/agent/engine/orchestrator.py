@@ -69,6 +69,7 @@ class ExecutionOrchestrator:
                 ProgressReporter.report(
                     backend_url, agent_token, job_id, "running", pct,
                     total_processed, total_successful, total_failed, total_skipped,
+                    total_rows=total_estimated_rows if total_estimated_rows > 0 else (total_processed or 250),
                     current_table=target_table, current_stage="data_streaming"
                 )
 

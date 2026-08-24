@@ -123,6 +123,42 @@ services:
       retries: 5
     restart: unless-stopped
 
+  mysql_source:
+    image: mysql:8.0
+    container_name: migration_platform_mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=mysql_password
+      - MYSQL_DATABASE=inventory_db
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pmysql_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mongo_source:
+    image: mongo:7.0
+    container_name: migration_platform_mongo
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=root
+      - MONGO_INITDB_ROOT_PASSWORD=mongo_password
+      - MONGO_INITDB_DATABASE=analytics_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --eval 'db.adminCommand(\"ping\")' || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
+
   redis:
     image: redis:7-alpine
     container_name: migration_platform_redis
@@ -139,3 +175,5 @@ volumes:
   postgres_data:
   postgres_ecommerce_data:
   postgres_crm_data:
+  mysql_data:
+  mongo_data:

@@ -88,6 +88,12 @@ class ASTTransformer:
                                 return_dtype=pl.Utf8
                             )
                         exprs.append(pk_expr.alias(target_col))
+                    elif "uuid" in target_dtype:
+                        uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                            lambda val: str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{src_ident}_{val}")) if val is not None and str(val) != "" and not (len(str(val)) == 36 and "-" in str(val)) else str(val or ""),
+                            return_dtype=pl.Utf8
+                        )
+                        exprs.append(uuid_expr.alias(target_col))
                     elif "int" in target_dtype:
                         exprs.append(pl.col(src_name).cast(pl.Int64, strict=False).alias(target_col))
                     elif "timestamp" in target_dtype or "datetime" in target_dtype or "timestamptz" in target_dtype:

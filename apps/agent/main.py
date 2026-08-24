@@ -45,7 +45,7 @@ def sync_metadata_snapshots(backend_url: str, agent_token: str):
             if not snapshot_data:
                 continue
 
-            payload = json.dumps(snapshot_data).encode("utf-8")
+            payload = json.dumps(snapshot_data, default=str).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=15.0) as resp:
@@ -463,14 +463,22 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
 
                 # Import and run execution engine
                 from execution_engine import ExecutionOrchestrator
-                ExecutionOrchestrator.run_job(
-                    backend_url=backend_url,
-                    agent_token=clean_token,
-                    job_id=job_id,
-                    plan_ast=plan_ast,
-                    source_db_urls=src_urls,
-                    target_db_url=dest_url,
-                )
+                try:
+                    ExecutionOrchestrator.run_job(
+                        backend_url=backend_url,
+                        agent_token=clean_token,
+                        job_id=job_id,
+                        plan_ast=plan_ast,
+                        source_db_urls=src_urls,
+                        target_db_url=dest_url,
+                    )
+                except Exception as run_err:
+                    logger.error(f"Execution error for job '{job_id}': {run_err}")
+                    report_execution_progress(
+                        backend_url, clean_token, job_id,
+                        status="failed", progress=0.0,
+                        error_message=str(run_err)
+                    )
     except Exception as exc:
         logger.warning(f"Task polling check exception: {exc}")
 

@@ -97,14 +97,24 @@ class AgentMetadataEngine:
                 # 4. Introspect Columns
                 columns_raw = []
                 try:
-                    res_col = conn.execute(text("""
-                        SELECT table_schema, table_name, column_name, ordinal_position,
-                               data_type, udt_name, is_nullable, character_maximum_length,
-                               numeric_precision, numeric_scale, column_default
-                        FROM information_schema.columns
-                        WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'sys', 'performance_schema', 'mysql')
-                        ORDER BY table_schema, table_name, ordinal_position;
-                    """))
+                    if "postgres" in scheme:
+                        res_col = conn.execute(text("""
+                            SELECT table_schema, table_name, column_name, ordinal_position,
+                                   data_type, udt_name, is_nullable, character_maximum_length,
+                                   numeric_precision, numeric_scale, column_default
+                            FROM information_schema.columns
+                            WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+                            ORDER BY table_schema, table_name, ordinal_position;
+                        """))
+                    else:
+                        res_col = conn.execute(text("""
+                            SELECT table_schema, table_name, column_name, ordinal_position,
+                                   data_type, data_type AS udt_name, is_nullable, character_maximum_length,
+                                   numeric_precision, numeric_scale, column_default
+                            FROM information_schema.columns
+                            WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                            ORDER BY table_schema, table_name, ordinal_position;
+                        """))
                     columns_raw = res_col.fetchall()
                 except Exception as col_err:
                     logger.warning(f"Could not query information_schema.columns for '{identifier}': {col_err}")
@@ -259,11 +269,21 @@ class AgentMetadataEngine:
         """
         try:
             import pymongo
-            client = pymongo.MongoClient(url_val, serverSelectionTimeoutMS=3000)
-            db_name = url_val.rsplit("/", 1)[-1].split("?")[0] or "test"
-            db = client[db_name]
-
-            collections = db.list_collection_names()
+            try:
+                client = pymongo.MongoClient(url_val, serverSelectionTimeoutMS=3000)
+                db_name = url_val.rsplit("/", 1)[-1].split("?")[0] or "test"
+                db = client[db_name]
+                collections = db.list_collection_names()
+            except Exception as auth_err:
+                if "Authentication" in str(auth_err) or "auth" in str(auth_err).lower():
+                    clean_url = re.sub(r"mongodb://[^@]+@", "mongodb://", url_val).split("?")[0]
+                    logger.info(f"MongoDB auth failed, retrying introspection without credentials ({clean_url})...")
+                    client = pymongo.MongoClient(clean_url, serverSelectionTimeoutMS=3000)
+                    db_name = clean_url.rsplit("/", 1)[-1] or "test"
+                    db = client[db_name]
+                    collections = db.list_collection_names()
+                else:
+                    raise auth_err
             tables_payload = []
             total_cols_count = 0
             total_rows_count = 0

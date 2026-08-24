@@ -288,11 +288,103 @@ def setup_crm_db(engine):
     print("  [OK] crm_db seeded 5 tables x 50 records = 250 records.")
 
 
+MYSQL_DB_URL = "mysql+pymysql://root:mysql_password@localhost:3307/inventory_db"
+MONGO_DB_URL = "mongodb://127.0.0.1:27017"
+
+
+def setup_mysql_db():
+    print("\n--- Setting up MySQL inventory_db Schema & Data (Port 3307) ---")
+    try:
+        engine = create_engine(MYSQL_DB_URL, connect_args={"connect_timeout": 3})
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS inventory_items;"))
+            conn.execute(text("DROP TABLE IF EXISTS warehouses;"))
+            conn.execute(text("""
+                CREATE TABLE warehouses (
+                    warehouse_id INT PRIMARY KEY,
+                    location_name VARCHAR(100) NOT NULL,
+                    capacity INT NOT NULL
+                );
+            """))
+            conn.execute(text("""
+                CREATE TABLE inventory_items (
+                    item_id INT PRIMARY KEY,
+                    warehouse_id INT REFERENCES warehouses(warehouse_id),
+                    item_code VARCHAR(50) NOT NULL,
+                    quantity_on_hand INT NOT NULL
+                );
+            """))
+            warehouses = [
+                {"warehouse_id": i + 1, "location_name": f"Facility Node-{i+1}", "capacity": 1000 * (i + 1)}
+                for i in range(50)
+            ]
+            conn.execute(text("INSERT INTO warehouses (warehouse_id, location_name, capacity) VALUES (:warehouse_id, :location_name, :capacity);"), warehouses)
+
+            items = [
+                {"item_id": 100 + i, "warehouse_id": (i % 50) + 1, "item_code": f"INV-{i+1:03d}", "quantity_on_hand": (i + 1) * 10}
+                for i in range(50)
+            ]
+            conn.execute(text("INSERT INTO inventory_items (item_id, warehouse_id, item_code, quantity_on_hand) VALUES (:item_id, :warehouse_id, :item_code, :quantity_on_hand);"), items)
+        print("  [OK] MySQL inventory_db seeded 2 tables x 50 records = 100 records.")
+    except Exception as e:
+        print(f"  [Notice] Skipping MySQL seed ({e})")
+
+
+def setup_mongo_db():
+    print("\n--- Setting up MongoDB analytics_db Schema & Data (Port 27017) ---")
+    try:
+        import pymongo
+        client = pymongo.MongoClient(MONGO_DB_URL, serverSelectionTimeoutMS=3000)
+        db = client["analytics_db"]
+
+        # Drop existing collections
+        db["events"].drop()
+        db["user_metrics"].drop()
+
+        # Seed events collection (50 documents)
+        event_types = ["PAGE_VIEW", "CLICK", "CONVERSION", "ADD_TO_CART", "CHECKOUT"]
+        events_docs = [
+            {
+                "event_id": f"EVT-100{i+1:02d}",
+                "event_type": event_types[i % len(event_types)],
+                "user_email": f"client_{i+1}@enterprise-test.com",
+                "properties": {
+                    "session_id": f"SESS-{i+1:03d}",
+                    "device": "desktop" if i % 2 == 0 else "mobile",
+                    "duration_seconds": (i + 1) * 12,
+                },
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            for i in range(50)
+        ]
+        db["events"].insert_many(events_docs)
+
+        # Seed user_metrics collection (50 documents)
+        metrics_docs = [
+            {
+                "user_email": f"client_{i+1}@enterprise-test.com",
+                "total_orders": (i % 10) + 1,
+                "lifetime_value": round(150.0 + (i * 45.2), 2),
+                "churn_risk": "LOW" if i % 3 == 0 else "MEDIUM",
+                "last_active": datetime.now(timezone.utc).isoformat(),
+            }
+            for i in range(50)
+        ]
+        db["user_metrics"].insert_many(metrics_docs)
+        client.close()
+
+        print("  [OK] MongoDB analytics_db seeded 2 collections x 50 docs = 100 documents.")
+    except Exception as e:
+        print(f"  [Notice] Skipping MongoDB seed ({e})")
+
+
 def main():
     print("================================================================================")
-    print(" >>> SEEDING 2 POSTGRES SOURCE DATABASES FOR MULTI-DB MIGRATION TESTING")
-    print("     Database 1: ecommerce_db (Port 5435) - 5 Tables, 250 Rows")
-    print("     Database 2: crm_db       (Port 5436) - 5 Tables, 250 Rows")
+    print(" >>> SEEDING SOURCE DATABASES FOR MULTI-DB MIGRATION TESTING")
+    print("     PostgreSQL 1: ecommerce_db (Port 5435) - 5 Tables, 250 Rows")
+    print("     PostgreSQL 2: crm_db       (Port 5436) - 5 Tables, 250 Rows")
+    print("     MySQL 1:      inventory_db (Port 3307) - 2 Tables, 100 Rows")
+    print("     MongoDB 1:    analytics_db (Port 27017)- 2 Collections, 100 Docs")
     print("================================================================================")
 
     eng_ecommerce = wait_for_db(ECOMMERCE_DB_URL, "ecommerce_db (Port 5435)")
@@ -301,8 +393,11 @@ def main():
     eng_crm = wait_for_db(CRM_DB_URL, "crm_db (Port 5436)")
     setup_crm_db(eng_crm)
 
+    setup_mysql_db()
+    setup_mongo_db()
+
     print("\n================================================================================")
-    print(" [SUCCESS] DUAL DATABASE SETUP COMPLETE! 500 TOTAL RECORDS SEEDED SUCCESSFULLY.")
+    print(" [SUCCESS] MULTI-DATABASE SETUP COMPLETE!")
     print("================================================================================\n")
 
 
