@@ -226,6 +226,29 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
         />
       </div>
 
+      {isGenerating && (
+        <div className="p-4 rounded-none bg-sky-500/10 border border-sky-400/30 space-y-3 font-mono text-xs text-sky-300">
+          <div className="flex items-center gap-2 font-bold uppercase">
+            <div className="w-3 h-3 border-2 border-sky-400 border-t-transparent rounded-none animate-spin" />
+            <span>AI Blueprint Generation in Progress</span>
+          </div>
+          <p className="text-[11px] text-zinc-300 leading-relaxed font-sans">
+            The AI Planning Engine is running schema graph analysis, dependency topological sorting, and type mapping. Generating a complete migration plan can take up to 60 seconds.
+          </p>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[10px] uppercase font-bold text-zinc-400">
+            <div className="p-2 bg-black/60 border border-zinc-800 text-sky-400">
+              1. Introspecting Metadata
+            </div>
+            <div className="p-2 bg-black/60 border border-zinc-800 text-sky-400">
+              2. Constructing AST Graph
+            </div>
+            <div className="p-2 bg-black/60 border border-zinc-800 text-sky-400">
+              3. Verifying Feasibility
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-end pt-2">
         <button
           type="button"

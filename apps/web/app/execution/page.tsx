@@ -32,6 +32,13 @@ export default function ExecutionPage() {
 
   useEffect(() => {
     fetchExecutions();
+
+    // Auto-poll job history every 3 seconds for live progress metrics (EC-11)
+    const interval = setInterval(() => {
+      fetchExecutions();
+    }, 3000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const totalMigratedRows = executions.reduce((acc, job) => acc + (job.successful_rows || 0), 0);

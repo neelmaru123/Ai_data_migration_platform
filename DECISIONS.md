@@ -51,3 +51,30 @@ Resolved critical edge cases across API backend, agent execution engine, and Web
 
 ### 4. Trade-offs & Future Considerations
 - Single-source database environments retain automatic single-DB binding fallback when only one source DB is configured, preserving developer onboarding simplicity while safeguarding multi-source setups.
+
+---
+
+## 2026-08-24 - High Priority UX, Security & Resilience Edge Case Fixes
+
+### 1. Decision Summary
+Resolved all High Priority edge cases (EC-07 through EC-12) across UI, API, and Agent:
+1. **Plan AST Revert Strategy (`PlanBlueprintViewer.tsx`)**: Added `previousValidAst` state tracking to allow restoring the last valid plan version if LLM refinement generates schema errors.
+2. **Draft Failed Error Alert UI (`PlanBlueprintViewer.tsx`)**: Added explicit error card rendering with diagnostic details and a "Regenerate Migration Plan" action when plan status is `draft_failed` or `table_mappings` is empty.
+3. **Plan Generation Request Timeout & Progress UX (`planService.ts` & `GeneratePlanAction.tsx`)**: Set a 3-minute request timeout (`timeout: 180000`) for plan generation/refinement API calls and added a step-by-step progress indicator modal.
+4. **Secure WebSocket Authentication Frame Support (`agents_routes.py` & `agentService.ts`)**: Updated WebSocket endpoint to support initial `{ "type": "auth", "token": "<jwt>" }` JSON message authentication frames, eliminating JWT token exposure in URL query parameters (`?token=<jwt>`).
+5. **Real-Time Execution Auto-Refresh Polling (`execution/page.tsx`)**: Added a 3-second auto-polling interval when active jobs exist, keeping live row counts and stages updated without manual user refreshes.
+6. **Explicit Agent Environment Credentials (`main.py`)**: Updated `auto_register_agent()` to fail fast if `USER_EMAIL` and `USER_PASSWORD` are missing instead of sending default test credentials.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Irreversible blueprint invalidation on refinement failure, blank UI on graph generation failure, request timeouts on long LLM runs, JWT token leakage in WebSocket URLs, stale execution metrics, and accidental test credential fallback in production.
+- **Chosen Solution**: AST state versioning, explicit error boundary components, secure WebSocket first-frame auth, client-side polling, and strict environment credential enforcement.
+- **Why This Architecture**: Protects sensitive tokens, improves user feedback, and ensures deterministic error handling across all user-facing flows.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A (URL Query Parameter WebSocket Auth Only)**: Continuing to send JWT in query strings.
+  - *Rejected*: Security vulnerability; query parameters are logged in server access logs and browser history.
+- **Alternative B (Manual Page Refreshes for Execution Monitoring)**: Requiring users to click "Refresh Jobs".
+  - *Rejected*: Inferior user experience; real-time 3s polling provides seamless live ETL visibility.
+
+### 4. Trade-offs & Future Considerations
+- First-frame WebSocket auth preserves query parameter support as a legacy fallback for existing client integrations while enforcing non-URL token delivery for new UI components.

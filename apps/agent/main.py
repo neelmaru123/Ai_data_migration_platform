@@ -346,8 +346,12 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
     Auto-registers an Agent with the backend if USER_EMAIL and USER_PASSWORD (or default test credentials)
     are available, auto-detecting data sources from environment variables.
     """
-    user_email = os.getenv("USER_EMAIL", "complex_test@example.com")
-    user_pass = os.getenv("USER_PASSWORD", "Password123!")
+    user_email = os.getenv("USER_EMAIL")
+    user_pass = os.getenv("USER_PASSWORD")
+    if not user_email or not user_pass:
+        logger.error("Auto-registration failed: USER_EMAIL and USER_PASSWORD environment variables must be provided when AGENT_TOKEN is not set.")
+        return None
+
     agent_name = os.getenv("AGENT_NAME", "Docker Agent")
     agent_ident = os.getenv("AGENT_IDENTIFIER", f"docker_agent_{int(time.time())}")
 

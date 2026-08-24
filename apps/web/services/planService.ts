@@ -11,10 +11,14 @@ export const planService = {
    * Create and generate an AI migration plan for an agent
    */
   async createPlan(agentId: string, targetConfig: TargetDatabaseConfig): Promise<PlanDetailResponse> {
-    const response = await apiClient.post<PlanDetailResponse>('/plans/generate', {
-      agent_id: agentId,
-      target_config: targetConfig,
-    });
+    const response = await apiClient.post<PlanDetailResponse>(
+      '/plans/generate',
+      {
+        agent_id: agentId,
+        target_config: targetConfig,
+      },
+      { timeout: 180000 } // 3 minutes timeout for complex LLM generation graph (EC-09)
+    );
     return response.data;
   },
 
@@ -46,9 +50,13 @@ export const planService = {
    * Refine an existing migration plan using natural language prompt feedback
    */
   async refinePlan(planId: string, userFeedback: string): Promise<PlanDetailResponse> {
-    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/refine`, {
-      user_feedback: userFeedback,
-    });
+    const response = await apiClient.post<PlanDetailResponse>(
+      `/plans/${planId}/refine`,
+      {
+        user_feedback: userFeedback,
+      },
+      { timeout: 180000 } // 3 minutes timeout for LLM plan refinement (EC-09)
+    );
     return response.data;
   },
 

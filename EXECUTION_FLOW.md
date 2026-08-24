@@ -59,10 +59,15 @@
 ## 3. Impact & Delta Analysis (AI Modifications)
 - **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) - Added active job concurrency lock (HTTP 409) and queued status watchdog recovery.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) - Included queued jobs in dead agent watchdog recovery loop.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py) - Added first-frame JSON auth payload support for WebSockets.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) - Enforced explicit environment credentials for agent auto-registration.
 - **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py) - Eliminated silent source DB fallback; added checkpoint cleanup call on completion.
 - **[MODIFIED]**: [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) - Added `clear_job_checkpoints()` method.
 - **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) - Enclosed `session_replication_role` in `try...finally` to ensure connection pool reset to `'origin'`.
-- **[MODIFIED]**: [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) - Corrected active job status filter to include `queued`, `preparing`, and `running`.
-- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Added active job detection on mount and HTTP 409 Conflict error handler.
-- **[MODIFIED]**: [`DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/DECISIONS.md) - Documented architectural decision log for critical edge case fixes.
+- **[MODIFIED]**: [`apps/web/services/planService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/planService.ts) - Added 3-minute request timeout for plan generation and refinement calls.
+- **[MODIFIED]**: [`apps/web/services/agentService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/agentService.ts) - Updated `connectAgentWebSocket` to send auth frame on open.
+- **[MODIFIED]**: [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) - Corrected active job status filter and added 3s auto-polling interval.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Added previous valid AST revert strategy, draft_failed error alert card, and 409 Conflict handler.
+- **[MODIFIED]**: [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) - Added step-by-step progress indicator and duration notice during plan generation.
+- **[MODIFIED]**: [`DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/DECISIONS.md) - Documented architectural decision log for critical & high priority edge case fixes.
 - **[MODIFIED]**: [`EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/EXECUTION_FLOW.md) - Updated execution sequence & delta analysis.

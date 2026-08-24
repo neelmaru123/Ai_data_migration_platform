@@ -26,6 +26,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   const [editableAst, setEditableAst] = useState<TransformationPlanAST>(initialPlan.plan_data);
   const [isSavingEdits, setIsSavingEdits] = useState<boolean>(false);
 
+  // Revert State tracking last known valid AST (EC-07)
+  const [previousValidAst, setPreviousValidAst] = useState<TransformationPlanAST | null>(
+    initialPlan.is_valid ? initialPlan.plan_data : null
+  );
+  const [isReverting, setIsReverting] = useState<boolean>(false);
+
   // Agent Execution State
   const [activeJob, setActiveJob] = useState<ExecutionJobResponse | null>(null);
   const [isApproving, setIsApproving] = useState<boolean>(false);
@@ -40,6 +46,24 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
 
   const ast = isEditing ? editableAst : plan.plan_data;
   const isApproved = plan.status === 'completed' || plan.status === 'approved';
+
+  // Helper to revert plan to previous valid AST (EC-07)
+  const handleRevertPlan = async () => {
+    if (!previousValidAst || isReverting) return;
+    setIsReverting(true);
+    try {
+      const updated = await planService.updatePlan(plan.id, previousValidAst);
+      setPlan(updated);
+      setEditableAst(updated.plan_data);
+      setIsEditing(false);
+      toast.success('Blueprint successfully reverted to previous valid version!');
+      if (onPlanUpdated) onPlanUpdated(updated);
+    } catch (err: any) {
+      toast.error(`Revert Error: ${err.message || 'Failed to revert plan.'}`);
+    } finally {
+      setIsReverting(false);
+    }
+  };
 
   // Helper to update a target column field in editableAst
   const updateColumnField = (
@@ -73,6 +97,9 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   // Save manual column edits
   const handleSaveEdits = async () => {
     setIsSavingEdits(true);
+    if (plan.is_valid) {
+      setPreviousValidAst(plan.plan_data);
+    }
     try {
       const updated = await planService.updatePlan(plan.id, editableAst);
       setPlan(updated);
@@ -80,6 +107,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setIsEditing(false);
 
       if (updated.is_valid) {
+        setPreviousValidAst(updated.plan_data);
         toast.success('Target mappings updated & re-validated successfully!');
       } else {
         toast.error('Plan edits contain schema feasibility errors! Review diagnostic alert below.');
@@ -115,6 +143,9 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     e.preventDefault();
     if (!refinementPrompt.trim() || isRefining) return;
 
+    if (plan.is_valid) {
+      setPreviousValidAst(plan.plan_data);
+    }
     setIsRefining(true);
     try {
       const updated = await planService.refinePlan(plan.id, refinementPrompt.trim());
@@ -123,6 +154,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setRefinementPrompt('');
 
       if (updated.is_valid) {
+        setPreviousValidAst(updated.plan_data);
         toast.success('LLM re-reviewed & refined blueprint successfully!');
       } else {
         toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert below.');
@@ -374,9 +406,48 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                 </ul>
               </div>
             )}
+            {/* Revert Action Button for Invalid Refinements / Edits (EC-07) */}
+            {!plan.is_valid && previousValidAst && (
+              <div className="pt-2">
+                <button
+                  type="button"
+                  onClick={handleRevertPlan}
+                  disabled={isReverting}
+                  className="py-2.5 px-5 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-md flex items-center gap-2"
+                >
+                  <span>{isReverting ? 'Reverting Blueprint...' : '↩ Revert to Previous Valid Blueprint'}</span>
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Guard for draft_failed status or missing table mappings (EC-08) */}
+      {(plan.status === 'draft_failed' || !ast?.table_mappings || ast.table_mappings.length === 0) && (
+        <div className="w-full max-w-4xl mx-auto p-8 rounded-none bg-black border border-rose-500/50 space-y-6 font-mono text-center shadow-2xl">
+          <div className="w-12 h-12 rounded-none bg-rose-500/10 border border-rose-500/40 text-rose-500 flex items-center justify-center mx-auto text-xl font-bold">
+            🚨
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-xl font-extrabold text-white uppercase tracking-tight font-sans">
+              AI Migration Plan Generation Failed
+            </h2>
+            <p className="text-xs text-rose-300 max-w-xl mx-auto leading-relaxed">
+              {plan.validation_errors?.explanation || 'The AI model could not generate a valid transformation blueprint for your data sources.'}
+            </p>
+          </div>
+          <div className="pt-2 flex justify-center gap-4">
+            <button
+              type="button"
+              onClick={() => window.location.href = '/profiling'}
+              className="py-3 px-6 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors"
+            >
+              Return to Schema Inspector & Retry
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Live Agent Execution Progress Banner (if active) */}
       {activeJob && (
