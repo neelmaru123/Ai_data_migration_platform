@@ -152,6 +152,19 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     }
   };
 
+  // Check if an active execution job exists for this plan on mount
+  React.useEffect(() => {
+    executionService
+      .listUserExecutions()
+      .then((jobs) => {
+        const active = jobs.find(
+          (j) => j.migration_plan_id === initialPlan.id && ['queued', 'preparing', 'running'].includes(j.status)
+        );
+        if (active) setActiveJob(active);
+      })
+      .catch(() => {});
+  }, [initialPlan.id]);
+
   // Handle Plan Approval & Agent Job Dispatch
   const handleApproveAndExecute = async () => {
     if (isApproving) return;
@@ -176,8 +189,21 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       if (onPlanUpdated) onPlanUpdated(approved);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to execute plan.';
-      toast.error(`Execution Error: ${msg}`);
-      scrollToDiagnostics();
+      if (err.response?.status === 409) {
+        toast.error(`Job In Progress: ${msg}`);
+        executionService
+          .listUserExecutions()
+          .then((jobs) => {
+            const match = jobs.find(
+              (j) => j.migration_plan_id === plan.id && ['queued', 'preparing', 'running'].includes(j.status)
+            );
+            if (match) setActiveJob(match);
+          })
+          .catch(() => {});
+      } else {
+        toast.error(`Execution Error: ${msg}`);
+        scrollToDiagnostics();
+      }
     } finally {
       setIsApproving(false);
     }

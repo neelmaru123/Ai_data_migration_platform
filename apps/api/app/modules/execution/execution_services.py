@@ -59,6 +59,19 @@ class ExecutionService:
                 detail=f"Cannot execute invalid migration plan: {err_msg}",
             )
 
+        # Check if an active execution job is already queued/preparing/running for this plan (EC-01)
+        stmt_active = select(MigrationJob).where(
+            MigrationJob.migration_plan_id == plan.id,
+            MigrationJob.status.in_(["queued", "preparing", "running"]),
+        )
+        res_active = await session.execute(stmt_active)
+        active_job = res_active.scalar_one_or_none()
+        if active_job:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"An active migration job '{active_job.id}' is already in status '{active_job.status}' for this plan.",
+            )
+
         job = MigrationJob(
             id=uuid.uuid4(),
             migration_plan_id=plan.id,
@@ -145,7 +158,7 @@ class ExecutionService:
         """
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
         stmt = select(MigrationJob).where(
-            MigrationJob.status.in_(["running", "preparing"]),
+            MigrationJob.status.in_(["queued", "running", "preparing"]),
             MigrationJob.updated_at < cutoff,
         )
         res = await session.execute(stmt)

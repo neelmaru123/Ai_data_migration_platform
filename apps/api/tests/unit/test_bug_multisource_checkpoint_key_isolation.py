@@ -118,7 +118,8 @@ def test_bug_multisource_checkpoint_key_isolation_execution():
             with patch("execution_engine.DDLExecutor.execute_ddl_list"), \
                  patch("execution_engine.ProgressReporter.report"), \
                  patch("execution_engine.SourceConnectorFactory.read_source_chunk", side_effect=mock_read_source_chunk), \
-                 patch("execution_engine.TargetWriterFactory.bulk_load", return_value=(4, 0, 0)) as mock_bulk_load:
+                 patch("execution_engine.TargetWriterFactory.bulk_load", return_value=(4, 0, 0)) as mock_bulk_load, \
+                 patch("execution_engine.CheckpointManager.clear_job_checkpoints") as mock_clear_checkpoints:
 
                 ExecutionOrchestrator.run_job(
                     backend_url="http://localhost:8000",
@@ -136,7 +137,8 @@ def test_bug_multisource_checkpoint_key_isolation_execution():
                 ids = loaded_df["id"].to_list()
                 assert set(ids) == {21, 22, 101, 102}
 
-                # Verify distinct checkpoint files were saved for both sources
+                # Verify distinct checkpoint files were saved for both sources and clear_job_checkpoints was called
+                assert mock_clear_checkpoints.called
                 path_pg = CheckpointManager.get_checkpoint_path(job_id, target_table, "src_pg", "users_pg")
                 path_mysql = CheckpointManager.get_checkpoint_path(job_id, target_table, "src_mysql", "users_mysql")
 

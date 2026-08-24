@@ -286,7 +286,6 @@ class ASTTransformer:
 
                 # Auto-generate UUID primary key 'id' if required by target schema but missing in transformed_df
                 if "id" in keep_columns and "id" not in transformed_df.columns:
-                    import uuid
                     uuid_list = [str(uuid.uuid4()) for _ in range(len(transformed_df))]
                     transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
 
@@ -297,14 +296,12 @@ class ASTTransformer:
                 row_errors += 1
                 
                 if "id" in keep_columns and "id" not in df.columns:
-                    import uuid
                     uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
                     df = df.with_columns(pl.Series("id", uuid_list))
                 return df, row_errors
 
         # If no exprs, still ensure missing 'id' PK is generated
         if "id" in keep_columns and "id" not in df.columns:
-            import uuid
             uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
             df = df.with_columns(pl.Series("id", uuid_list))
 

@@ -118,8 +118,14 @@ class ExecutionOrchestrator:
                                             db_url = v
                                             break
 
-                        if not db_url and source_db_urls:
-                            db_url = list(source_db_urls.values())[0]
+                        if not db_url:
+                            if len(source_db_urls) == 1:
+                                db_url = list(source_db_urls.values())[0]
+                            elif source_db_urls:
+                                raise ValueError(
+                                    f"Could not resolve source database URL for identifier '{src_ident}'. "
+                                    f"Configured available sources: {list(source_db_urls.keys())}."
+                                )
 
                         src_engine = "postgresql"
                         if db_url:
@@ -209,7 +215,8 @@ class ExecutionOrchestrator:
             )
             DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
 
-            # Step 4: Mark Job Complete
+            # Step 4: Mark Job Complete and Clean Checkpoints
+            CheckpointManager.clear_job_checkpoints(job_id)
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "completed", 100.0,
                 total_processed, total_successful, total_failed, total_skipped,

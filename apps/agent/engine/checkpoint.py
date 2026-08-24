@@ -86,3 +86,22 @@ class CheckpointManager:
                 }, f, indent=2)
         except Exception as exc:
             logger.warning(f"Could not write checkpoint for table '{table_name}' source '{source_identifier}.{source_table}': {exc}")
+
+    @classmethod
+    def clear_job_checkpoints(cls, job_id: str):
+        """Removes all checkpoint JSON files for a completed job."""
+        tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
+        if not os.path.exists(tmp_dir):
+            return
+        prefix = f"checkpoint_{job_id}_"
+        try:
+            for fname in os.listdir(tmp_dir):
+                if fname.startswith(prefix) and fname.endswith(".json"):
+                    fpath = os.path.join(tmp_dir, fname)
+                    try:
+                        os.remove(fpath)
+                        logger.info(f"Cleaned up checkpoint file: {fname}")
+                    except Exception as err:
+                        logger.warning(f"Could not remove checkpoint file '{fpath}': {err}")
+        except Exception as exc:
+            logger.warning(f"Error scanning checkpoint directory '{tmp_dir}': {exc}")

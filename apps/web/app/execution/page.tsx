@@ -35,8 +35,8 @@ export default function ExecutionPage() {
   }, []);
 
   const totalMigratedRows = executions.reduce((acc, job) => acc + (job.successful_rows || 0), 0);
-  const activeJobsCount = executions.filter((job) => job.status === 'running' || job.status === 'pending').length;
-  const completedJobsCount = executions.filter((job) => job.status === 'completed').length;
+  const activeJobsCount = executions.filter((job) => ['running', 'queued', 'preparing'].includes((job.status || '').toLowerCase())).length;
+  const completedJobsCount = executions.filter((job) => (job.status || '').toLowerCase() === 'completed').length;
 
   return (
     <div className="min-h-screen bg-black text-slate-100 flex flex-col justify-between selection:bg-sky-400 selection:text-black">

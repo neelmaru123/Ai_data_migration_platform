@@ -375,10 +375,10 @@ class AgentService:
                 },
             )
 
-            # 2. Check for active/running migration jobs linked to this dead agent
+            # 2. Check for active/running/queued migration jobs linked to this dead agent
             stmt_jobs = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
-                MigrationJob.status.in_(["running", "preparing"]),
+                MigrationJob.status.in_(["queued", "running", "preparing"]),
             )
             res_jobs = await session.execute(stmt_jobs)
             running_jobs = list(res_jobs.scalars().all())

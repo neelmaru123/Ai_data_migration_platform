@@ -24,3 +24,30 @@ Implemented the complete frontend user flow following agent container registrati
 
 ### 4. Trade-offs & Future Considerations
 - **Memory Safety**: Schema catalog inspector renders up to 500 tables per view using client-side searching. If a database has 10,000+ tables, virtualized list rendering (e.g. `react-window`) can be introduced.
+
+---
+
+## 2026-08-24 - Critical Workflow & ETL Robustness Edge Case Fixes
+
+### 1. Decision Summary
+Resolved critical edge cases across API backend, agent execution engine, and Web UI:
+1. **Duplicate Execution Prevention (`execution_services.py`)**: Added an explicit active job check (`status.in_(["queued", "preparing", "running"])`) returning HTTP 409 Conflict if execution is triggered on an already active plan.
+2. **Explicit Source DB Matching (`orchestrator.py`)**: Removed silent fallback to default DB when resolving multi-source connection strings; raises an explicit `ValueError` when an identifier cannot be matched.
+3. **Resumable Checkpoint Lifecycle (`checkpoint.py` & `orchestrator.py`)**: Added `clear_job_checkpoints(job_id)` to purge `.json` checkpoint files on job completion to prevent stale resumes.
+4. **PostgreSQL Session Scope Safety (`target_writer.py`)**: Enclosed `SET session_replication_role = 'replica'` in a `try...finally` block resetting to `'origin'` before releasing pooled connections.
+5. **Watchdog Queued Job Recovery (`agents_services.py` & `execution_services.py`)**: Updated stale watchdog loops to clean up orphaned `queued` jobs when agents time out.
+6. **Execution Dashboard Filtering (`execution/page.tsx` & `PlanBlueprintViewer.tsx`)**: Aligned active job counter with `queued`, `preparing`, and `running` backend statuses and added active job auto-detection on mount.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Potential data duplication on re-triggering plan execution, silent wrong-database fallback on multi-source setups, stale checkpoint reuse, connection pool constraint leakage, and orphaned queued jobs.
+- **Chosen Solution**: Guard-rail checks at API boundary, explicit exception raising in agent engine, connection transaction cleanup, and complete status synchronization between frontend and backend.
+- **Why This Architecture**: Ensures strict data safety, transparent failure logs, and idempotent execution pipelines.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A (Silent Ignore for Duplicate Executions)**: Returning 200 OK with the existing job ID on duplicate trigger.
+  - *Rejected*: HTTP 409 Conflict provides explicit semantic feedback and alerts the UI to mount the active execution banner.
+- **Alternative B (Keeping Checkpoint Files Indefinitely)**: Leaving completed job checkpoints on disk.
+  - *Rejected*: Disk clutter and risk of stale offset reuse if job IDs are re-generated.
+
+### 4. Trade-offs & Future Considerations
+- Single-source database environments retain automatic single-DB binding fallback when only one source DB is configured, preserving developer onboarding simplicity while safeguarding multi-source setups.

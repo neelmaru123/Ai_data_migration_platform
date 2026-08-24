@@ -1,14 +1,16 @@
-# Execution Flow - Post-Agent Creation, Schema Catalog Profiling & Migration Plan UI
+# Execution Flow — Schema Catalog Profiling, AI Migration Blueprinting & ETL Execution
 
 ## 1. Entry Point
 - **Files**:
-  - [`apps/web/app/sources/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/sources/page.tsx)
-  - [`apps/web/app/profiling/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/profiling/page.tsx)
-  - [`apps/web/app/transformation-plan/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx)
+  - [`apps/web/app/sources/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/sources/page.tsx)
+  - [`apps/web/app/profiling/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/profiling/page.tsx)
+  - [`apps/web/app/transformation-plan/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx)
+  - [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx)
 - **Triggers**:
-  - Navigating to `/sources` or `/profiling` after creating an agent in Step 3.
+  - Navigating to `/sources` or `/profiling` after registering a Docker agent.
   - Clicking **"Generate AI Migration Plan"** from the Schema Inspector.
-  - Opening `/transformation-plan?planId={id}` to view and approve AI migration blueprints.
+  - Opening `/transformation-plan?planId={id}` to review, edit, refine, or approve AI migration blueprints.
+  - Clicking **"APPROVE & EXECUTE MIGRATION"** to dispatch the migration job to the local Docker Agent.
 
 ## 2. Step-by-Step Execution Sequence
 
@@ -29,6 +31,7 @@
    - Redirects to `/transformation-plan?planId={plan.id}`.
 2. **Transformation Blueprint AST Visualization**:
    - `PlanBlueprintViewer` fetches plan detail via `planService.getPlan(planId)` (`GET /api/v1/plans/{plan_id}`).
+   - Checks active job status via `executionService.listUserExecutions()` to mount active job banner if execution is already running.
    - Renders **Execution Order Sequence Timeline** (dependency order), **Table Mapping Matrix**, and **AI Confidence Score**.
 3. **AI Plan Refinement**:
    - User types prompt feedback -> Calls `planService.refinePlan(planId, prompt)` (`POST /api/v1/plans/{plan_id}/refine`).
@@ -37,15 +40,29 @@
    - User clicks **"APPROVE MIGRATION PLAN"** -> Calls `planService.approvePlan(planId)` (`POST /api/v1/plans/{plan_id}/approve`).
    - Transition status to `COMPLETED` / `APPROVED`.
 
+### Phase C: Safe ETL Job Execution & Progress Monitoring
+1. **Job Dispatch**:
+   - `PlanBlueprintViewer` calls `executionService.startPlanExecution(planId)` (`POST /api/v1/plans/{plan_id}/execute`).
+   - `ExecutionService.create_execution_job()` checks for existing active jobs (`queued`, `preparing`, `running`) on `planId` and raises HTTP `409 Conflict` if duplicate execution is attempted.
+   - Queues `MigrationJob` in `queued` status and notifies Docker Agent via WebSocket `EXECUTION_QUEUED`.
+2. **Task Polling & Claim**:
+   - Docker Agent daemon polls `GET /api/v1/agents/tasks` (`poll_and_execute_tasks()`).
+   - Backend atomically claims job with `FOR UPDATE SKIP LOCKED` and transitions status to `preparing`.
+3. **ETL Migration Pipeline Execution**:
+   - **Step 1 (Pre-DDL)**: `DDLExecutor.execute_ddl_list()` executes target table creation DDL. Non-benign DDL errors halt execution immediately.
+   - **Step 2 (Extraction & Transformation)**: `SourceConnectorFactory.read_source_chunk()` extracts source data via Keyset Pagination. Explicit source DB URL matching prevents multi-source cross-talk. `ASTTransformer` transforms chunks in-memory via Polars. `TargetWriterFactory.bulk_load()` bulk-inserts into target DB, ensuring PostgreSQL `session_replication_role` resets to `'origin'` in `finally` blocks.
+   - **Step 3 (Post-DDL)**: `DDLExecutor.execute_ddl_list()` creates foreign key constraints.
+   - **Step 4 (Completion & Cleanup)**: `CheckpointManager.clear_job_checkpoints(job_id)` removes temporary checkpoint `.json` files and reports `completed` status to Control Plane.
+4. **Watchdog Recovery**:
+   - `check_stale_jobs()` and `check_stale_agents_and_jobs()` periodically check for orphaned `queued`, `preparing`, or `running` jobs and mark them as `failed` if the assigned agent times out.
+
 ## 3. Impact & Delta Analysis (AI Modifications)
-- **[NEW]**: [`apps/web/types/metadata.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/types/metadata.ts) - DTO interfaces matching backend metadata schema.
-- **[NEW]**: [`apps/web/types/migrationPlan.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/types/migrationPlan.ts) - DTO interfaces matching backend transformation plan AST schema.
-- **[NEW]**: [`apps/web/services/metadataService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/metadataService.ts) - Service for catalog metadata fetching.
-- **[NEW]**: [`apps/web/services/planService.ts`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/services/planService.ts) - Service for AI plan generation, refinement, and approval.
-- **[NEW]**: [`apps/web/components/agents/AgentStatusBanner.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/agents/AgentStatusBanner.tsx) - Live Agent health banner.
-- **[NEW]**: [`apps/web/components/profiling/SchemaCatalogViewer.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/profiling/SchemaCatalogViewer.tsx) - Table & column catalog viewer.
-- **[NEW]**: [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) - AI plan generation action.
-- **[NEW]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Interactive AI Migration Blueprint AST viewer.
-- **[MODIFIED]**: [`apps/web/app/sources/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/sources/page.tsx) - Full catalog profiler page.
-- **[MODIFIED]**: [`apps/web/app/profiling/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/profiling/page.tsx) - Schema profiling page.
-- **[MODIFIED]**: [`apps/web/app/transformation-plan/page.tsx`](file:///c:/Users/91873/Desktop/Data_migration_tool/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx) - Transformation Blueprint page.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py) - Added active job concurrency lock (HTTP 409) and queued status watchdog recovery.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) - Included queued jobs in dead agent watchdog recovery loop.
+- **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py) - Eliminated silent source DB fallback; added checkpoint cleanup call on completion.
+- **[MODIFIED]**: [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) - Added `clear_job_checkpoints()` method.
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) - Enclosed `session_replication_role` in `try...finally` to ensure connection pool reset to `'origin'`.
+- **[MODIFIED]**: [`apps/web/app/execution/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx) - Corrected active job status filter to include `queued`, `preparing`, and `running`.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Added active job detection on mount and HTTP 409 Conflict error handler.
+- **[MODIFIED]**: [`DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/DECISIONS.md) - Documented architectural decision log for critical edge case fixes.
+- **[MODIFIED]**: [`EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/EXECUTION_FLOW.md) - Updated execution sequence & delta analysis.

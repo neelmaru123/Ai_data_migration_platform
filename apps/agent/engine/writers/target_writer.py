@@ -116,13 +116,20 @@ class TargetWriterFactory:
                             conn.execute(text("SET session_replication_role = 'replica';"))
                         except Exception:
                             pass
-                    result = conn.execute(text(insert_sql), rows)
-                    raw_rowcount = getattr(result, "rowcount", -1)
-                    if raw_rowcount >= 0:
-                        successful_rows = raw_rowcount
-                        skipped_rows = max(0, len(rows) - successful_rows)
-                    else:
-                        successful_rows, skipped_rows = len(rows), 0
+                    try:
+                        result = conn.execute(text(insert_sql), rows)
+                        raw_rowcount = getattr(result, "rowcount", -1)
+                        if raw_rowcount >= 0:
+                            successful_rows = raw_rowcount
+                            skipped_rows = max(0, len(rows) - successful_rows)
+                        else:
+                            successful_rows, skipped_rows = len(rows), 0
+                    finally:
+                        if "postgres" in engine_type:
+                            try:
+                                conn.execute(text("SET session_replication_role = 'origin';"))
+                            except Exception:
+                                pass
 
                 logger.info(
                     f"Bulk-inserted {successful_rows} rows into target table '{table_name}' "
@@ -144,12 +151,19 @@ class TargetWriterFactory:
                                     conn.execute(text("SET session_replication_role = 'replica';"))
                                 except Exception:
                                     pass
-                            res_row = conn.execute(text(insert_sql), [row])
-                            r_cnt = getattr(res_row, "rowcount", -1)
-                            if r_cnt == 0:
-                                skipped_rows += 1
-                            else:
-                                successful_rows += 1
+                            try:
+                                res_row = conn.execute(text(insert_sql), [row])
+                                r_cnt = getattr(res_row, "rowcount", -1)
+                                if r_cnt == 0:
+                                    skipped_rows += 1
+                                else:
+                                    successful_rows += 1
+                            finally:
+                                if "postgres" in engine_type:
+                                    try:
+                                        conn.execute(text("SET session_replication_role = 'origin';"))
+                                    except Exception:
+                                        pass
                     except Exception as row_exc:
                         failed_rows += 1
                         if failed_rows <= MAX_SAMPLE_ERRORS:
