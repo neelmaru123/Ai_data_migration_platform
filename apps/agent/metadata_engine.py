@@ -91,6 +91,12 @@ class AgentMetadataEngine:
                             ORDER BY table_schema, table_name;
                         """))
                     tables_raw = res_tbl.fetchall()
+                    if len(tables_raw) > 500:
+                        logger.info(
+                            f"Database '{identifier}' contains {len(tables_raw)} tables. "
+                            f"Truncating metadata introspection to top 500 tables ordered by estimated row count."
+                        )
+                        tables_raw = sorted(tables_raw, key=lambda r: r[3] or 0, reverse=True)[:500]
                 except Exception as tbl_err:
                     logger.warning(f"Could not query information_schema.tables for '{identifier}': {tbl_err}")
 

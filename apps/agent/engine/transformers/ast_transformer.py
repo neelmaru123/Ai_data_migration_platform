@@ -96,6 +96,9 @@ class ASTTransformer:
                         exprs.append(uuid_expr.alias(target_col))
                     elif "int" in target_dtype:
                         exprs.append(pl.col(src_name).cast(pl.Int64, strict=False).alias(target_col))
+                    elif "decimal" in target_dtype or "numeric" in target_dtype:
+                        # Preserve high-precision decimal numbers as Utf8/Decimal string (EC-23)
+                        exprs.append(pl.col(src_name).cast(pl.Utf8).alias(target_col))
                     elif "timestamp" in target_dtype or "datetime" in target_dtype or "timestamptz" in target_dtype:
                         # ISO-8601 UTC normalization
                         dt_expr = (

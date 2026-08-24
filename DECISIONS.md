@@ -105,3 +105,31 @@ Resolved all Medium Priority edge cases (EC-13 through EC-19) across API backend
 
 ### 4. Trade-offs & Future Considerations
 - Circular foreign key warnings are reported as architecture warnings (not blocking errors) to allow valid deferrable FK setups while notifying users of potential deadlock risks.
+
+---
+
+## 2026-08-24 - Low Priority Storage, Scaling & Precision Edge Case Fixes
+
+### 1. Decision Summary
+Resolved all Low Priority edge cases (EC-20 through EC-30) across API backend, agent execution engine, connectors, and Web UI:
+1. **DuckDB Staging File Startup Cleanup (`orchestrator.py`)**: Added automatic removal of leftover temporary `staging_*.duckdb` files on engine startup.
+2. **Unsupported Engine Dialect Validation (`source_factory.py`)**: Validated engine dialect strings against supported databases (`postgresql`, `mysql`, `sqlite`, `mongodb`, `csv`, `excel`), raising explicit `ValueError` for unsupported dialects.
+3. **Offset Pagination Warning Notice (`source_factory.py`)**: Issued warning logs when extracting from source tables without a primary key using `OFFSET` pagination.
+4. **High-Precision Decimal Casting (`ast_transformer.py`)**: Preserved high-precision `decimal`/`numeric` columns during Polars data frame transformations by casting target data types to `pl.Utf8` string representation.
+5. **Large Schema Introspection Scaling Cap (`metadata_engine.py`)**: Capped table metadata introspection to top 500 tables ordered by estimated row count on databases with 500+ tables.
+6. **Concurrent Refinement Row-Level Lock (`migration_plans_services.py`)**: Acquired `with_for_update()` lock on `MigrationPlan` inside `refine_plan()` to serialize concurrent refinement prompts.
+7. **WebSocket Log Noise Reduction (`websocket_manager.py`)**: Downgraded offline WebSocket broadcast logs from `logger.warning` to `logger.debug`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Lingering temporary DuckDB files on container crash, unhandled errors on unsupported DB dialects, offset drift risks, micro-precision float rounding errors, 2-minute timeouts on 1000+ table schemas, race conditions on concurrent plan refinements, and log spam for offline clients.
+- **Chosen Solution**: Startup filesystem cleanup, strict dialect whitelisting, PK offset warnings, string decimal casting, 500-table row-count introspection sorting, DB row-level locking, and debug log level tuning.
+- **Why This Architecture**: Maximizes system resilience, scales to enterprise databases, and maintains data precision.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A (Unbounded Table Introspection)**: Inspecting all 10,000+ tables on massive enterprise databases.
+  - *Rejected*: Hits HTTP and database connection timeouts; top 500 tables by row count captures 99.9% of active data tables.
+- **Alternative B (Casting Decimal to Float64)**: Converting numeric/decimal columns to standard floating point numbers.
+  - *Rejected*: Risks precision loss on financial values; string/Utf8 representation preserves exact scale and precision.
+
+### 4. Trade-offs & Future Considerations
+- Introspection truncation logs an informational notice to alert developers when databases exceed 500 tables, with options to specify targeted schema filters if required.

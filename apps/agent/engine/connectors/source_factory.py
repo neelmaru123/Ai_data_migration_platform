@@ -31,12 +31,24 @@ class SourceConnectorFactory:
         Returns a tuple of (DataFrame, has_more_rows, next_last_pk_val).
         """
         engine_type = engine_type.lower()
+        supported_dialects = ["postgresql", "postgres", "mysql", "mariadb", "sqlite", "mongodb", "mongo", "csv", "excel", "xlsx"]
+        if engine_type not in supported_dialects:
+            raise ValueError(
+                f"Unsupported database engine dialect '{engine_type}'. "
+                f"Supported dialects: postgresql, mysql, sqlite, mongodb, csv, excel."
+            )
+
         quoted_table = execution_engine._quote_identifier(table_or_file_name, engine_type)
 
         # 1. SQL Relational Databases (PostgreSQL, MySQL, SQLite)
         if engine_type in ["postgresql", "postgres", "mysql", "mariadb", "sqlite"]:
             try:
                 engine = execution_engine._get_engine(db_url)
+                if not pk_col and offset == 0:
+                    logger.warning(
+                        f"Source table '{table_or_file_name}' does not specify a primary key column. "
+                        f"Falling back to OFFSET pagination which may suffer from offset drift if source table undergoes concurrent writes."
+                    )
                 if pk_col and last_pk_val is not None:
                     quoted_pk = execution_engine._quote_identifier(pk_col, engine_type)
                     query = f"SELECT * FROM {quoted_table} WHERE {quoted_pk} > :last_pk ORDER BY {quoted_pk} ASC LIMIT {chunk_size}"

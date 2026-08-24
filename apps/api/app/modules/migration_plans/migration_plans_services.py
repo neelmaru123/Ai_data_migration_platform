@@ -292,6 +292,13 @@ class MigrationPlanService:
 
         await MigrationPlanService._check_active_execution_lock(session, plan.id)
 
+        # Acquire row lock to serialize concurrent refinement updates (EC-24)
+        stmt_lock = select(MigrationPlan).where(MigrationPlan.id == plan.id).with_for_update()
+        res_lock = await session.execute(stmt_lock)
+        locked_plan = res_lock.scalar_one_or_none()
+        if locked_plan:
+            plan = locked_plan
+
         if not plan.agent:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

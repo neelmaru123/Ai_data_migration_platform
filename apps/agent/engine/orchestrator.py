@@ -38,6 +38,20 @@ class ExecutionOrchestrator:
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
 
+        # Clean up stale DuckDB staging files from previous runs (EC-20)
+        tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
+        if os.path.exists(tmp_dir):
+            try:
+                for fname in os.listdir(tmp_dir):
+                    if fname.startswith("staging_") and fname.endswith(".duckdb"):
+                        try:
+                            os.remove(os.path.join(tmp_dir, fname))
+                            logger.info(f"Cleaned up stale staging file: {fname}")
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
         if not table_mappings:
             raise ValueError("Transformation plan contains 0 target table mappings. At least 1 table mapping is required.")
 
