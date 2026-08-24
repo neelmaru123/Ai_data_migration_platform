@@ -271,6 +271,8 @@ class ASTTransformer:
                 return json.dumps(res_dict, default=str) if res_dict else "{}"
 
             try:
+                if "extra_attributes" in df.columns:
+                    df = df.drop("extra_attributes")
                 extra_attr_expr = pl.struct([pl.col(c) for c in unmapped_cols if c in df.columns]).map_elements(
                     _serialize_residual, return_dtype=pl.Utf8
                 )
@@ -281,11 +283,30 @@ class ASTTransformer:
         if exprs:
             try:
                 transformed_df = df.with_columns(exprs)
+
+                # Auto-generate UUID primary key 'id' if required by target schema but missing in transformed_df
+                if "id" in keep_columns and "id" not in transformed_df.columns:
+                    import uuid
+                    uuid_list = [str(uuid.uuid4()) for _ in range(len(transformed_df))]
+                    transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
+
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
                 return transformed_df.select(available_targets), row_errors
             except Exception as exc:
                 logger.warning(f"Vectorized transformation warning, falling back with row error tracking: {exc}")
                 row_errors += 1
+                
+                if "id" in keep_columns and "id" not in df.columns:
+                    import uuid
+                    uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+                    df = df.with_columns(pl.Series("id", uuid_list))
                 return df, row_errors
 
-        return df, row_errors
+        # If no exprs, still ensure missing 'id' PK is generated
+        if "id" in keep_columns and "id" not in df.columns:
+            import uuid
+            uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+            df = df.with_columns(pl.Series("id", uuid_list))
+
+        available_targets = [c for c in keep_columns if c in df.columns]
+        return df.select(available_targets), row_errors

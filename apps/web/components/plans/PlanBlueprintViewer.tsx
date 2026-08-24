@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { PlanDetailResponse, ColumnMappingSpec, TransformationPlanAST } from '../../types/migrationPlan';
 import { ExecutionJobResponse } from '../../types/execution';
 import planService from '../../services/planService';
@@ -60,6 +60,16 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     setEditableAst(updated);
   };
 
+  const diagnosticRef = useRef<HTMLDivElement>(null);
+
+  const scrollToDiagnostics = () => {
+    setTimeout(() => {
+      if (diagnosticRef.current) {
+        diagnosticRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 100);
+  };
+
   // Save manual column edits
   const handleSaveEdits = async () => {
     setIsSavingEdits(true);
@@ -68,11 +78,33 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setPlan(updated);
       setEditableAst(updated.plan_data);
       setIsEditing(false);
-      toast.success('Target column mappings updated & re-validated!');
+
+      if (updated.is_valid) {
+        toast.success('Target mappings updated & re-validated successfully!');
+      } else {
+        toast.error('Plan edits contain schema feasibility errors! Review diagnostic alert below.');
+        scrollToDiagnostics();
+      }
       if (onPlanUpdated) onPlanUpdated(updated);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to save column edits.';
       toast.error(`Save Error: ${msg}`);
+      
+      // Inject synthetic validation error object so Diagnostic Card pops up
+      const errDetails = err.response?.data?.detail;
+      const errorList = typeof errDetails === 'string' ? [errDetails] : ['Failed to validate plan edits against database metadata.'];
+      setPlan((prev) => ({
+        ...prev,
+        is_valid: false,
+        status: 'invalid_edits',
+        validation_errors: {
+          is_valid: false,
+          errors: errorList,
+          warnings: [],
+          explanation: `Plan edit validation failed: ${msg}`,
+        },
+      }));
+      scrollToDiagnostics();
     } finally {
       setIsSavingEdits(false);
     }
@@ -89,11 +121,32 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setPlan(updated);
       setEditableAst(updated.plan_data);
       setRefinementPrompt('');
-      toast.success('LLM re-reviewed & refined blueprint!');
+
+      if (updated.is_valid) {
+        toast.success('LLM re-reviewed & refined blueprint successfully!');
+      } else {
+        toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert below.');
+        scrollToDiagnostics();
+      }
       if (onPlanUpdated) onPlanUpdated(updated);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to refine plan.';
-      toast.error(`Refine Error: ${msg}`);
+      toast.error(`Refinement Error: ${msg}`);
+      
+      const errDetails = err.response?.data?.detail;
+      const errorList = typeof errDetails === 'string' ? [errDetails] : ['Requested LLM refinement is not feasible with available database schemas.'];
+      setPlan((prev) => ({
+        ...prev,
+        is_valid: false,
+        status: 'invalid_edits',
+        validation_errors: {
+          is_valid: false,
+          errors: errorList,
+          warnings: [],
+          explanation: `LLM Refinement could not be completed: ${msg}`,
+        },
+      }));
+      scrollToDiagnostics();
     } finally {
       setIsRefining(false);
     }
@@ -102,6 +155,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   // Handle Plan Approval & Agent Job Dispatch
   const handleApproveAndExecute = async () => {
     if (isApproving) return;
+
+    if (!plan.is_valid) {
+      toast.error('Cannot execute invalid plan! Fix schema feasibility errors first.');
+      scrollToDiagnostics();
+      return;
+    }
 
     setIsApproving(true);
     try {
@@ -118,6 +177,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to execute plan.';
       toast.error(`Execution Error: ${msg}`);
+      scrollToDiagnostics();
     } finally {
       setIsApproving(false);
     }
@@ -225,7 +285,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                   onClick={() => setIsEditing(true)}
                   className="py-2 px-5 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/40 transition-colors"
                 >
-                  ✎ Edit Target Columns
+                  ✎ Edit Blueprint AST
                 </button>
               )}
             </div>
@@ -241,6 +301,53 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             <p className="text-xs text-zinc-300 font-sans leading-relaxed">
               {ast.ai_explanation}
             </p>
+          </div>
+        )}
+
+        {/* Deterministic Plan Feasibility & Validation Diagnostic Card */}
+        {plan.validation_errors && (
+          <div ref={diagnosticRef} className={`p-4 rounded-none border font-mono text-xs space-y-2 ${
+            plan.is_valid
+              ? 'bg-emerald-950/20 border-emerald-500/40 text-emerald-300'
+              : 'bg-rose-950/30 border-rose-500/50 text-rose-300 shadow-[0_0_20px_rgba(244,63,94,0.15)]'
+          }`}>
+            <div className="flex items-center justify-between font-bold uppercase">
+              <span className="flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-none ${plan.is_valid ? 'bg-emerald-400' : 'bg-rose-500 animate-ping'}`} />
+                {plan.is_valid ? '✓ PLAN FEASIBILITY VERIFIED' : '🚨 INVALID PLAN EDITS DETECTED'}
+              </span>
+              <span className="text-[10px] text-zinc-400">
+                Status: {plan.is_valid ? 'FEASIBLE' : 'EXECUTION BLOCKED'}
+              </span>
+            </div>
+            
+            <p className="text-zinc-300 leading-relaxed font-sans text-xs">
+              {plan.validation_errors.explanation}
+            </p>
+
+            {/* Validation Errors */}
+            {plan.validation_errors.errors && plan.validation_errors.errors.length > 0 && (
+              <div className="p-3 bg-black/80 border border-rose-500/40 text-rose-400 space-y-1 mt-2">
+                <span className="font-bold uppercase text-[10px] text-rose-400 block">Schema Feasibility Errors ({plan.validation_errors.errors.length}):</span>
+                <ul className="list-disc list-inside text-[11px] space-y-0.5 font-mono">
+                  {plan.validation_errors.errors.map((err: string, i: number) => (
+                    <li key={i}>{err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Validation Warnings */}
+            {plan.validation_errors.warnings && plan.validation_errors.warnings.length > 0 && (
+              <div className="p-3 bg-black/80 border border-amber-500/40 text-amber-400 space-y-1 mt-2">
+                <span className="font-bold uppercase text-[10px] text-amber-400 block">Architecture Warnings ({plan.validation_errors.warnings.length}):</span>
+                <ul className="list-disc list-inside text-[11px] space-y-0.5 font-mono">
+                  {plan.validation_errors.warnings.map((warn: string, i: number) => (
+                    <li key={i}>{warn}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -316,22 +423,56 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                 >
                   {/* Table Accordion Header */}
                   <div
-                    onClick={() => setExpandedTable(isExpanded ? null : tm.target_table_name)}
-                    className="p-4 bg-zinc-950 border-b border-zinc-800 flex items-center justify-between cursor-pointer hover:bg-zinc-900/60 transition-colors font-mono"
+                    className="p-4 bg-zinc-950 border-b border-zinc-800 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 cursor-pointer hover:bg-zinc-900/60 transition-colors font-mono"
                   >
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm font-extrabold text-white uppercase tracking-wider">
-                        {tm.target_table_name}
-                      </span>
-                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-none bg-sky-400/10 text-sky-400 border border-sky-400/30 uppercase">
-                        {tm.transformation_type}
-                      </span>
+                    <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto" onClick={() => setExpandedTable(isExpanded ? null : tm.target_table_name)}>
+                      {isEditing ? (
+                        <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                          <span className="text-xs font-bold text-sky-400 uppercase">Table Name:</span>
+                          <input
+                            type="text"
+                            value={tm.target_table_name || ''}
+                            onChange={(e) => {
+                              const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
+                              if (updated.table_mappings[tmIdx]) {
+                                updated.table_mappings[tmIdx].target_table_name = e.target.value;
+                              }
+                              setEditableAst(updated);
+                            }}
+                            className="px-2 py-1 bg-zinc-900 border border-sky-400 text-white font-mono text-sm font-extrabold focus:outline-none"
+                          />
+                          <select
+                            value={tm.transformation_type}
+                            onChange={(e) => {
+                              const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
+                              if (updated.table_mappings[tmIdx]) {
+                                updated.table_mappings[tmIdx].transformation_type = e.target.value;
+                              }
+                              setEditableAst(updated);
+                            }}
+                            className="px-2 py-1 bg-zinc-900 border border-sky-400 text-sky-400 text-xs font-mono font-bold uppercase focus:outline-none"
+                          >
+                            <option value="direct_copy">direct_copy</option>
+                            <option value="merge">merge</option>
+                            <option value="split_target">split_target</option>
+                          </select>
+                        </div>
+                      ) : (
+                        <>
+                          <span className="text-sm font-extrabold text-white uppercase tracking-wider">
+                            {tm.target_table_name}
+                          </span>
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-none bg-sky-400/10 text-sky-400 border border-sky-400/30 uppercase">
+                            {tm.transformation_type}
+                          </span>
+                        </>
+                      )}
                       <span className="text-[10px] text-zinc-400">
                         Sources: {tm.source_tables.map((st) => `${st.identifier}.${st.table_name}`).join(', ')}
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-4 text-xs text-zinc-400">
+                    <div className="flex items-center gap-4 text-xs text-zinc-400 w-full sm:w-auto justify-between sm:justify-end" onClick={() => setExpandedTable(isExpanded ? null : tm.target_table_name)}>
                       <span>Confidence: <strong className="text-sky-400">{Math.round(tm.confidence_score * 100)}%</strong></span>
                       <span className="text-sm font-bold text-white">{isExpanded ? '▲' : '▼'}</span>
                     </div>
@@ -340,24 +481,83 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                   {/* Table Details */}
                   {isExpanded && (
                     <div className="p-5 space-y-4 font-mono text-xs">
-                      {/* AI Reasoning */}
-                      {tm.ai_reasoning && (
-                        <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800/80 text-zinc-300 text-[11px]">
-                          <strong className="text-sky-400 uppercase font-mono mr-2 font-bold">AI Rationale:</strong>
-                          {tm.ai_reasoning}
+                      {/* AI Reasoning & Conflict Resolution Policy Controls */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {tm.ai_reasoning && (
+                          <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800/80 text-zinc-300 text-[11px]">
+                            <strong className="text-sky-400 uppercase font-mono mr-2 font-bold">AI Rationale:</strong>
+                            {tm.ai_reasoning}
+                          </div>
+                        )}
+
+                        {/* Merge / Deduplication Policy Settings */}
+                        <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-[11px] space-y-1.5">
+                          <div className="flex items-center justify-between text-zinc-400 font-bold uppercase text-[10px]">
+                            <span className="text-sky-400">Conflict & Merge Policy</span>
+                            <span>PK Strategy: {tm.conflict_resolution?.primary_key_strategy || 'uuid_v5'}</span>
+                          </div>
+                          {isEditing ? (
+                            <div className="flex flex-wrap items-center gap-3 pt-1">
+                              <label className="flex items-center gap-1.5 text-zinc-300">
+                                <span>Dedup Key:</span>
+                                <input
+                                  type="text"
+                                  value={tm.conflict_resolution?.deduplication_key || ''}
+                                  onChange={(e) => {
+                                    const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
+                                    if (updated.table_mappings[tmIdx]) {
+                                      if (!updated.table_mappings[tmIdx].conflict_resolution) {
+                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v5' };
+                                      }
+                                      updated.table_mappings[tmIdx].conflict_resolution!.deduplication_key = e.target.value;
+                                    }
+                                    setEditableAst(updated);
+                                  }}
+                                  placeholder="e.g. email"
+                                  className="px-2 py-0.5 bg-zinc-900 border border-sky-400 text-white font-mono text-xs"
+                                />
+                              </label>
+                              <label className="flex items-center gap-1.5 text-zinc-300">
+                                <span>PK Strategy:</span>
+                                <select
+                                  value={tm.conflict_resolution?.primary_key_strategy || 'uuid_v5'}
+                                  onChange={(e) => {
+                                    const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
+                                    if (updated.table_mappings[tmIdx]) {
+                                      if (!updated.table_mappings[tmIdx].conflict_resolution) {
+                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v5' };
+                                      }
+                                      updated.table_mappings[tmIdx].conflict_resolution!.primary_key_strategy = e.target.value;
+                                    }
+                                    setEditableAst(updated);
+                                  }}
+                                  className="px-2 py-0.5 bg-zinc-900 border border-sky-400 text-sky-400 font-mono text-xs uppercase"
+                                >
+                                  <option value="uuid_v5">uuid_v5</option>
+                                  <option value="uuid_v4_rekey">uuid_v4_rekey</option>
+                                  <option value="autoincrement_offset">autoincrement_offset</option>
+                                  <option value="keep_original">keep_original</option>
+                                </select>
+                              </label>
+                            </div>
+                          ) : (
+                            <div className="text-zinc-300 text-[11px]">
+                              Deduplication Key: <strong className="text-white">{tm.conflict_resolution?.deduplication_key || 'None (Primary Key)'}</strong>
+                            </div>
+                          )}
                         </div>
-                      )}
+                      </div>
 
                       {/* Columns Matrix Table */}
                       <div className="overflow-x-auto">
                         <table className="w-full text-left font-mono text-xs">
                           <thead>
                             <tr className="border-b border-zinc-800 text-zinc-400 uppercase text-[10px] tracking-wider bg-zinc-950">
-                              <th className="p-3">Target Column (Editable)</th>
+                              <th className="p-3">Target Column</th>
                               <th className="p-3">Target Data Type</th>
                               <th className="p-3">Transformation Type</th>
                               <th className="p-3">Source Column Ref (Read-Only)</th>
-                              <th className="p-3">Explanation</th>
+                              <th className="p-3">Explanation & Formula</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-zinc-900">
@@ -412,6 +612,11 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                                       <option value="split">split</option>
                                       <option value="expression">expression</option>
                                       <option value="default_constant">default_constant</option>
+                                      <option value="json_flatten">json_flatten</option>
+                                      <option value="json_stringify">json_stringify</option>
+                                      <option value="array_to_csv">array_to_csv</option>
+                                      <option value="array_to_json">array_to_json</option>
+                                      <option value="nosql_field_promote">nosql_field_promote</option>
                                       <option value="drop_column">drop_column</option>
                                     </select>
                                   ) : (
@@ -428,9 +633,33 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                                     : <span className="text-zinc-600">—</span>}
                                 </td>
 
-                                {/* Explanation */}
-                                <td className="p-3 text-zinc-400 text-[11px] leading-normal max-w-xs">
-                                  {cm.explanation}
+                                {/* Explanation & Formula Input */}
+                                <td className="p-3 text-zinc-400 text-[11px] leading-normal max-w-xs space-y-1">
+                                  <div>{cm.explanation}</div>
+                                  {isEditing && cm.transformation_type === 'expression' && (
+                                    <div className="pt-1">
+                                      <span className="text-[10px] text-sky-400 uppercase font-bold block">SQL Expression:</span>
+                                      <input
+                                        type="text"
+                                        value={cm.expression_template || ''}
+                                        onChange={(e) => updateColumnField(tmIdx, cIdx, 'expression_template', e.target.value)}
+                                        placeholder="e.g. quantity * unit_price"
+                                        className="w-full px-2 py-0.5 bg-zinc-950 border border-sky-400 text-sky-400 font-mono text-[11px]"
+                                      />
+                                    </div>
+                                  )}
+                                  {isEditing && cm.transformation_type === 'default_constant' && (
+                                    <div className="pt-1">
+                                      <span className="text-[10px] text-amber-400 uppercase font-bold block">Constant Value:</span>
+                                      <input
+                                        type="text"
+                                        value={cm.constant_value || ''}
+                                        onChange={(e) => updateColumnField(tmIdx, cIdx, 'constant_value', e.target.value)}
+                                        placeholder="e.g. BATCH_2026"
+                                        className="w-full px-2 py-0.5 bg-zinc-950 border border-amber-400 text-amber-400 font-mono text-[11px]"
+                                      />
+                                    </div>
+                                  )}
                                 </td>
                               </tr>
                             ))}
