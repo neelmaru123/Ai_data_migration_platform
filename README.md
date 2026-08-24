@@ -54,110 +54,30 @@ data-migration-platform/
 │
 ├── apps/
 │   │
-│   ├── web/                                  # Frontend Web Application
-│   │   ├── app/                              # Next.js 14 App Router Pages
-│   │   │   ├── sources/page.tsx              # Page: Data Sources management UI
-│   │   │   ├── profiling/page.tsx            # Page: Dataset profiler dashboard UI
-│   │   │   ├── transformation-plan/page.tsx  # Page: AI Transformation Plan review & approval UI
-│   │   │   ├── execution/page.tsx            # Page: Cloud migration job monitor & local package download UI
-│   │   │   ├── globals.css                   # Global Tailwind CSS styles
-│   │   │   ├── layout.tsx                    # Root layout with navigation navbar
-│   │   │   └── page.tsx                      # Dashboard landing page
-│   │   │
-│   │   ├── components/                       # Shared UI Components
-│   │   │   └── navbar.tsx                    # Top navigation header component
-│   │   │
-│   │   ├── features/                         # Modular Frontend Feature Logic
-│   │   │   ├── sources/                      # Sources state, API hooks, and modal components
-│   │   │   ├── profiling/                    # Profiler charts, metrics display, and hooks
-│   │   │   ├── transformation_plans/         # Plan editor, JSON viewer, and review components
-│   │   │   └── execution/                    # Job progress bar and script download handlers
-│   │   │
-│   │   ├── Dockerfile                        # Multi-stage production container for web client
-│   │   ├── package.json                      # Node.js dependencies & scripts
-│   │   ├── postcss.config.js                 # PostCSS configuration
-│   │   ├── tailwind.config.js                # Tailwind CSS design tokens
-│   │   └── tsconfig.json                     # TypeScript compiler settings
+│   ├── web/                                  # Frontend Web Application (Next.js 14 App Router)
+│   │   ├── app/                              # Pages: /login, /register, /dashboard, /agents/create, /sources, /profiling, /transformation-plan, /execution
+│   │   ├── components/                       # UI components: AgentStatusBanner, SchemaCatalogViewer, PlanBlueprintViewer, DockerCommandOutput
+│   │   ├── services/                         # Axios client with HTTP-only cookies, 401 refresh queue, and WebSocket manager
+│   │   └── store/                            # Redux Toolkit & TanStack Query store context
 │   │
-│   └── api/                                  # Self-Contained Python Backend
+│   ├── agent/                                # Customer On-Premise Docker Agent Daemon
+│   │   ├── main.py                           # Daemon loop, heartbeat thread, 20s task poller & auto-registration
+│   │   ├── metadata_engine.py                # Schema introspection engine (capping introspection at 500 tables)
+│   │   └── execution_engine.py               # Local ETL execution engine (DuckDB staging staging_*.duckdb, Keyset pagination, ASTTransformer, TargetWriterFactory)
+│   │
+│   └── api/                                  # Control Plane FastAPI Backend Service
 │       ├── app/
+│       │   ├── core/                         # Config, db session, security, structured logging, WebSocket manager
 │       │   │
-│       │   ├── core/                         # Infrastructure & Cross-Cutting Module
-│       │   │   ├── __init__.py               # Core package exports
-│       │   │   ├── config.py                 # Pydantic BaseSettings (DB URLs, Redis, Gemini API key)
-│       │   │   ├── db.py                     # Async SQLAlchemy engine & session dependency provider
-│       │   │   ├── logging.py                # Structured JSON logging configuration
-│       │   │   └── security.py               # Password hashing & credential obfuscation helpers
-│       │   │
-│       │   ├── modules/                      # Feature-Wise Modular Domain Layer
-│       │   │   │
-│       │   │   ├── users/                    # Feature 1: User & Authentication
-│       │   │   │   ├── __init__.py
-│       │   │   │   ├── users_models.py       # ORM: User identity database model
-│       │   │   │   ├── users_schemas.py      # Schemas: User signup/login Pydantic contracts
-│       │   │   │   ├── users_services.py     # Service: Auth, password verification & tenant management
-│       │   │   │   └── users_routes.py       # Routes: /api/v1/users and auth HTTP endpoints
-│       │   │   │
-│       │   │   ├── sources/                  # Feature 2: Data Sources & Connectors
-│       │   │   │   ├── sources_connectors/   # Submodule: Database & File Data Connectors
-│       │   │   │   │   ├── __init__.py
-│       │   │   │   │   ├── sources_connectors_base.py     # Abstract DataConnector interface
-│       │   │   │   │   ├── sources_connectors_postgres.py # PostgreSQL connector driver
-│       │   │   │   │   ├── sources_connectors_mssql.py    # MSSQL connector driver
-│       │   │   │   │   ├── sources_connectors_csv.py      # Polars streaming CSV connector
-│       │   │   │   │   ├── sources_connectors_excel.py    # Excel spreadsheet connector
-│       │   │   │   │   └── sources_connectors_factory.py  # ConnectorFactory builder
-│       │   │   │   ├── __init__.py
-│       │   │   │   ├── sources_models.py     # ORM: DataSource & Dataset metadata models
-│       │   │   │   ├── sources_schemas.py    # Schemas: Connection request & response DTOs
-│       │   │   │   ├── sources_services.py   # Service: Connection testing and source registration
-│       │   │   │   └── sources_routes.py     # Routes: /api/v1/sources HTTP endpoints
-│       │   │   │
-│       │   │   ├── profiler/                 # Feature 3: Memory-Efficient Data Profiling
-│       │   │   │   ├── __init__.py
-│       │   │   │   ├── profiler_engine.py    # Engine: Chunked sampling & null/unique statistics calculator
-│       │   │   │   ├── profiler_models.py    # ORM: DatasetProfileModel metadata persistence
-│       │   │   │   ├── profiler_schemas.py   # Schemas: DatasetProfile & ColumnMetadata DTOs
-│       │   │   │   ├── profiler_services.py  # Service: Profiling job orchestration
-│       │   │   │   └── profiler_routes.py    # Routes: /api/v1/datasets/{table_name}/profile endpoints
-│       │   │   │
-│       │   │   ├── schema_mapping/           # Feature 4: AI Schema Matching & Recommendations
-│       │   │   │   ├── schema_mapping_ai/    # Submodule: AI Reasoning Abstractions
-│       │   │   │   │   ├── __init__.py
-│       │   │   │   │   ├── schema_mapping_ai_base.py     # Abstract AIProvider interface
-│       │   │   │   │   ├── schema_mapping_ai_gemini.py   # Google Gemini provider implementation
-│       │   │   │   │   └── schema_mapping_ai_planner.py  # AISchemaPlanner semantic matcher
-│       │   │   │   ├── __init__.py
-│       │   │   │   ├── schema_mapping_models.py  # ORM: SchemaMappingModel persistence
-│       │   │   │   ├── schema_mapping_schemas.py # Schemas: ColumnMappingRule & SchemaMapping DTOs
-│       │   │   │   ├── schema_mapping_services.py# Service: Mapping recommendation service
-│       │   │   │   └── schema_mapping_routes.py # Routes: /api/v1/mappings endpoints
-│       │   │   │
-│       │   │   ├── transformation_plans/     # Feature 5: Transformation Plans & Execution Engine
-│       │   │   │   ├── transformation_plans_engine/ # Submodule: Deterministic ETL Engine
-│       │   │   │   │   ├── __init__.py
-│       │   │   │   │   ├── transformation_plans_engine.py    # Polars/DuckDB plan execution class
-│       │   │   │   │   └── transformation_plans_operations.py# Operation handlers (rename, trim, cast, deduplicate)
-│       │   │   │   ├── __init__.py
-│       │   │   │   ├── transformation_plans_models.py  # ORM: TransformationPlanModel persistence
-│       │   │   │   ├── transformation_plans_schemas.py # Schemas: TransformationPlan & TransformationOperation specs
-│       │   │   │   ├── transformation_plans_services.py# Service: Plan generation & approval workflow
-│       │   │   │   └── transformation_plans_routes.py  # Routes: /api/v1/plans endpoints
-│       │   │   │
-│       │   │   └── execution/                # Feature 6: Execution Dispatcher & Local Script Generation
-│       │   │       ├── execution_script_generator/ # Submodule: Local ZIP Package Generator
-│       │   │       │   ├── __init__.py
-│       │   │       │   └── execution_script_generator.py # Standalone runner ZIP packager
-│       │   │       ├── __init__.py
-│       │   │       ├── execution_models.py   # ORM: MigrationJobModel & ExecutionLogModel
-│       │   │       ├── execution_policy.py   # Policy: Evaluation rules (CLOUD vs LOCAL_SCRIPT)
-│       │   │       ├── execution_schemas.py  # Schemas: MigrationJob & ExecutionResult DTOs
-│       │   │       ├── execution_services.py # Service: Job dispatcher & script builder
-│       │   │       ├── execution_tasks.py    # Tasks: Redis worker background task handlers
-│       │   │       └── execution_routes.py   # Routes: /api/v1/jobs & download endpoints
-│       │   │
-│       │   ├── __init__.py
-│       │   └── main.py                       # Main FastAPI App Entry Point & Router Registry
+│       │   └── modules/                      # Domain Modules
+│       │       ├── users/                    # User identity, JWT, HTTP-only cookie auth & OAuth 2.0
+│       │       ├── agents/                   # Docker Agent lifecycle, SHA-256 token auth, CLI command generator, watchdog
+│       │       ├── sources/                  # Data source registration & connection drivers
+│       │       ├── metadata/                 # Introspection snapshot storage & versioning
+│       │       ├── migration_plans/          # AI Plan generator (Gemini 3.5), LangGraph StateGraph, 5-stage feasibility validator
+│       │       └── execution/                # Job dispatcher, active execution locks (409 Conflict), SKIP LOCKED task queue & watchdog
+│       │
+│       └── main.py                           # FastAPI main app & background watchdog task startup
 │       │
 │       ├── tests/                            # Automated Test Suites
 │       │   ├── unit/                         # Unit tests for each feature module

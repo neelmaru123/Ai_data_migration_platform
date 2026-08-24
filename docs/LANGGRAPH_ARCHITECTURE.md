@@ -87,10 +87,12 @@ The `MigrationPlanState` dictionary is the single source of truth passed across 
 ```python
 class MigrationPlanState(TypedDict):
     agent_id: str
+    user_id: str
     target_db_type: str
     custom_instructions: Optional[str]
     context_yaml: str
     snapshots: List[Any]
+    alias_map: Dict[str, str]
     current_ast: Optional[Dict[str, Any]]
     validation_result: Optional[Dict[str, Any]]
     user_feedback: Optional[str]
@@ -98,6 +100,7 @@ class MigrationPlanState(TypedDict):
     attempt_count: int
     is_approved: bool
     feasibility_explanation: Optional[str]
+    persisted_plan_id: Optional[str]
 ```
 
 ---
@@ -106,7 +109,7 @@ class MigrationPlanState(TypedDict):
 
 #### **Node 1: `serialize_context_node`**
 - **Role**: Takes the agent's attached data source `MetadataSnapshot` trees and runs `MetadataContextSerializer.serialize()`.
-- **Output**: Produces a sanitized, Zero-Raw-Data YAML context string containing table structures, data types, column ordinal positions, primary keys, and foreign keys.
+- **Output**: Produces a sanitized, Zero-Raw-Data YAML context string containing table structures, data types, column ordinal positions, primary keys, foreign keys, and optional user `custom_instructions`.
 
 #### **Node 2: `generate_plan_ast_node`**
 - **Role**: Invokes Google Gemini 3.5 Flash Lite via `ChatGoogleGenerativeAI`.
@@ -118,11 +121,13 @@ class MigrationPlanState(TypedDict):
 #### **Node 3: `validate_feasibility_node`**
 - **Role**: Executes the **Deterministic Schema Validator** (`MigrationPlanValidator`).
 - **Functionality**: Performs a multi-stage feasibility check against introspected metadata snapshots:
-  1. **Stage A**: Source Table & Schema Existence check.
-  2. **Stage B**: Source Column Existence, Type Compatibility, **Target Column Collision Check** (flags duplicate `target_column_name` entries within the same table mapping as errors), and **Concatenation Length-Overflow Check** (warns when `merge_concat` combined source max lengths exceed `varchar(N)` target max length constraints).
-  3. **Stage C**: Primary Key & Deduplication Key Validity check.
-  4. **Stage D**: Foreign Key & DDL Two-Phase Hygiene check (verifies all foreign keys are placed in `post_migration_ddl`).
-  5. **Stage E**: Architecture Standards & **PK Rekey FK Remap Warning** (warns when multi-source table merges rekey primary keys while foreign key dependent tables exist in the plan).
+  1. **Stage 0 (Empty Mappings Check)**: Validates that `table_mappings` contains at least 1 table mapping, failing validation if empty.
+  2. **Stage A (Source Table & Schema Existence Check)**: Verifies all referenced source database aliases and tables exist in snapshot metadata.
+  3. **Stage B (Source Column & Type Conversion Check)**: Verifies source columns exist, checks type compatibility, enforces **Target Column Collision Checks** (flags duplicate `target_column_name` entries within the same table mapping as errors), and performs **Concatenation Length-Overflow Checks** (warns when `merge_concat` combined source max lengths exceed `varchar(N)` target max length constraints).
+  4. **Stage C (Primary Key & Deduplication Key Validity Check)**: Ensures deduplication keys map to valid target columns.
+  5. **Stage D (Foreign Key & DDL Two-Phase Hygiene & Pre-DDL Resolution Check)**: Enforces that foreign keys execute in `post_migration_ddl` after data streaming completes. Automatically parses `CREATE TABLE` DDL statements in `pre_migration_ddl` to register newly created target tables in the validation set.
+  6. **Stage D2 (Circular Foreign Key Cycle Detection Check)**: Constructs a directed graph of post-migration foreign key dependencies and runs DFS cycle detection, emitting architecture warning notices when circular FK cycles are detected.
+  7. **Stage E (Architecture Standards & PK Rekey Remap Warnings)**: Checks lowercase snake_case naming conventions and warns when multi-source table merges rekey primary keys while foreign key dependent tables exist.
 - **Output**: Sets `state["validation_result"]` with `is_valid: bool`, `errors: List[str]`, `warnings: List[str]`.
 
 #### **Router 1: `check_validation_router` (Conditional Edge)**
@@ -167,3 +172,4 @@ class MigrationPlanState(TypedDict):
 2. **Determinism + AI Synergy**: Deterministic Python code (`MigrationPlanValidator`) acts as a guardrail around the non-deterministic LLM (`Gemini`).
 3. **No Code Sprawling**: Complex loop logic, retries, and human pause points are declared cleanly using LangGraph's `add_node()`, `add_edge()`, and `add_conditional_edges()`.
 4. **Stateful Persistence**: LangGraph's checkpointer persists state across separate HTTP API calls, enabling seamless Human-in-the-Loop workflows.
+5. **Row-Level Concurrency Locks**: Concurrent plan refinements are protected by PostgreSQL `with_for_update()` row-level locks on `MigrationPlan` entities in `migration_plans_services.py` to prevent race conditions during iterative state transitions.

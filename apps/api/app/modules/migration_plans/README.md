@@ -186,13 +186,24 @@ The `migration_plans` module is the core control-plane component responsible for
 
 ## 6. Internal Engines & Sub-Components
 
-- **`migration_plans_graph.py`**: StateGraph workflow containing nodes:
-  - `introspect_context`: Packages metadata schemas.
-  - `schema_mapping`: Maps source tables/columns to target schemas.
-  - `transformation_generation`: Constructs Polars AST transformations.
-  - `feasibility_assessment`: Scores confidence and checks constraints.
-- **`migration_plans_validator.py`**: Validates AST structures against rules (type conversion safety, cyclic dependencies, missing primary keys).
-- **`migration_plans_llm.py`**: Handles prompt template formatting and JSON schema enforcement for LLM responses.
+- **`migration_plans_graph.py`**: LangGraph 9-node StateGraph workflow (`serialize_context_node`, `generate_plan_ast_node`, `validate_feasibility_node`, `auto_correct_ast_node`, `human_approval_interrupt_node`, `process_user_feedback_node`, `process_manual_edits_node`, `explanation_generator_node`, `finalize_and_persist_node`).
+- **`migration_plans_validator.py`**: Deterministic Schema Validator (`MigrationPlanValidator`) executing multi-stage feasibility checks:
+  - **Stage 0**: Empty Table Mapping Guard (`len(table_mappings) > 0`).
+  - **Stage A**: Source Table & Alias Existence Check.
+  - **Stage B**: Source Column Existence, Type Compatibility, Target Column Collision Check, and Merge Concat Length-Overflow Warning.
+  - **Stage C**: Deduplication Key Validity Check.
+  - **Stage D**: Foreign Key Two-Phase Hygiene Check & Pre-DDL Created Tables Parsing.
+  - **Stage D2**: Circular Foreign Key Cycle Detection via Directed Graph DFS.
+  - **Stage E**: Architecture Standards & Primary Key Rekeying Foreign Key Remap Warnings.
+- **`migration_plans_llm.py`**: Formats zero-raw-data context, passes custom instructions, and enforces JSON Pydantic output parsing for Gemini 3.5 Flash Lite responses.
+
+### Key Refinement & Concurrency Protections
+1. **Refinement Row-Level Lock**:
+   - `refine_plan()` acquires PostgreSQL `select(...).with_for_update()` row-level lock on `MigrationPlan` before invoking LLM refinement, serializing concurrent refinement requests.
+2. **Refinement Guidance Preservation**:
+   - `refine_plan()` passes user-provided `custom_instructions` from `plan.target_config` into `MetadataContextSerializer.serialize()` to ensure prompt instructions persist during iterative refinement runs.
+3. **Active Execution Lock Check**:
+   - `_check_active_execution_lock()` prevents editing or refining a plan while an active execution job (`queued`, `preparing`, `running`) is running on that plan.
 
 ---
 
