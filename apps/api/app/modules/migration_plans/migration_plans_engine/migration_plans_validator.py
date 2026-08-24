@@ -76,6 +76,18 @@ class MigrationPlanValidator:
         # Track target table names
         target_tables: Set[str] = set()
 
+        # Check for empty table mappings (EC-16)
+        if len(ast.table_mappings) == 0:
+            errors.append("Transformation plan contains 0 target table mappings. At least 1 target table mapping is required.")
+
+        # Parse pre-migration DDL to include tables created via DDL in target_tables (EC-14)
+        create_tbl_pattern = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z0-9_\"\.]+)", re.IGNORECASE)
+        for ddl in ast.pre_migration_ddl:
+            matches = create_tbl_pattern.findall(ddl)
+            for tbl in matches:
+                clean_tbl = tbl.strip('"').split(".")[-1].lower()
+                target_tables.add(clean_tbl)
+
         # 2. Iterate through table mappings
         for table_map in ast.table_mappings:
             target_table_name = table_map.target_table_name
@@ -191,6 +203,49 @@ class MigrationPlanValidator:
                         errors.append(
                             f"Post-migration DDL FK constraint references non-existent target table '{clean_tbl}'."
                         )
+
+        # Stage D2: Circular Foreign Key Cycle Detection (EC-19)
+        fk_graph: Dict[str, Set[str]] = {}
+        alter_tbl_pattern = re.compile(r"ALTER\s+TABLE\s+([a-zA-Z0-9_\"\.]+)", re.IGNORECASE)
+
+        for ddl in ast.post_migration_ddl:
+            source_tbl_match = alter_tbl_pattern.search(ddl)
+            if not source_tbl_match:
+                source_tbl_match = re.search(r"CREATE\s+TABLE\s+([a-zA-Z0-9_\"\.]+)", ddl, re.IGNORECASE)
+
+            if source_tbl_match:
+                src_t = source_tbl_match.group(1).strip('"').split(".")[-1].lower()
+                fk_targets = fk_pattern.findall(ddl)
+                if src_t not in fk_graph:
+                    fk_graph[src_t] = set()
+                for target_t in fk_targets:
+                    clean_target = target_t.strip('"').split(".")[-1].lower()
+                    if clean_target != src_t:
+                        fk_graph[src_t].add(clean_target)
+
+        visited: Set[str] = set()
+        rec_stack: Set[str] = set()
+
+        def dfs_has_cycle(node: str) -> bool:
+            visited.add(node)
+            rec_stack.add(node)
+            for neighbor in fk_graph.get(node, set()):
+                if neighbor not in visited:
+                    if dfs_has_cycle(neighbor):
+                        return True
+                elif neighbor in rec_stack:
+                    return True
+            rec_stack.remove(node)
+            return False
+
+        for node in fk_graph:
+            if node not in visited:
+                if dfs_has_cycle(node):
+                    warnings.append(
+                        f"Circular Foreign Key Dependency Notice: Post-migration DDL contains cyclic foreign key constraints "
+                        f"involving target table '{node}'. Verify that constraints allow deferrable execution or order independence."
+                    )
+                    break
 
         # Stage E: Industry Database Architecture Standards Validation
         snake_case_pattern = re.compile(r"^[a-z0-9_]+$")

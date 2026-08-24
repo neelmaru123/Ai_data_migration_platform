@@ -78,3 +78,30 @@ Resolved all High Priority edge cases (EC-07 through EC-12) across UI, API, and 
 
 ### 4. Trade-offs & Future Considerations
 - First-frame WebSocket auth preserves query parameter support as a legacy fallback for existing client integrations while enforcing non-URL token delivery for new UI components.
+
+---
+
+## 2026-08-24 - Medium Priority Configuration, Validation & Sanitization Fixes
+
+### 1. Decision Summary
+Resolved all Medium Priority edge cases (EC-13 through EC-19) across API backend, agent execution engine, and plan validator:
+1. **Deterministic Target DB Selection (`main.py`)**: Sorted `DEST_*` keys alphabetically and selected primary target URL, issuing warning logs when multiple destination DB URLs are present in container environment variables.
+2. **Pre-DDL Created Tables Resolution (`migration_plans_validator.py`)**: Parsed `pre_migration_ddl` statements for `CREATE TABLE` patterns and included created table names in `target_tables` validation set to prevent false-positive FK errors.
+3. **Empty Table Mapping Prohibition (`migration_plans_validator.py` & `orchestrator.py`)**: Required `table_mappings` to contain at least 1 table mapping, failing validation and halting execution if empty.
+4. **DuckDB Expression Sanitization (`ast_transformer.py`)**: Added regex SQL keyword inspection (`DROP`, `DELETE`, `UPDATE`, `INSERT`, `COPY`, `ATTACH`, `TRUNCATE`, `ALTER`) before executing in-memory DuckDB expressions.
+5. **LLM Refinement Guidance Preservation (`migration_plans_services.py`)**: Passed user-provided `custom_instructions` from `plan.target_config` to context serializer during natural language plan refinement (`refine_plan`).
+6. **Circular Foreign Key Cycle Detection (`migration_plans_validator.py`)**: Built directed graph of post-migration foreign keys and added cycle detection warnings recommending deferrable constraints.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Unpredictable destination DB selection when multiple target URLs exist, false-positive validator errors on DDL junction tables, silent 0-table migration runs, DuckDB expression SQL injection risks, lost prompt guidance during refinement, and circular FK deadlocks.
+- **Chosen Solution**: Deterministic env sorting, AST regex parsing, explicit validation rules, expression keyword blacklisting, instruction propagation, and graph DFS cycle detection.
+- **Why This Architecture**: Strengthens platform security, improves validation accuracy, and ensures reliable ETL execution.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A (Strict Rejection of Multiple DEST_* Env Vars)**: Immediately terminating container startup if multiple DEST URLs exist.
+  - *Rejected*: Too restrictive for staging/multi-target configurations; picking primary with warning log is more developer-friendly.
+- **Alternative B (Full SQL Parser for Expression Templates)**: Integrating ANTLR or heavy SQL parsing library in python agent.
+  - *Rejected*: Unnecessary overhead; regex keyword sanitization effectively prevents destructive SQL DDL/DML injection in DuckDB calculations.
+
+### 4. Trade-offs & Future Considerations
+- Circular foreign key warnings are reported as architecture warnings (not blocking errors) to allow valid deferrable FK setups while notifying users of potential deadlock risks.

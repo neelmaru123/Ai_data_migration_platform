@@ -133,15 +133,23 @@ class ASTTransformer:
 
             # 7. expression (e.g. price - discount, quantity * unit_price, or multi-column arithmetic)
             elif trans_type == "expression" and expr_tmpl:
-                try:
-                    calc_df = duckdb.sql(f'SELECT ({expr_tmpl}) AS "{target_col}" FROM df').pl()
-                    if target_col in calc_df.columns:
-                        exprs.append(calc_df[target_col])
-                except Exception as expr_err:
-                    logger.warning(f"Expression calculation notice for '{target_col}' ({expr_tmpl}): {expr_err}")
+                # Sanitize expression_template against DML/DDL SQL injection (EC-17)
+                forbidden_sql = [r"\bdrop\b", r"\bdelete\b", r"\bupdate\b", r"\binsert\b", r"\battach\b", r"\bcopy\b", r"\btruncate\b", r"\balter\b", r"\bexecute\b"]
+                if any(re.search(pat, expr_tmpl, re.IGNORECASE) for pat in forbidden_sql):
+                    logger.warning(f"Expression template '{expr_tmpl}' contained restricted SQL keywords and was safely skipped for '{target_col}'.")
                     src_name = source_cols[0]["column_name"] if source_cols else target_col
                     if src_name in df.columns:
                         exprs.append(pl.col(src_name).alias(target_col))
+                else:
+                    try:
+                        calc_df = duckdb.sql(f'SELECT ({expr_tmpl}) AS "{target_col}" FROM df').pl()
+                        if target_col in calc_df.columns:
+                            exprs.append(calc_df[target_col])
+                    except Exception as expr_err:
+                        logger.warning(f"Expression calculation notice for '{target_col}' ({expr_tmpl}): {expr_err}")
+                        src_name = source_cols[0]["column_name"] if source_cols else target_col
+                        if src_name in df.columns:
+                            exprs.append(pl.col(src_name).alias(target_col))
 
             # 8. json_flatten (e.g. address.city -> address_city)
             elif trans_type == "json_flatten":

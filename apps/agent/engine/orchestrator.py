@@ -38,6 +38,9 @@ class ExecutionOrchestrator:
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
 
+        if not table_mappings:
+            raise ValueError("Transformation plan contains 0 target table mappings. At least 1 table mapping is required.")
+
         total_tables = len(table_mappings)
         total_processed = 0
         total_successful = 0
@@ -69,7 +72,7 @@ class ExecutionOrchestrator:
                 ProgressReporter.report(
                     backend_url, agent_token, job_id, "running", pct,
                     total_processed, total_successful, total_failed, total_skipped,
-                    total_rows=total_estimated_rows if total_estimated_rows > 0 else (total_processed or 250),
+                    total_rows=total_estimated_rows if total_estimated_rows > 0 else (total_processed if total_processed > 0 else 0),
                     current_table=target_table, current_stage="data_streaming"
                 )
 

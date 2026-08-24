@@ -433,15 +433,26 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
 
             logger.info(f"Discovered {len(tasks)} pending execution job(s) for this agent!")
 
-            # Fetch source & target database URLs from environment
+            # Fetch source & target database URLs from environment (EC-13)
             src_urls = {}
-            dest_url = ""
+            dest_urls = {}
             for k, v in os.environ.items():
                 if ("SRC_" in k or "SOURCE_DB" in k) and ("URL" in k or "URI" in k):
                     ident = extract_identifier_from_env_key(k)
                     src_urls[ident] = v
-                elif ("DEST_" in k or "DEST_DB" in k) and ("URL" in k or "URI" in k):
-                    dest_url = v
+                elif ("DEST_" in k or "DEST_DB" in k or "TARGET_" in k) and ("URL" in k or "URI" in k):
+                    dest_urls[k] = v
+
+            dest_url = ""
+            if dest_urls:
+                sorted_keys = sorted(dest_urls.keys())
+                primary_key = sorted_keys[0]
+                dest_url = dest_urls[primary_key]
+                if len(sorted_keys) > 1:
+                    logger.warning(
+                        f"Multiple destination database URLs detected ({sorted_keys}). "
+                        f"Selected primary target '{primary_key}'."
+                    )
 
             if not dest_url:
                 dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", ""))

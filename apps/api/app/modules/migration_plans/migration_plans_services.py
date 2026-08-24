@@ -307,11 +307,17 @@ class MigrationPlanService:
             if plan.target_config
             else "postgresql"
         )
+        custom_instructions = (
+            plan.target_config.get("custom_instructions", "")
+            if plan.target_config
+            else ""
+        )
 
         context_str = MetadataContextSerializer.serialize(
             snapshots=snapshots,
             source_aliases=alias_map,
             target_db_type=target_db_type,
+            custom_instructions=custom_instructions,
         )
 
         refined_ast_obj = llm_plan_generator.refine(
