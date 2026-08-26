@@ -6,9 +6,51 @@ import logging
 from typing import Tuple
 import polars as pl
 from sqlalchemy import text
-import execution_engine
+from ..db import _get_engine, _quote_identifier
 
 logger = logging.getLogger("docker-agent-execution")
+
+
+def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
+    """
+    Sanitizes Python object types in row dicts before DB binding.
+    Ensures UUIDs, dicts, lists, and datetimes are serialized to target-compatible formats:
+    - MySQL / SQLite: dicts/lists -> JSON strings, UUIDs -> str, datetimes -> ISO strings.
+    - PostgreSQL: dicts -> JSON strings, UUIDs -> str, datetimes -> ISO strings.
+    - MongoDB: dicts/lists -> native, UUIDs -> str.
+    """
+    import json
+    import uuid
+    from datetime import datetime
+
+    if not rows:
+        return rows
+
+    engine_type_clean = (engine_type or "").lower().strip()
+    is_mongo = engine_type_clean in ("mongodb", "mongo")
+    is_postgres = "postgres" in engine_type_clean
+
+    sanitized = []
+    for r in rows:
+        clean_row = {}
+        for k, v in r.items():
+            if v is None:
+                clean_row[k] = None
+            elif isinstance(v, uuid.UUID):
+                clean_row[k] = str(v)
+            elif isinstance(v, datetime):
+                clean_row[k] = v.isoformat()
+            elif isinstance(v, (dict, list)):
+                if is_mongo:
+                    clean_row[k] = v
+                elif is_postgres and isinstance(v, list):
+                    clean_row[k] = v
+                else:
+                    clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
+            else:
+                clean_row[k] = v
+        sanitized.append(clean_row)
+    return sanitized
 
 
 class TargetWriterFactory:
@@ -33,16 +75,27 @@ class TargetWriterFactory:
         if not rows:
             return 0, 0, 0
 
+        rows = _sanitize_rows_for_target(rows, engine_type)
+
         successful_rows = 0
         failed_rows = 0
         skipped_rows = 0
 
-        # 1. MongoDB Target Writer
         if engine_type in ["mongodb", "mongo"]:
             try:
                 import importlib
                 pymongo = importlib.import_module("pymongo")
-                client = pymongo.MongoClient(db_url)
+                try:
+                    client = pymongo.MongoClient(db_url)
+                    client.admin.command('ping')
+                except pymongo.errors.OperationFailure:
+                    # Fallback to unauthenticated MongoDB connection if host server has auth disabled
+                    clean_url = db_url.split("@")[-1] if "@" in db_url else db_url
+                    if not clean_url.startswith("mongodb://") and not clean_url.startswith("mongodb+srv://"):
+                        clean_url = f"mongodb://{clean_url}"
+                    clean_url = clean_url.split("?")[0]
+                    client = pymongo.MongoClient(clean_url)
+
                 db_name = db_url.rsplit("/", 1)[-1].split("?")[0] or "target_db"
                 db = client[db_name]
                 coll = db[table_name]
@@ -78,16 +131,16 @@ class TargetWriterFactory:
 
         # 2. PostgreSQL, MySQL & SQLite Target Writer
         else:
-            engine = execution_engine._get_engine(db_url)
+            engine = _get_engine(db_url)
             columns = list(rows[0].keys())
 
-            quoted_table = execution_engine._quote_identifier(table_name, engine_type)
+            quoted_table = _quote_identifier(table_name, engine_type)
 
             # Auto-align missing target columns (e.g. _source_origin lineage column)
             try:
                 with engine.begin() as col_conn:
                     for col in columns:
-                        q_col = execution_engine._quote_identifier(col, engine_type)
+                        q_col = _quote_identifier(col, engine_type)
                         if "postgres" in engine_type:
                             col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN IF NOT EXISTS {q_col} TEXT;'))
                         elif "mysql" in engine_type:
@@ -98,7 +151,7 @@ class TargetWriterFactory:
             except Exception:
                 pass
 
-            quoted_cols = [execution_engine._quote_identifier(c, engine_type) for c in columns]
+            quoted_cols = [_quote_identifier(c, engine_type) for c in columns]
             col_names = ", ".join(quoted_cols)
             placeholders = ", ".join([f":{c}" for c in columns])
 

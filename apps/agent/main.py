@@ -461,24 +461,34 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                 logger.error("No destination database environment variables (DEST_*_URL) detected. Cannot execute migration jobs.")
                 return
 
+            from engine.progress_reporter import ProgressReporter
+            from engine.orchestrator import ExecutionOrchestrator
+
             for task in tasks:
                 job_id = task.get("job_id")
                 plan_id = task.get("migration_plan_id")
-                logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
 
-                # Fetch full plan AST from API using Agent token auth
-                plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
-                req_plan = urllib.request.Request(
-                    plan_url,
-                    headers={"X-Agent-Token": clean_token},
-                    method="GET"
-                )
-                with urllib.request.urlopen(req_plan, timeout=15.0) as r_plan:
-                    plan_ast = json.loads(r_plan.read().decode("utf-8"))
-
-                # Import and run execution engine
-                from execution_engine import ExecutionOrchestrator
                 try:
+                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
+
+                    # Fetch full plan AST from API using Agent token auth
+                    plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
+                    req_plan = urllib.request.Request(
+                        plan_url,
+                        headers={"X-Agent-Token": clean_token},
+                        method="GET"
+                    )
+                    with urllib.request.urlopen(req_plan, timeout=15.0) as r_plan:
+                        plan_ast = json.loads(r_plan.read().decode("utf-8"))
+                    
+                    target_engine_type = "postgresql"
+                    if dest_url.startswith("mongodb://") or dest_url.startswith("mongodb+srv://") or "mongo" in dest_url.lower():
+                        target_engine_type = "mongodb"
+                    elif "mysql" in dest_url.lower():
+                        target_engine_type = "mysql"
+                    elif "sqlite" in dest_url.lower():
+                        target_engine_type = "sqlite"
+
                     ExecutionOrchestrator.run_job(
                         backend_url=backend_url,
                         agent_token=clean_token,
@@ -486,14 +496,18 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                         plan_ast=plan_ast,
                         source_db_urls=src_urls,
                         target_db_url=dest_url,
+                        target_engine_type=target_engine_type,
                     )
                 except Exception as run_err:
                     logger.error(f"Execution error for job '{job_id}': {run_err}")
-                    report_execution_progress(
-                        backend_url, clean_token, job_id,
-                        status="failed", progress=0.0,
-                        error_message=str(run_err)
-                    )
+                    try:
+                        ProgressReporter.report(
+                            backend_url, clean_token, job_id,
+                            status="failed", progress=0.0,
+                            error_message=f"Agent Execution Failure: {str(run_err)}"
+                        )
+                    except Exception as rep_err:
+                        logger.error(f"Failed to report job failure to backend: {rep_err}")
     except Exception as exc:
         logger.warning(f"Task polling check exception: {exc}")
 

@@ -136,13 +136,14 @@ class ExecutionOrchestrator:
                                             break
 
                         if not db_url:
-                            if len(source_db_urls) == 1:
-                                db_url = list(source_db_urls.values())[0]
+                            if target_db_url and any(tag in norm_id for tag in ["dst", "dest", "target"]):
+                                db_url = target_db_url
                             elif source_db_urls:
-                                raise ValueError(
-                                    f"Could not resolve source database URL for identifier '{src_ident}'. "
-                                    f"Configured available sources: {list(source_db_urls.keys())}."
+                                logger.warning(
+                                    f"Could not strictly match source identifier '{src_ident}' to configured sources {list(source_db_urls.keys())}. "
+                                    f"Falling back to primary source database."
                                 )
+                                db_url = list(source_db_urls.values())[0]
 
                         src_engine = "postgresql"
                         if db_url:

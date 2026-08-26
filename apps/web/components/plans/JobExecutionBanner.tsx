@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { ExecutionJobResponse } from '../../types/execution';
+import Link from 'next/link';
+import toast from 'react-hot-toast';
+import { ExecutionJobResponse, AIDiagnosisPayload } from '../../types/execution';
 import executionService from '../../services/executionService';
 
 interface JobExecutionBannerProps {
@@ -15,12 +17,35 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
 }) => {
   const [job, setJob] = useState<ExecutionJobResponse>(initialJob);
   const [logs, setLogs] = useState<string[]>([]);
+  const [jobHistory, setJobHistory] = useState<ExecutionJobResponse[]>([]);
+  const [isRetrying, setIsRetrying] = useState<boolean>(false);
+  const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // Store callback in a ref so the polling useEffect never needs it in its
+  // dependency array — eliminates interval restarts caused by parent re-renders.
+  const onJobUpdatedRef = useRef(onJobUpdated);
+  useEffect(() => {
+    onJobUpdatedRef.current = onJobUpdated;
+  });
 
   const status = (job.status || 'queued').toLowerCase();
   const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing' || status === 'queued';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
+
+  // Fetch job history for plan
+  useEffect(() => {
+    let isSubscribed = true;
+    if (job.migration_plan_id) {
+      executionService.listPlanJobs(job.migration_plan_id)
+        .then((history) => {
+          if (isSubscribed) setJobHistory(history);
+        })
+        .catch(() => {});
+    }
+    return () => { isSubscribed = false; };
+  }, [job.migration_plan_id, job.id, job.status]);
 
   // Smooth scroll into view when initialized/approved
   useEffect(() => {
@@ -40,7 +65,8 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
         if (!isSubscribed) return;
 
         setJob(updated);
-        if (onJobUpdated) onJobUpdated(updated);
+        // Use the ref so we never need onJobUpdated in the dependency array
+        if (onJobUpdatedRef.current) onJobUpdatedRef.current(updated);
 
         // Append log line if stage changes or new progress
         const totalTarget = (updated.total_rows && updated.total_rows > 0) ? updated.total_rows : (updated.successful_rows || 0);
@@ -51,7 +77,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           return [...prev.slice(-49), logMsg];
         });
 
-        // STOP POLLING IMMEDIATELY WHEN JOB COMPLETS OR FAILS
+        // STOP POLLING IMMEDIATELY WHEN JOB COMPLETES OR FAILS
         const updatedStatus = (updated.status || '').toLowerCase();
         if (updatedStatus === 'completed' || updatedStatus === 'failed' || updatedStatus === 'cancelled') {
           if (intervalId) clearInterval(intervalId);
@@ -76,13 +102,54 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
       isSubscribed = false;
       if (intervalId) clearInterval(intervalId);
     };
-  }, [job.id, job.status, onJobUpdated]);
+  // NOTE: onJobUpdated intentionally omitted — stored in a ref above to prevent
+  // the interval from restarting when the parent passes a new function reference.
+  }, [job.id, job.status]);
+
+  // Handle Retry Execution Job
+  const handleRetryJob = async () => {
+    if (isRetrying || !job.migration_plan_id) return;
+    setIsRetrying(true);
+    try {
+      const newJob = await executionService.startPlanExecution(job.migration_plan_id);
+      setJob(newJob);
+      setLogs([`[${new Date().toLocaleTimeString()}] Re-triggered migration job run: ${newJob.id}`]);
+      toast.success('Migration job retried! New run queued for Docker Agent.');
+      if (onJobUpdated) onJobUpdated(newJob);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to retry job.';
+      if (err?.response?.status === 503) {
+        toast.error(`Agent Offline Warning: ${detail}`, { duration: 8000 });
+      } else {
+        toast.error(`Retry Error: ${detail}`);
+      }
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  // Handle AI Error Diagnosis Request
+  const handleTriggerDiagnosis = async () => {
+    if (isDiagnosing || !job.id) return;
+    setIsDiagnosing(true);
+    try {
+      const updated = await executionService.diagnoseJobFailure(job.id);
+      setJob(updated);
+      toast.success('AI Failure Diagnosis completed!');
+      if (onJobUpdated) onJobUpdated(updated);
+    } catch (err: any) {
+      toast.error(`Diagnosis Error: ${err.message || 'Failed to diagnose job.'}`);
+    } finally {
+      setIsDiagnosing(false);
+    }
+  };
 
   const progressPercent = Math.min(100, Math.max(0, Math.round(job.progress || 0)));
   const totalRows = job.total_rows || 0;
   const succRows = job.successful_rows || 0;
   const failRows = job.failed_rows || 0;
   const procRows = job.processed_rows || 0;
+  const diagnosis = job.ai_diagnosis;
 
   // Pipeline Stepper configuration
   const stages = [
@@ -126,6 +193,28 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
             >
               STATUS: {status.toUpperCase()}
             </span>
+
+            {/* Run Selector Dropdown */}
+            {jobHistory.length > 1 && (
+              <select
+                value={job.id}
+                onChange={async (e) => {
+                  const selectedId = e.target.value;
+                  const selectedJob = jobHistory.find((j) => j.id === selectedId);
+                  if (selectedJob) {
+                    setJob(selectedJob);
+                    if (onJobUpdated) onJobUpdated(selectedJob);
+                  }
+                }}
+                className="px-2 py-0.5 bg-zinc-900 border border-zinc-700 text-sky-400 text-[10px] font-bold uppercase rounded-none focus:outline-none"
+              >
+                {jobHistory.map((hJob: ExecutionJobResponse, idx: number) => (
+                  <option key={hJob.id} value={hJob.id}>
+                    Run #{jobHistory.length - idx} ({hJob.status.toUpperCase()} - {Math.round(hJob.progress)}%)
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
           <h3 className="text-2xl font-extrabold text-white uppercase font-sans tracking-tight">
             Live Target Database Insertion Stream
@@ -135,7 +224,27 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Retry Button */}
+          {(isFailed || isCompleted) && (
+            <button
+              type="button"
+              onClick={handleRetryJob}
+              disabled={isRetrying}
+              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono"
+            >
+              {isRetrying ? 'Queuing Retry...' : '⚡ RETRY MIGRATION JOB'}
+            </button>
+          )}
+
+          {/* Full Monitor Link */}
+          <Link
+            href={`/execution?jobId=${job.id}`}
+            className="py-2.5 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-bold uppercase tracking-wider border border-sky-400/40 transition-colors font-mono"
+          >
+            [ 🖥️ OPEN LIVE MONITOR ]
+          </Link>
+
           <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-right font-mono">
             <div className="text-[10px] text-zinc-500 uppercase font-bold">INSERTION PROGRESS</div>
             <div className="text-xl font-bold text-sky-400">{progressPercent}%</div>
@@ -235,6 +344,86 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
         </div>
       </div>
 
+      {/* AI Error Diagnosis & Remediation Card (Failed State) */}
+      {isFailed && (
+        <div className="p-5 rounded-none bg-rose-950/30 border border-rose-500/50 space-y-4 text-xs font-mono shadow-[0_0_25px_rgba(244,63,94,0.15)]">
+          <div className="flex items-center justify-between border-b border-rose-500/30 pb-3 font-sans">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 bg-rose-500 animate-ping rounded-none" />
+              <h4 className="text-sm font-extrabold text-rose-300 uppercase tracking-wider">
+                🤖 AI Execution Failure Diagnosis & Self-Healing Guide
+              </h4>
+            </div>
+            {diagnosis?.root_cause_category && (
+              <span className="px-2.5 py-0.5 text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                {diagnosis.root_cause_category}
+              </span>
+            )}
+          </div>
+
+          {/* Diagnosis Plain English Summary */}
+          {diagnosis?.summary ? (
+            <div className="text-zinc-200 text-xs font-sans leading-relaxed">
+              <strong className="text-rose-400 uppercase font-mono mr-2 font-bold">Explanation:</strong>
+              {diagnosis.summary}
+            </div>
+          ) : (
+            <div className="text-rose-400 text-xs leading-relaxed font-sans">
+              <strong className="uppercase font-mono mr-2 font-bold">Raw Error Trace:</strong>
+              {job.error_message || 'Execution error encountered during ETL streaming.'}
+            </div>
+          )}
+
+          {/* Remediation Steps */}
+          {diagnosis?.fix_steps && diagnosis.fix_steps.length > 0 && (
+            <div className="space-y-1.5 p-3 bg-black/60 border border-rose-500/30">
+              <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider block">
+                🛠️ Step-by-Step Remediation Actions:
+              </span>
+              <ul className="list-disc list-inside text-zinc-300 text-[11px] space-y-1">
+                {diagnosis.fix_steps.map((step: string, sIdx: number) => (
+                  <li key={sIdx}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Copyable Fix Command (With Password Placeholders) */}
+          {diagnosis?.copyable_fix_command && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-amber-400 uppercase">
+                <span>📋 Copyable Container Fix Command (Password Placeholders Retained):</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(diagnosis.copyable_fix_command || '');
+                    toast.success('Remediation command copied to clipboard!');
+                  }}
+                  className="px-2 py-0.5 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 border border-amber-400/30 uppercase text-[9px] font-bold"
+                >
+                  Copy Command
+                </button>
+              </div>
+              <pre className="p-3 bg-zinc-950 border border-zinc-800 text-amber-300/90 text-[11px] font-mono whitespace-pre-wrap overflow-x-auto">
+                {diagnosis.copyable_fix_command}
+              </pre>
+            </div>
+          )}
+
+          {/* Trigger Diagnosis Manual Button if missing */}
+          {!diagnosis && (
+            <button
+              type="button"
+              onClick={handleTriggerDiagnosis}
+              disabled={isDiagnosing}
+              className="py-2 px-4 bg-rose-500 hover:bg-rose-400 text-black text-xs font-bold uppercase tracking-wider border border-rose-500 font-mono transition-colors"
+            >
+              {isDiagnosing ? 'Analyzing Error with AI...' : '🤖 Synthesize AI Diagnosis'}
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Live Agent Terminal Log Output */}
       <div className="space-y-2">
         <div className="flex items-center justify-between text-xs text-zinc-400 font-bold uppercase">
@@ -246,7 +435,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           {logs.length === 0 ? (
             <div className="text-zinc-600 italic">Waiting for initial log events from Docker Agent...</div>
           ) : (
-            logs.map((log, lIdx) => (
+            logs.map((log: string, lIdx: number) => (
               <div key={lIdx} className="text-sky-300/90 hover:text-white transition-colors text-[11px]">
                 {log}
               </div>
@@ -254,14 +443,6 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           )}
         </div>
       </div>
-
-      {/* Execution Error Banner */}
-      {isFailed && job.error_message && (
-        <div className="p-4 rounded-none bg-rose-500/10 border border-rose-500/40 text-rose-400 text-xs font-mono space-y-1">
-          <div className="font-bold uppercase text-rose-300">🚨 Target Insertion Exception Failure</div>
-          <p className="whitespace-pre-wrap">{job.error_message}</p>
-        </div>
-      )}
     </div>
   );
 };

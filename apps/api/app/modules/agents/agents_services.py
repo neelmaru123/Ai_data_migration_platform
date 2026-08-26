@@ -341,6 +341,7 @@ class AgentService:
             .options(selectinload(Agent.data_sources))
         )
         res_stale = await session.execute(stmt_stale)
+    
         stale_agents = list(res_stale.scalars().all())
 
         stale_agent_count = len(stale_agents)

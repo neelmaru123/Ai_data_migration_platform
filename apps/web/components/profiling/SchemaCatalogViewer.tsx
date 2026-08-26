@@ -104,9 +104,12 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
     item.schemaName.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const validHealthyStatuses = ['healthy', 'profiled', 'active', 'connected', 'ok'];
+
   const activeSourceHasError =
+    !snapshot &&
     activeSource &&
-    ((activeSource.status && activeSource.status !== 'healthy') ||
+    ((activeSource.status && !validHealthyStatuses.includes(activeSource.status.toLowerCase())) ||
       (activeSource.last_error && activeSource.last_error.length > 0));
 
   const isPlaceholderError =
@@ -120,7 +123,11 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
         {sortedDataSources.map((ds) => {
           const isSelected = activeSourceId === ds.id;
           const isTarget = ds.role === 'target';
-          const hasError = (ds.status && ds.status !== 'healthy') || (ds.last_error && ds.last_error.length > 0);
+          const explicitErrorStatuses = ['failed', 'unreachable', 'error', 'invalid'];
+          const hasError =
+            ds.status &&
+            explicitErrorStatuses.includes(ds.status.toLowerCase()) &&
+            Boolean(ds.last_error && ds.last_error.trim().length > 0);
 
           return (
             <button

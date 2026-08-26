@@ -4,6 +4,15 @@
 
 export type ExecutionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | string;
 
+export interface AIDiagnosisPayload {
+  summary: string;
+  root_cause_category: string;
+  is_user_environment_issue: boolean;
+  fix_steps: string[];
+  copyable_fix_command?: string;
+  raw_error_snippet?: string;
+}
+
 export interface ExecutionJobResponse {
   id: string;
   migration_plan_id: string;
@@ -20,6 +29,7 @@ export interface ExecutionJobResponse {
   started_at?: string | null;
   completed_at?: string | null;
   error_message?: string | null;
+  ai_diagnosis?: AIDiagnosisPayload | null;
   created_at: string;
   updated_at: string;
 }

@@ -710,3 +710,33 @@ Resolved all Low Priority edge cases (EC-20 through EC-30) across API backend, a
 
 ### 4. Trade-offs & Future Considerations
 - Introspection truncation logs an informational notice to alert developers when databases exceed 500 tables, with options to specify targeted schema filters if required.
+
+---
+
+## [2026-08-25] - AI Execution Error Diagnosis & Self-Healing UI Architecture
+
+### 1. Decision Summary
+Implemented an **AI-Powered Execution Error Diagnosis & Self-Healing UI System** across backend control plane (FastAPI), Docker agent runtime, and Web frontend (Next.js):
+1. **Background AI Error Diagnosis (`execution_services.py`)**: Spawns an asynchronous background task (`asyncio.create_task(_run_diagnosis_background)`) with an independent database session (`AsyncSessionLocal()`) whenever an execution job reaches `status = "failed"`.
+2. **Deterministic & Heuristic LLM Synthesizer**: Analyzes raw error tracebacks, execution stage, and target table metadata. Applies precise network error pattern matching (`_NETWORK_PATTERNS` + port regex `r':(5\d{3}|27017|3306|5432|3307)\b'`) and outputs plain-English summaries, root cause categories, bulleted remediation steps, and copyable terminal commands.
+3. **Password Masking & Credential Security**: Automatically strips plain-text passwords and formats copyable `docker run` commands with standard secure placeholders (`<SRC_SRC_DB_1_PASSWORD>`, `<DEST_DST_DB_1_PASSWORD>`).
+4. **Atomic Concurrency Protection**: Used `with_for_update(skip_locked=True)` and checked `ai_diagnosis IS NULL` to prevent double-writes and race conditions on duplicate failure reports.
+5. **Interactive UI Remediation Banner (`JobExecutionBanner.tsx`)**: Displays the AI failure diagnosis card, 1-click copy button for fix commands, an execution run history selector (`Run #1`, `Run #2`), a `⚡ RETRY MIGRATION JOB` button, and direct monitor navigation link.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Non-technical developers and DBAs struggled to interpret raw Python database tracebacks (`NotNullViolation`, `ConnectionRefusedError`, `NoSuchModuleError`) when local container migrations failed midway, leading to execution freezes and confusion.
+- **Chosen Solution**: Direct FastAPI service handler with background LLM synthesis + interactive Next.js self-healing UI banner.
+- **Why Direct Backend Service Over LangGraph Node for Runtime Failures**:
+  - Direct FastAPI service calls respond in <1s with zero graph state serialization overhead.
+  - Runtime errors are event-driven HTTP dispatches from an external container; a stateless backend service integrated with the existing 2s UI polling tick provides instant feedback.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Running Error Diagnosis inside a LangGraph Node**:
+  - *Rejected*: Adds unnecessary state graph serialization latency for simple container runtime errors (e.g. port mismatch). Direct service is faster and cleaner for runtime job failures.
+- **Alternative B: Exposing Raw DB Passwords in Generated Terminal Commands**:
+  - *Rejected*: Violates zero-trust security and data privacy guidelines; copyable commands strictly retain password placeholders.
+
+### 4. Trade-offs & Future Considerations
+- Automatic background diagnosis runs on the API server asynchronously without delaying the HTTP progress response returned to the Docker Agent.
+- Future enhancements can introduce automated blueprint AST auto-repair for recoverable schema mismatches.
+

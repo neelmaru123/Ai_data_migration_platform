@@ -13,14 +13,17 @@ export default function ExecutionPage() {
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const fetchExecutions = async () => {
+  const fetchExecutions = async (preserveSelected = false) => {
     try {
       setLoading(true);
       setErrorMsg(null);
       const list = await executionService.listUserExecutions();
       setExecutions(list);
-      if (list && list.length > 0) {
-        setSelectedJob(list[0]);
+      if (!preserveSelected && list && list.length > 0) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const queryJobId = urlParams.get('jobId');
+        const matched = queryJobId ? list.find((j) => j.id === queryJobId) : null;
+        setSelectedJob(matched || list[0]);
       }
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to fetch execution jobs.';
@@ -30,15 +33,25 @@ export default function ExecutionPage() {
     }
   };
 
+  // Handle job progress updates from the banner's own 2s polling loop.
+  // Update the page's metrics and job list in-place WITHOUT re-fetching all jobs
+  // (which would create a new prop object and restart the banner's interval).
+  const handleJobUpdated = (updatedJob: ExecutionJobResponse) => {
+    setSelectedJob(updatedJob);
+    setExecutions((prev) =>
+      prev.map((j) => (j.id === updatedJob.id ? updatedJob : j))
+    );
+    // Only re-fetch the full job list when a job reaches a terminal state
+    // so that aggregate metrics (total rows, completed count) stay accurate.
+    const terminalStatus = ['completed', 'failed', 'cancelled'];
+    if (terminalStatus.includes((updatedJob.status || '').toLowerCase())) {
+      fetchExecutions(true);
+    }
+  };
+
+  // Fetch job list ONCE on mount — banner handles its own live 2s polling.
   useEffect(() => {
     fetchExecutions();
-
-    // Auto-poll job history every 3 seconds for live progress metrics (EC-11)
-    const interval = setInterval(() => {
-      fetchExecutions();
-    }, 3000);
-
-    return () => clearInterval(interval);
   }, []);
 
   const totalMigratedRows = executions.reduce((acc, job) => acc + (job.successful_rows || 0), 0);
@@ -77,7 +90,7 @@ export default function ExecutionPage() {
 
           <button
             type="button"
-            onClick={fetchExecutions}
+            onClick={() => fetchExecutions()}
             className="py-3 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/30 transition-colors shadow-lg flex items-center gap-2"
           >
             <RefreshCw className="w-3.5 h-3.5" />
@@ -119,7 +132,10 @@ export default function ExecutionPage() {
               <span className="w-2 h-2 rounded-none bg-sky-400 inline-block animate-pulse" />
               Active Job Live Progression: {selectedJob.id}
             </div>
-            <JobExecutionBanner job={selectedJob} />
+            <JobExecutionBanner
+              job={selectedJob}
+              onJobUpdated={handleJobUpdated}
+            />
           </div>
         )}
 

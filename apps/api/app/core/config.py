@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_RETRIES: int = 2
 
+    # LangSmith AI Observability & Error Tracing
+    LANGCHAIN_TRACING_V2: str = "false"
+    LANGCHAIN_API_KEY: str = ""
+    LANGCHAIN_PROJECT: str = "ai-data-migration-platform"
+
     MAX_CLOUD_ROWS: int = 500_000
     MAX_CLOUD_SIZE_MB: float = 100.0
 

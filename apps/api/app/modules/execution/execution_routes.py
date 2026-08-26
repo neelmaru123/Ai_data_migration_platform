@@ -102,6 +102,36 @@ async def poll_agent_tasks(
     ]
 
 
+@execution_router.get(
+    "/plans/{plan_id}/jobs",
+    response_model=List[ExecutionJobResponse],
+    summary="List all execution jobs for a specific migration plan",
+)
+async def list_plan_jobs(
+    plan_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Returns historical execution runs for a migration plan ordered newest first."""
+    return await ExecutionService.list_jobs_for_plan(
+        session=session, plan_id=plan_id, user_id=current_user.id
+    )
+
+
+@execution_router.post(
+    "/executions/{id}/diagnose",
+    response_model=ExecutionJobResponse,
+    summary="Synthesize AI failure diagnosis for an execution job",
+)
+async def diagnose_execution_failure(
+    id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Triggers AI failure analysis and synthesizes plain English remediation steps."""
+    return await ExecutionService.diagnose_job_failure(session=session, job_id=id)
+
+
 @execution_router.post(
     "/executions/{id}/progress",
     response_model=ExecutionJobResponse,

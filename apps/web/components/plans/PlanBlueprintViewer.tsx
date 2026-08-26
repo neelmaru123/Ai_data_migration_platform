@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useState, useRef } from 'react';
-import { PlanDetailResponse, ColumnMappingSpec, TransformationPlanAST } from '../../types/migrationPlan';
+import React, { useState, useRef, useCallback } from 'react';
+import { PlanDetailResponse, ColumnMappingSpec, TransformationPlanAST, TableTransformationType, ConflictResolutionSpec } from '../../types/migrationPlan';
 import { ExecutionJobResponse } from '../../types/execution';
 import planService from '../../services/planService';
 import executionService from '../../services/executionService';
@@ -184,15 +184,29 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     }
   };
 
-  // Check if an active execution job exists for this plan on mount
+  // Stable callback — memoized so it never creates a new function reference on
+  // re-renders, which would restart the banner's 2s polling interval useEffect.
+  const handleActiveJobUpdated = useCallback((updated: ExecutionJobResponse) => {
+    setActiveJob(updated);
+  }, []);
+
+  // On mount: find either an active execution job OR the most recent failed/completed
+  // job for this plan so the banner (with AI diagnosis) shows immediately on page load.
   React.useEffect(() => {
     executionService
-      .listUserExecutions()
+      .listPlanJobs(initialPlan.id)
       .then((jobs) => {
+        if (!jobs || jobs.length === 0) return;
         const active = jobs.find(
-          (j) => j.migration_plan_id === initialPlan.id && ['queued', 'preparing', 'running'].includes(j.status)
+          (j) => ['queued', 'preparing', 'running'].includes(j.status)
         );
-        if (active) setActiveJob(active);
+        // jobs are ordered newest first from the API
+        if (active) {
+          setActiveJob(active);
+        } else {
+          // Show most recent completed/failed job so diagnosis card is visible
+          setActiveJob(jobs[0]);
+        }
       })
       .catch(() => {});
   }, [initialPlan.id]);
@@ -232,6 +246,8 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             if (match) setActiveJob(match);
           })
           .catch(() => {});
+      } else if (err.response?.status === 503) {
+        toast.error(`Agent Offline Warning: ${msg}`, { duration: 8000 });
       } else {
         toast.error(`Execution Error: ${msg}`);
         scrollToDiagnostics();
@@ -449,11 +465,11 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
         </div>
       )}
 
-      {/* Live Agent Execution Progress Banner (if active) */}
+      {/* Live Agent Execution Progress Banner (if active or recently run) */}
       {activeJob && (
         <JobExecutionBanner
           job={activeJob}
-          onJobUpdated={(updated) => setActiveJob(updated)}
+          onJobUpdated={handleActiveJobUpdated}
         />
       )}
 
@@ -543,7 +559,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                             onChange={(e) => {
                               const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
                               if (updated.table_mappings[tmIdx]) {
-                                updated.table_mappings[tmIdx].transformation_type = e.target.value;
+                                updated.table_mappings[tmIdx].transformation_type = e.target.value as TableTransformationType;
                               }
                               setEditableAst(updated);
                             }}
@@ -604,7 +620,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                                     const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
                                     if (updated.table_mappings[tmIdx]) {
                                       if (!updated.table_mappings[tmIdx].conflict_resolution) {
-                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v5' };
+                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v4_rekey' };
                                       }
                                       updated.table_mappings[tmIdx].conflict_resolution!.deduplication_key = e.target.value;
                                     }
@@ -622,16 +638,16 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                                     const updated = JSON.parse(JSON.stringify(editableAst)) as TransformationPlanAST;
                                     if (updated.table_mappings[tmIdx]) {
                                       if (!updated.table_mappings[tmIdx].conflict_resolution) {
-                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v5' };
+                                        updated.table_mappings[tmIdx].conflict_resolution = { deduplication_key: '', primary_key_strategy: 'uuid_v4_rekey' };
                                       }
-                                      updated.table_mappings[tmIdx].conflict_resolution!.primary_key_strategy = e.target.value;
+                                      updated.table_mappings[tmIdx].conflict_resolution!.primary_key_strategy = e.target.value as ConflictResolutionSpec['primary_key_strategy'];
                                     }
                                     setEditableAst(updated);
                                   }}
                                   className="px-2 py-0.5 bg-zinc-900 border border-sky-400 text-sky-400 font-mono text-xs uppercase"
                                 >
-                                  <option value="uuid_v5">uuid_v5</option>
                                   <option value="uuid_v4_rekey">uuid_v4_rekey</option>
+                                  <option value="prefix_id">prefix_id</option>
                                   <option value="autoincrement_offset">autoincrement_offset</option>
                                   <option value="keep_original">keep_original</option>
                                 </select>

@@ -7,7 +7,7 @@ import os
 from typing import Any, Optional, Tuple
 import polars as pl
 from sqlalchemy import text
-import execution_engine
+from ..db import _get_engine, _quote_identifier
 
 logger = logging.getLogger("docker-agent-execution")
 
@@ -38,28 +38,34 @@ class SourceConnectorFactory:
                 f"Supported dialects: postgresql, mysql, sqlite, mongodb, csv, excel."
             )
 
-        quoted_table = execution_engine._quote_identifier(table_or_file_name, engine_type)
+        quoted_table = _quote_identifier(table_or_file_name, engine_type)
 
         # 1. SQL Relational Databases (PostgreSQL, MySQL, SQLite)
         if engine_type in ["postgresql", "postgres", "mysql", "mariadb", "sqlite"]:
             try:
-                engine = execution_engine._get_engine(db_url)
+                engine = _get_engine(db_url)
                 if not pk_col and offset == 0:
                     logger.warning(
                         f"Source table '{table_or_file_name}' does not specify a primary key column. "
                         f"Falling back to OFFSET pagination which may suffer from offset drift if source table undergoes concurrent writes."
                     )
                 if pk_col and last_pk_val is not None:
-                    quoted_pk = execution_engine._quote_identifier(pk_col, engine_type)
+                    quoted_pk = _quote_identifier(pk_col, engine_type)
                     query = f"SELECT * FROM {quoted_table} WHERE {quoted_pk} > :last_pk ORDER BY {quoted_pk} ASC LIMIT {chunk_size}"
                     with engine.connect() as conn:
-                        df = pl.read_database(query=text(query), connection=conn, params={"last_pk": last_pk_val})
+                        try:
+                            df = pl.read_database(query=text(query), connection=conn.connection, params={"last_pk": last_pk_val})
+                        except Exception:
+                            df = pl.read_database(query=text(query), connection=conn)
                 else:
-                    quoted_pk = execution_engine._quote_identifier(pk_col, engine_type) if pk_col else None
+                    quoted_pk = _quote_identifier(pk_col, engine_type) if pk_col else None
                     order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
                     query = f"SELECT * FROM {quoted_table}{order_by_clause} LIMIT {chunk_size} OFFSET {offset}"
                     with engine.connect() as conn:
-                        df = pl.read_database(query=text(query), connection=conn)
+                        try:
+                            df = pl.read_database(query=text(query), connection=conn.connection)
+                        except Exception:
+                            df = pl.read_database(query=text(query), connection=conn)
 
                 has_more = len(df) == chunk_size
                 next_pk = None

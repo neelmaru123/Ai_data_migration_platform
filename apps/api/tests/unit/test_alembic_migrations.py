@@ -22,13 +22,14 @@ def test_alembic_migration_chain_is_linear_and_valid():
     # 1. Verify single head
     heads = script.get_heads()
     assert len(heads) == 1, f"Expected exactly 1 migration head, found {heads}"
-    assert heads[0] == "006_feasibility_and_langgraph"
+    assert heads[0] == "007_ai_diagnosis_migration_jobs"
 
     # 2. Verify complete linear chain from head to base
     revisions = list(script.walk_revisions(base="base", head="heads"))
     rev_ids = [r.revision for r in revisions]
 
     expected_order = [
+        "007_ai_diagnosis_migration_jobs",
         "006_feasibility_and_langgraph",
         "005_agent_tokens_and_diagnostics",
         "004_agent_centric_arch",
@@ -40,6 +41,7 @@ def test_alembic_migration_chain_is_linear_and_valid():
 
     # 3. Verify down_revision pointers are exact
     rev_map = {r.revision: r.down_revision for r in revisions}
+    assert rev_map["007_ai_diagnosis_migration_jobs"] == "006_feasibility_and_langgraph"
     assert rev_map["006_feasibility_and_langgraph"] == "005_agent_tokens_and_diagnostics"
     assert rev_map["005_agent_tokens_and_diagnostics"] == "004_agent_centric_arch"
     assert rev_map["004_agent_centric_arch"] == "003_add_google_auth_to_users"

@@ -84,9 +84,6 @@ async def get_agent(
     """
     return agent
 
-
-
-
 @router.put("/{agent_id}", response_model=AgentDetailResponse)
 async def update_agent(
     payload: AgentUpdate,
