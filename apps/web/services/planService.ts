@@ -75,6 +75,30 @@ export const planService = {
     const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/approve`);
     return response.data;
   },
+
+  /**
+   * Fetch all version snapshots for a migration plan
+   */
+  async listPlanVersions(planId: string): Promise<import('../types/migrationPlan').PlanVersionListItem[]> {
+    const response = await apiClient.get<import('../types/migrationPlan').PlanVersionListItem[]>(`/plans/${planId}/versions`);
+    return response.data;
+  },
+
+  /**
+   * Fetch full AST details for a specific version snapshot
+   */
+  async getPlanVersion(planId: string, versionNumber: number): Promise<import('../types/migrationPlan').PlanVersionDetailResponse> {
+    const response = await apiClient.get<import('../types/migrationPlan').PlanVersionDetailResponse>(`/plans/${planId}/versions/${versionNumber}`);
+    return response.data;
+  },
+
+  /**
+   * Restore plan AST to a historical version snapshot
+   */
+  async restorePlanVersion(planId: string, versionNumber: number): Promise<PlanDetailResponse> {
+    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/versions/${versionNumber}/restore`);
+    return response.data;
+  },
 };
 
 export default planService;

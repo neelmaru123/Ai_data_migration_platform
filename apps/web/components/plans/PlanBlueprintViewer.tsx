@@ -1,7 +1,15 @@
 'use client';
 
 import React, { useState, useRef, useCallback } from 'react';
-import { PlanDetailResponse, ColumnMappingSpec, TransformationPlanAST, TableTransformationType, ConflictResolutionSpec } from '../../types/migrationPlan';
+import {
+  PlanDetailResponse,
+  ColumnMappingSpec,
+  TransformationPlanAST,
+  TableTransformationType,
+  ConflictResolutionSpec,
+  PlanVersionListItem,
+  PlanVersionDetailResponse,
+} from '../../types/migrationPlan';
 import { ExecutionJobResponse } from '../../types/execution';
 import planService from '../../services/planService';
 import executionService from '../../services/executionService';
@@ -26,11 +34,64 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   const [editableAst, setEditableAst] = useState<TransformationPlanAST>(initialPlan.plan_data);
   const [isSavingEdits, setIsSavingEdits] = useState<boolean>(false);
 
-  // Revert State tracking last known valid AST (EC-07)
-  const [previousValidAst, setPreviousValidAst] = useState<TransformationPlanAST | null>(
-    initialPlan.is_valid ? initialPlan.plan_data : null
-  );
-  const [isReverting, setIsReverting] = useState<boolean>(false);
+  // Version History State
+  const [versions, setVersions] = useState<PlanVersionListItem[]>([]);
+  const [selectedVersionNum, setSelectedVersionNum] = useState<number | null>(null);
+  const [previewVersionDetail, setPreviewVersionDetail] = useState<PlanVersionDetailResponse | null>(null);
+  const [isLoadingVersion, setIsLoadingVersion] = useState<boolean>(false);
+  const [isRestoringVersion, setIsRestoringVersion] = useState<boolean>(false);
+
+  const fetchVersions = useCallback(async () => {
+    try {
+      const list = await planService.listPlanVersions(plan.id);
+      setVersions(list);
+    } catch {
+      // fail silently
+    }
+  }, [plan.id]);
+
+  React.useEffect(() => {
+    fetchVersions();
+  }, [fetchVersions]);
+
+  const handleSelectVersion = async (versionNum: number | null) => {
+    if (versionNum === null || (versions.length > 0 && versionNum === versions[0].version_number)) {
+      setSelectedVersionNum(null);
+      setPreviewVersionDetail(null);
+      return;
+    }
+    setSelectedVersionNum(versionNum);
+    setIsLoadingVersion(true);
+    try {
+      const verDetail = await planService.getPlanVersion(plan.id, versionNum);
+      setPreviewVersionDetail(verDetail);
+    } catch (err: any) {
+      toast.error('Failed to load version details.');
+    } finally {
+      setIsLoadingVersion(false);
+    }
+  };
+
+  const handleRestoreVersion = async (versionNum: number) => {
+    if (isRestoringVersion) return;
+    setIsRestoringVersion(true);
+    try {
+      const updated = await planService.restorePlanVersion(plan.id, versionNum);
+      setPlan(updated);
+      setEditableAst(updated.plan_data);
+      setIsEditing(false);
+      setSelectedVersionNum(null);
+      setPreviewVersionDetail(null);
+      await fetchVersions();
+      toast.success(`Plan successfully restored to version v${versionNum}!`);
+      if (onPlanUpdated) onPlanUpdated(updated);
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || err.message || 'Failed to restore version.';
+      toast.error(`Restore Error: ${msg}`);
+    } finally {
+      setIsRestoringVersion(false);
+    }
+  };
 
   // Agent Execution State
   const [activeJob, setActiveJob] = useState<ExecutionJobResponse | null>(null);
@@ -44,26 +105,13 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     initialPlan.plan_data?.table_mappings?.[0]?.target_table_name || null
   );
 
-  const ast = isEditing ? editableAst : plan.plan_data;
+  const isHistoricalPreview = previewVersionDetail !== null;
+  const ast = isHistoricalPreview
+    ? previewVersionDetail.plan_data
+    : isEditing
+    ? editableAst
+    : plan.plan_data;
   const isApproved = plan.status === 'completed' || plan.status === 'approved';
-
-  // Helper to revert plan to previous valid AST (EC-07)
-  const handleRevertPlan = async () => {
-    if (!previousValidAst || isReverting) return;
-    setIsReverting(true);
-    try {
-      const updated = await planService.updatePlan(plan.id, previousValidAst);
-      setPlan(updated);
-      setEditableAst(updated.plan_data);
-      setIsEditing(false);
-      toast.success('Blueprint successfully reverted to previous valid version!');
-      if (onPlanUpdated) onPlanUpdated(updated);
-    } catch (err: any) {
-      toast.error(`Revert Error: ${err.message || 'Failed to revert plan.'}`);
-    } finally {
-      setIsReverting(false);
-    }
-  };
 
   // Helper to update a target column field in editableAst
   const updateColumnField = (
@@ -97,9 +145,6 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   // Save manual column edits
   const handleSaveEdits = async () => {
     setIsSavingEdits(true);
-    if (plan.is_valid) {
-      setPreviousValidAst(plan.plan_data);
-    }
     try {
       const updated = await planService.updatePlan(plan.id, editableAst);
       setPlan(updated);
@@ -107,12 +152,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setIsEditing(false);
 
       if (updated.is_valid) {
-        setPreviousValidAst(updated.plan_data);
         toast.success('Target mappings updated & re-validated successfully!');
       } else {
         toast.error('Plan edits contain schema feasibility errors! Review diagnostic alert below.');
         scrollToDiagnostics();
       }
+      await fetchVersions();
       if (onPlanUpdated) onPlanUpdated(updated);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to save column edits.';
@@ -143,9 +188,6 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     e.preventDefault();
     if (!refinementPrompt.trim() || isRefining) return;
 
-    if (plan.is_valid) {
-      setPreviousValidAst(plan.plan_data);
-    }
     setIsRefining(true);
     try {
       const updated = await planService.refinePlan(plan.id, refinementPrompt.trim());
@@ -154,12 +196,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       setRefinementPrompt('');
 
       if (updated.is_valid) {
-        setPreviousValidAst(updated.plan_data);
         toast.success('LLM re-reviewed & refined blueprint successfully!');
       } else {
         toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert below.');
         scrollToDiagnostics();
       }
+      await fetchVersions();
       if (onPlanUpdated) onPlanUpdated(updated);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to refine plan.';
@@ -302,9 +344,9 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           </div>
         </div>
 
-        {/* Controls Bar: View Mode Switcher + Edit Toggle */}
+        {/* Controls Bar: View Mode Switcher + Version Selector + Edit Toggle */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-2 border-b border-zinc-900 pb-3">
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
               onClick={() => setViewMode('matrix')}
@@ -327,6 +369,39 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             >
               [ VISUAL PIPELINE DIAGRAM ]
             </button>
+
+            {/* Version Selector Dropdown */}
+            {versions.length > 0 && (
+              <div className="flex items-center gap-2 font-mono ml-0 sm:ml-2">
+                <span className="text-[10px] text-zinc-500 uppercase font-bold">VERSION:</span>
+                <select
+                  value={selectedVersionNum !== null ? selectedVersionNum : (versions[0]?.version_number || '')}
+                  onChange={(e) => {
+                    const val = e.target.value ? parseInt(e.target.value, 10) : null;
+                    handleSelectVersion(val);
+                  }}
+                  disabled={isLoadingVersion || isRestoringVersion || isEditing}
+                  className="bg-zinc-950 border border-zinc-800 text-sky-400 text-xs font-mono font-bold px-3 py-1.5 rounded-none focus:outline-none focus:border-sky-400 transition-colors disabled:opacity-50"
+                >
+                  {versions.map((ver, idx) => {
+                    const isLatest = idx === 0;
+                    const labelType =
+                      ver.edit_type === 'initial_ai_generation'
+                        ? 'Initial AI Plan'
+                        : ver.edit_type === 'llm_refinement'
+                        ? `Prompt: "${ver.user_feedback || 'Refinement'}"`
+                        : ver.edit_type === 'version_restored'
+                        ? ver.user_feedback || 'Restored Version'
+                        : 'Manual Column Edit';
+                    return (
+                      <option key={ver.id} value={ver.version_number}>
+                        v{ver.version_number} {isLatest ? '(Latest)' : ''} - {labelType}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            )}
           </div>
 
           {/* Edit Mode Actions */}
@@ -365,6 +440,42 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             </div>
           )}
         </div>
+
+        {/* Historical Version Preview Banner */}
+        {isHistoricalPreview && previewVersionDetail && (
+          <div className="p-4 bg-amber-950/40 border border-amber-500/50 text-amber-300 font-mono text-xs flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-fadeIn">
+            <div className="flex items-center gap-2.5">
+              <span className="px-2 py-0.5 bg-amber-500 text-black font-bold uppercase text-[10px] tracking-wider">
+                HISTORICAL SNAPSHOT v{previewVersionDetail.version_number} (READ ONLY)
+              </span>
+              <span className="text-zinc-300">
+                Created: <strong className="text-white">{new Date(previewVersionDetail.created_at).toLocaleString()}</strong>
+                {previewVersionDetail.user_feedback && (
+                  <span className="ml-2 text-amber-200 font-sans italic">
+                    — "{previewVersionDetail.user_feedback}"
+                  </span>
+                )}
+              </span>
+            </div>
+            <div className="flex items-center gap-2.5">
+              <button
+                type="button"
+                onClick={() => handleRestoreVersion(previewVersionDetail.version_number)}
+                disabled={isRestoringVersion}
+                className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-black font-bold uppercase text-xs tracking-wider transition-colors disabled:opacity-50"
+              >
+                {isRestoringVersion ? 'RESTORING...' : `RESTORE TO v${previewVersionDetail.version_number}`}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSelectVersion(null)}
+                className="px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 font-bold uppercase text-xs border border-zinc-700 transition-colors"
+              >
+                EXIT PREVIEW
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* AI Explanation Narrative */}
         {ast?.ai_explanation && (
@@ -422,19 +533,27 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                 </ul>
               </div>
             )}
-            {/* Revert Action Button for Invalid Refinements / Edits (EC-07) */}
-            {!plan.is_valid && previousValidAst && (
-              <div className="pt-2">
-                <button
-                  type="button"
-                  onClick={handleRevertPlan}
-                  disabled={isReverting}
-                  className="py-2.5 px-5 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-md flex items-center gap-2"
-                >
-                  <span>{isReverting ? 'Reverting Blueprint...' : '↩ Revert to Previous Valid Blueprint'}</span>
-                </button>
-              </div>
-            )}
+            {/* Revert Action Button for Invalid Refinements / Edits */}
+            {(() => {
+              const lastValidVer = versions.find((v) => v.is_valid);
+              if (plan.is_valid || !lastValidVer) return null;
+              return (
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleRestoreVersion(lastValidVer.version_number)}
+                    disabled={isRestoringVersion}
+                    className="py-2.5 px-5 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-md flex items-center gap-2"
+                  >
+                    <span>
+                      {isRestoringVersion
+                        ? 'Restoring Blueprint...'
+                        : `↩ Revert to Last Valid Version (v${lastValidVer.version_number})`}
+                    </span>
+                  </button>
+                </div>
+              );
+            })()}
           </div>
         )}
       </div>

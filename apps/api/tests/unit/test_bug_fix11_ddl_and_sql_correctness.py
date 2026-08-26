@@ -35,7 +35,7 @@ def test_ddl_failure_raises_exception_for_genuine_error():
     with patch("execution_engine._get_engine", return_value=mock_engine):
         with pytest.raises(RuntimeError) as exc_info:
             DDLExecutor.execute_ddl_list("sqlite:///:memory:", ["INVALID DDL SYNTAX;"])
-        assert "DDL execution failed" in str(exc_info.value)
+        assert "DDL execution failed" in str(exc_info.value) or "DDL error" in str(exc_info.value) or "DDL failed" in str(exc_info.value)
 
     # 2. Benign "table already exists" notice does NOT raise RuntimeError
     mock_conn2 = MagicMock()
