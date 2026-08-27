@@ -251,3 +251,26 @@ class PlanDetailResponse(PlanResponse):
     validation_warnings: Optional[List[str]] = Field(default_factory=list)
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PlanVersionListItem(BaseModel):
+    """Summary response for plan version history list (excludes heavy plan_data payload)."""
+    id: uuid.UUID
+    migration_plan_id: uuid.UUID
+    version_number: int
+    edit_type: str
+    user_feedback: Optional[str] = None
+    is_valid: Optional[bool] = True
+    confidence_score: Optional[float] = 1.0
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PlanVersionDetailResponse(PlanVersionListItem):
+    """Full plan version response including plan_data AST for read-only comparison."""
+    plan_data: Dict[str, Any]
+    validation_errors: Optional[Dict[str, Any]] = None
+
+    model_config = ConfigDict(from_attributes=True)
+

@@ -2,6 +2,7 @@
 FastAPI Router Endpoints for Agents Domain
 """
 
+import asyncio
 import json
 import uuid
 from typing import List, Optional
@@ -83,9 +84,6 @@ async def get_agent(
     """
     return agent
 
-
-
-
 @router.put("/{agent_id}", response_model=AgentDetailResponse)
 async def update_agent(
     payload: AgentUpdate,
@@ -127,15 +125,29 @@ async def agent_websocket_endpoint(
     """
     Authenticated WebSocket endpoint for Web Applications to listen for real-time status changes
     and connection events for a specific agent.
-    Requires user access JWT token passed as query parameter `?token=<jwt>`.
+    Supports JWT token passed as query parameter `?token=<jwt>` OR sent as first auth frame `{ "type": "auth", "token": "<jwt>" }`.
     Verifies agent ownership.
     """
-    if not token:
+    jwt_token = token
+
+    if not jwt_token:
+        # Accept connection first to receive first auth frame (EC-10)
+        await websocket.accept()
+        try:
+            auth_data_str = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+            auth_msg = json.loads(auth_data_str)
+            if auth_msg.get("type") == "auth" and auth_msg.get("token"):
+                jwt_token = auth_msg["token"]
+        except Exception:
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication token missing or auth frame timeout")
+            return
+
+    if not jwt_token:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Authentication token missing")
         return
 
     try:
-        payload = decode_jwt_token(token)
+        payload = decode_jwt_token(jwt_token)
         user_id_str: Optional[str] = payload.get("sub")
         token_type: Optional[str] = payload.get("type")
         if not user_id_str or token_type != "access":
@@ -156,7 +168,16 @@ async def agent_websocket_endpoint(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Forbidden agent access")
         return
 
-    await manager.connect(str(agent_id), websocket)
+    if token:
+        await manager.connect(str(agent_id), websocket)
+    else:
+        # Connection was accepted, register with WebSocket manager
+        if str(agent_id) not in manager.active_connections:
+            manager.active_connections[str(agent_id)] = []
+        if websocket not in manager.active_connections[str(agent_id)]:
+            manager.active_connections[str(agent_id)].append(websocket)
+        await websocket.send_text(json.dumps({"event": "AUTH_SUCCESS", "agent_id": str(agent_id)}))
+
     try:
         while True:
             data = await websocket.receive_text()

@@ -57,6 +57,36 @@ class AgentService:
                 detail=f"You already have an agent with identifier '{data.agent_identifier}'.",
             )
 
+        # 1b. Check for target DB uniqueness across user agents
+        if data.data_sources:
+            dest_identifiers = [
+                ds.identifier.strip().lower()
+                for ds in data.data_sources
+                if ds.role and ds.role.lower().strip() in ("destination", "target", "dest")
+            ]
+            if dest_identifiers:
+                stmt_existing_dest = (
+                    select(DataSource, Agent)
+                    .join(Agent, DataSource.agent_id == Agent.id)
+                    .where(
+                        Agent.user_id == user_id,
+                        DataSource.role.in_(["destination", "target", "dest"]),
+                        DataSource.identifier.in_(dest_identifiers),
+                    )
+                )
+                res_dest = await session.execute(stmt_existing_dest)
+                existing_match = res_dest.first()
+                if existing_match:
+                    existing_ds, existing_agent = existing_match
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=(
+                            f"Target database '{existing_ds.name}' (identifier: '{existing_ds.identifier}') "
+                            f"is already registered and in use by Agent '{existing_agent.name}'. "
+                            f"To prevent data corruption, please specify a unique target database for this new agent."
+                        ),
+                    )
+
         # 2. Generate secure agent API token & SHA-256 hash
         raw_token = f"ag_live_{secrets.token_urlsafe(32)}"
         token_hash = hash_agent_token(raw_token)
@@ -311,13 +341,14 @@ class AgentService:
             .options(selectinload(Agent.data_sources))
         )
         res_stale = await session.execute(stmt_stale)
+    
         stale_agents = list(res_stale.scalars().all())
 
         stale_agent_count = len(stale_agents)
         failed_jobs_count = 0
 
         for agent in stale_agents:
-            # Check if there is an active job updated recently AND agent was seen recently (keeps agent alive during progress reports)
+            # Keep agent online if job is actively reporting progress AND agent was seen recently
             stmt_active_job = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
                 MigrationJob.status.in_(["running", "preparing"]),
@@ -345,10 +376,10 @@ class AgentService:
                 },
             )
 
-            # 2. Check for active/running migration jobs linked to this dead agent
+            # 2. Check for active/running/queued migration jobs linked to this dead agent
             stmt_jobs = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
-                MigrationJob.status.in_(["running", "preparing"]),
+                MigrationJob.status.in_(["queued", "running", "preparing"]),
             )
             res_jobs = await session.execute(stmt_jobs)
             running_jobs = list(res_jobs.scalars().all())

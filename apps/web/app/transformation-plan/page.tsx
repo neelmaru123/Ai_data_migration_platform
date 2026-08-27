@@ -71,17 +71,30 @@ function TransformationPlanContent() {
       {/* Top Background Glow */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-full max-w-7xl h-96 bg-gradient-to-b from-sky-400/15 via-sky-500/5 to-transparent blur-3xl pointer-events-none -z-10" />
 
-      <main className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 flex-1">
+      <main className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 flex-1 font-mono">
         {/* Navigation Breadcrumb */}
         <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
-          <div className="flex items-center gap-3">
-            <a
-              href="/sources"
-              className="text-xs font-mono text-zinc-400 hover:text-sky-400 uppercase transition-colors"
-            >
-              ← Back to Catalog Profiler
+          <div className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
+            <a href="/dashboard" className="text-sky-400 hover:text-sky-300 font-bold">
+              Dashboard
             </a>
+            <span className="text-zinc-600">/</span>
+            <a
+              href={plan?.agent_id ? `/sources?agentId=${plan.agent_id}` : '/sources'}
+              className="text-sky-400 hover:text-sky-300 font-bold"
+            >
+              Agent Schema Catalog
+            </a>
+            <span className="text-zinc-600">/</span>
+            <span className="text-white font-bold">Transformation Blueprint</span>
           </div>
+
+          <a
+            href={plan?.agent_id ? `/sources?agentId=${plan.agent_id}` : '/sources'}
+            className="text-xs font-mono font-bold text-sky-400 hover:text-sky-300 uppercase transition-colors flex items-center gap-1 bg-sky-400/10 px-3 py-1.5 border border-sky-400/30"
+          >
+            ← Back to Agent Catalog
+          </a>
         </div>
 
         {loading ? (
@@ -97,10 +110,10 @@ function TransformationPlanContent() {
             <p className="text-zinc-400 text-xs max-w-md mx-auto">{errorMsg}</p>
             <div>
               <a
-                href="/sources"
+                href={plan ? `/sources?agentId=${plan.agent_id}` : '/dashboard'}
                 className="inline-block py-2.5 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-mono font-bold uppercase border border-zinc-800"
               >
-                Return to Data Sources
+                Return to Agent Catalog
               </a>
             </div>
           </div>
@@ -110,14 +123,14 @@ function TransformationPlanContent() {
               No Migration Plan Found
             </h3>
             <p className="text-zinc-400 text-xs max-w-md mx-auto leading-relaxed">
-              Select an agent from the Data Sources page and click "Generate AI Migration Plan" to construct a blueprint.
+              Select an agent from the Dashboard and click "Inspect Schemas & Migration Plan" to construct a blueprint.
             </p>
             <div className="pt-2">
               <a
-                href="/sources"
+                href="/dashboard"
                 className="inline-block py-3 px-8 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors"
               >
-                Go to Data Sources & Profiling
+                Go to Dashboard
               </a>
             </div>
           </div>

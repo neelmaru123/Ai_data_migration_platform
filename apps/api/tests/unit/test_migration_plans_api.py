@@ -426,7 +426,7 @@ async def test_migration_plan_api_lifecycle_with_mocked_llm():
         # Approve plan for Phase 5 HITL compliance
         res_appr = await client.post(f"/api/v1/plans/{plan_id}/approve")
         assert res_appr.status_code == 200
-        assert res_appr.json()["status"] == "completed"
+        assert res_appr.json()["status"] == "approved"
 
         # 3. GET /api/v1/plans — List plans
         res_list = await client.get("/api/v1/plans")

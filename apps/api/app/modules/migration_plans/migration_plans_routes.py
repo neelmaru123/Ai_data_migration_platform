@@ -17,6 +17,8 @@ from app.modules.migration_plans.migration_plans_schemas import (
     PlanRefineRequest,
     PlanResponse,
     PlanValidationResultResponse,
+    PlanVersionDetailResponse,
+    PlanVersionListItem,
 )
 from app.modules.migration_plans.migration_plans_services import MigrationPlanService
 from app.modules.users.users_dependencies import get_current_active_user, get_current_user
@@ -248,3 +250,77 @@ async def approve_migration_plan(
         )
     approved = await MigrationPlanService.approve_plan(session, plan)
     return _to_plan_detail_response(approved)
+
+
+@router.get("/{plan_id}/versions", response_model=List[PlanVersionListItem])
+async def list_migration_plan_versions(
+    plan_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """List all version snapshots for a migration plan (metadata list only, no plan_data payloads)."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view versions for this migration plan.",
+        )
+    versions = await MigrationPlanService.list_plan_versions(session, plan_id)
+    return versions
+
+
+@router.get("/{plan_id}/versions/{version_number}", response_model=PlanVersionDetailResponse)
+async def get_migration_plan_version(
+    plan_id: uuid.UUID,
+    version_number: int,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Fetch full AST detail of a specific historical version snapshot for read-only preview."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to view versions for this migration plan.",
+        )
+    version = await MigrationPlanService.get_plan_version(session, plan_id, version_number)
+    if not version:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Version {version_number} not found for migration plan '{plan_id}'.",
+        )
+    return version
+
+
+@router.post("/{plan_id}/versions/{version_number}/restore", response_model=PlanDetailResponse)
+async def restore_migration_plan_version(
+    plan_id: uuid.UUID,
+    version_number: int,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Restore active migration plan blueprint AST to a historical version."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to modify this migration plan.",
+        )
+    restored_plan = await MigrationPlanService.restore_plan_version(session, plan, version_number)
+    return _to_plan_detail_response(restored_plan)
+

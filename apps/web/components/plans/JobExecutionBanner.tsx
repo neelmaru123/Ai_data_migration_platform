@@ -1,7 +1,9 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { ExecutionJobResponse } from '../../types/execution';
+import React, { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
+import toast from 'react-hot-toast';
+import { ExecutionJobResponse, AIDiagnosisPayload } from '../../types/execution';
 import executionService from '../../services/executionService';
 
 interface JobExecutionBannerProps {
@@ -14,107 +16,433 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   onJobUpdated,
 }) => {
   const [job, setJob] = useState<ExecutionJobResponse>(initialJob);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [jobHistory, setJobHistory] = useState<ExecutionJobResponse[]>([]);
+  const [isRetrying, setIsRetrying] = useState<boolean>(false);
+  const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const status = job.status.toLowerCase();
-  const isRunning = status === 'running' || status === 'pending';
+  // Store callback in a ref so the polling useEffect never needs it in its
+  // dependency array — eliminates interval restarts caused by parent re-renders.
+  const onJobUpdatedRef = useRef(onJobUpdated);
+  useEffect(() => {
+    onJobUpdatedRef.current = onJobUpdated;
+  });
+
+  const status = (job.status || 'queued').toLowerCase();
+  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing' || status === 'queued';
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';
 
+  // Fetch job history for plan
   useEffect(() => {
-    if (!isRunning) return;
+    let isSubscribed = true;
+    if (job.migration_plan_id) {
+      executionService.listPlanJobs(job.migration_plan_id)
+        .then((history) => {
+          if (isSubscribed) setJobHistory(history);
+        })
+        .catch(() => {});
+    }
+    return () => { isSubscribed = false; };
+  }, [job.migration_plan_id, job.id, job.status]);
 
-    const interval = setInterval(async () => {
+  // Smooth scroll into view when initialized/approved
+  useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, []);
+
+  // Poll job status every 2.0 seconds ONLY while job is active
+  useEffect(() => {
+    let isSubscribed = true;
+    let intervalId: NodeJS.Timeout | null = null;
+
+    const fetchStatus = async () => {
       try {
         const updated = await executionService.getExecutionDetails(job.id);
+        if (!isSubscribed) return;
+
         setJob(updated);
-        if (onJobUpdated) onJobUpdated(updated);
+        // Use the ref so we never need onJobUpdated in the dependency array
+        if (onJobUpdatedRef.current) onJobUpdatedRef.current(updated);
 
-        if (updated.status === 'completed' || updated.status === 'failed') {
-          clearInterval(interval);
+        // Append log line if stage changes or new progress
+        const totalTarget = (updated.total_rows && updated.total_rows > 0) ? updated.total_rows : (updated.successful_rows || 0);
+        const logMsg = `[${new Date().toLocaleTimeString()}] Stage: ${updated.current_stage || 'processing'} | Table: ${updated.current_table || 'N/A'} | Inserted: ${updated.successful_rows || 0} / ${totalTarget} rows (${Math.round(updated.progress || 0)}%)`;
+
+        setLogs((prev) => {
+          if (prev.length > 0 && prev[prev.length - 1] === logMsg) return prev;
+          return [...prev.slice(-49), logMsg];
+        });
+
+        // STOP POLLING IMMEDIATELY WHEN JOB COMPLETES OR FAILS
+        const updatedStatus = (updated.status || '').toLowerCase();
+        if (updatedStatus === 'completed' || updatedStatus === 'failed' || updatedStatus === 'cancelled') {
+          if (intervalId) clearInterval(intervalId);
         }
+
       } catch {
-        // Polling catch
+        // Polling retry
       }
-    }, 2000);
+    };
 
-    return () => clearInterval(interval);
-  }, [job.id, isRunning, onJobUpdated]);
+    const currentStatus = (job.status || '').toLowerCase();
+    const isJobActive = currentStatus === 'running' || currentStatus === 'pending' || currentStatus === 'ddl_executing' || currentStatus === 'preparing' || currentStatus === 'queued';
 
-  const progressPercent = Math.min(100, Math.max(0, job.progress_percent || 0));
+    if (!isJobActive) {
+      return;
+    }
+
+    fetchStatus();
+    intervalId = setInterval(fetchStatus, 2000);
+
+    return () => {
+      isSubscribed = false;
+      if (intervalId) clearInterval(intervalId);
+    };
+  // NOTE: onJobUpdated intentionally omitted — stored in a ref above to prevent
+  // the interval from restarting when the parent passes a new function reference.
+  }, [job.id, job.status]);
+
+  // Handle Retry Execution Job
+  const handleRetryJob = async () => {
+    if (isRetrying || !job.migration_plan_id) return;
+    setIsRetrying(true);
+    try {
+      const newJob = await executionService.startPlanExecution(job.migration_plan_id);
+      setJob(newJob);
+      setLogs([`[${new Date().toLocaleTimeString()}] Re-triggered migration job run: ${newJob.id}`]);
+      toast.success('Migration job retried! New run queued for Docker Agent.');
+      if (onJobUpdated) onJobUpdated(newJob);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to retry job.';
+      if (err?.response?.status === 503) {
+        toast.error(`Agent Offline Warning: ${detail}`, { duration: 8000 });
+      } else {
+        toast.error(`Retry Error: ${detail}`);
+      }
+    } finally {
+      setIsRetrying(false);
+    }
+  };
+
+  // Handle AI Error Diagnosis Request
+  const handleTriggerDiagnosis = async () => {
+    if (isDiagnosing || !job.id) return;
+    setIsDiagnosing(true);
+    try {
+      const updated = await executionService.diagnoseJobFailure(job.id);
+      setJob(updated);
+      toast.success('AI Failure Diagnosis completed!');
+      if (onJobUpdated) onJobUpdated(updated);
+    } catch (err: any) {
+      toast.error(`Diagnosis Error: ${err.message || 'Failed to diagnose job.'}`);
+    } finally {
+      setIsDiagnosing(false);
+    }
+  };
+
+  const progressPercent = Math.min(100, Math.max(0, Math.round(job.progress || 0)));
+  const totalRows = job.total_rows || 0;
+  const succRows = job.successful_rows || 0;
+  const failRows = job.failed_rows || 0;
+  const procRows = job.processed_rows || 0;
+  const diagnosis = job.ai_diagnosis;
+
+  // Pipeline Stepper configuration
+  const stages = [
+    { key: 'pre_ddl', label: '1. PRE-MIGRATION DDL', desc: 'Target Table Schema Creation' },
+    { key: 'data_streaming', label: '2. TARGET DATA INSERTION', desc: 'Chunked ETL Vector Stream' },
+    { key: 'post_ddl', label: '3. POST-MIGRATION DDL', desc: 'Foreign Keys & Constraints' },
+    { key: 'completed', label: '4. VERIFICATION & SYNC', desc: 'Target Integrity Check' },
+  ];
+
+  const getCurrentStepIndex = () => {
+    if (isCompleted) return 3;
+    if (isFailed) return -1;
+    const stage = (job.current_stage || '').toLowerCase();
+    if (stage.includes('pre_ddl')) return 0;
+    if (stage.includes('streaming') || stage.includes('data')) return 1;
+    if (stage.includes('post_ddl')) return 2;
+    return 1;
+  };
+
+  const currentStep = getCurrentStepIndex();
 
   return (
-    <div className="p-6 rounded-none bg-black border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_25px_rgba(56,189,248,0.15)] font-mono animate-fadeIn">
-      {/* Header & Status Pill */}
+    <div
+      ref={containerRef}
+      className="p-6 sm:p-8 rounded-none bg-black border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_35px_rgba(56,189,248,0.15)] font-mono animate-fadeIn"
+    >
+      {/* Top Banner Header & Status Badges */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-4">
         <div>
-          <div className="flex items-center gap-2 mb-1">
+          <div className="flex flex-wrap items-center gap-2 mb-2">
             <span className="text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase bg-sky-400/10 text-sky-400 border border-sky-400/30">
-              AGENT EXECUTION DAEMON
+              TARGET DB INSERTION DAEMON
             </span>
             <span
-              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${
-                isCompleted
-                  ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40'
+              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${isCompleted
+                  ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
                   : isFailed
-                  ? 'bg-rose-500/15 text-rose-400 border-rose-500/40'
-                  : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
-              }`}
+                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                    : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
+                }`}
             >
               STATUS: {status.toUpperCase()}
             </span>
+
+            {/* Run Selector Dropdown */}
+            {jobHistory.length > 1 && (
+              <select
+                value={job.id}
+                onChange={async (e) => {
+                  const selectedId = e.target.value;
+                  const selectedJob = jobHistory.find((j) => j.id === selectedId);
+                  if (selectedJob) {
+                    setJob(selectedJob);
+                    if (onJobUpdated) onJobUpdated(selectedJob);
+                  }
+                }}
+                className="px-2 py-0.5 bg-zinc-900 border border-zinc-700 text-sky-400 text-[10px] font-bold uppercase rounded-none focus:outline-none"
+              >
+                {jobHistory.map((hJob: ExecutionJobResponse, idx: number) => (
+                  <option key={hJob.id} value={hJob.id}>
+                    Run #{jobHistory.length - idx} ({hJob.status.toUpperCase()} - {Math.round(hJob.progress)}%)
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
-          <h3 className="text-xl font-extrabold text-white uppercase font-sans tracking-wide">
-            Live Data Migration Job # {job.id.slice(0, 8)}
+          <h3 className="text-2xl font-extrabold text-white uppercase font-sans tracking-tight">
+            Live Target Database Insertion Stream
           </h3>
+          <p className="text-xs text-zinc-400 font-mono mt-0.5">
+            Job ID: <span className="text-sky-400">{job.id}</span>
+          </p>
         </div>
 
-        <div className="flex items-center gap-6 text-xs text-zinc-400">
-          <div>
-            Tables Completed: <strong className="text-white">{job.tables_completed || 0} / {job.total_tables || 0}</strong>
-          </div>
-          <div>
-            Rows Migrated: <strong className="text-sky-400">{(job.rows_migrated || 0).toLocaleString()}</strong>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Retry Button */}
+          {(isFailed || isCompleted) && (
+            <button
+              type="button"
+              onClick={handleRetryJob}
+              disabled={isRetrying}
+              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono"
+            >
+              {isRetrying ? 'Queuing Retry...' : '⚡ RETRY MIGRATION JOB'}
+            </button>
+          )}
+
+          {/* Full Monitor Link */}
+          <Link
+            href={`/execution?jobId=${job.id}`}
+            className="py-2.5 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-bold uppercase tracking-wider border border-sky-400/40 transition-colors font-mono"
+          >
+            [ 🖥️ OPEN LIVE MONITOR ]
+          </Link>
+
+          <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-right font-mono">
+            <div className="text-[10px] text-zinc-500 uppercase font-bold">INSERTION PROGRESS</div>
+            <div className="text-xl font-bold text-sky-400">{progressPercent}%</div>
           </div>
         </div>
       </div>
 
-      {/* Animated Progress Bar */}
+      {/* Main Animated Progress Bar */}
       <div className="space-y-2">
-        <div className="flex items-center justify-between text-xs font-bold">
-          <span className="text-zinc-300 uppercase">
-            {job.current_stage || (isRunning ? 'Processing Agent Pipeline...' : 'Job Completed')}
+        <div className="flex items-center justify-between text-xs font-bold font-mono">
+          <span className="text-zinc-300 uppercase flex items-center gap-2">
+            <span
+              className={`w-2 h-2 rounded-none ${isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400 animate-ping'
+                }`}
+            />
+            {isCompleted
+              ? '✓ Target Database Insertion Completed'
+              : isFailed
+                ? '🚨 Target Insertion Failed'
+                : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
           </span>
-          <span className="text-sky-400">{progressPercent}%</span>
+          <span className="text-sky-400 font-extrabold">{progressPercent}%</span>
         </div>
 
-        <div className="w-full h-3 bg-zinc-950 border border-zinc-800 rounded-none overflow-hidden relative">
+        <div className="w-full h-4 bg-zinc-950 border border-zinc-800 rounded-none overflow-hidden relative p-0.5">
           <div
-            className={`h-full transition-all duration-500 ${
-              isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400'
-            }`}
+            className={`h-full transition-all duration-700 ${isCompleted
+                ? 'bg-gradient-to-r from-emerald-500 to-teal-300 shadow-[0_0_15px_rgba(52,211,153,0.5)]'
+                : isFailed
+                  ? 'bg-rose-500'
+                  : 'bg-gradient-to-r from-sky-500 via-blue-400 to-sky-300 shadow-[0_0_15px_rgba(56,189,248,0.5)]'
+              }`}
             style={{ width: `${progressPercent}%` }}
           />
         </div>
       </div>
 
-      {/* Stage Details / Logs Console */}
-      {job.stage_details && (
-        <div className="p-4 rounded-none bg-zinc-950 border border-zinc-900 text-xs space-y-1">
-          <span className="text-[10px] text-zinc-500 font-bold uppercase block mb-1">
-            STAGE EXECUTION DETAILS
+      {/* Real-time Target DB Insertion Metrics Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
+          <span className="text-[10px] font-bold text-zinc-500 uppercase block">SUCCESSFUL INSERTIONS</span>
+          <span className="text-lg sm:text-xl font-extrabold text-emerald-400">{succRows.toLocaleString()}</span>
+          <span className="text-[10px] text-zinc-400 block font-mono">Target DB committed</span>
+        </div>
+
+        <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
+          <span className="text-[10px] font-bold text-zinc-500 uppercase block">TOTAL TARGET ROWS</span>
+          <span className="text-lg sm:text-xl font-extrabold text-white">{(totalRows || succRows).toLocaleString()}</span>
+          <span className="text-[10px] text-zinc-400 block font-mono">Expected total</span>
+        </div>
+
+        <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
+          <span className="text-[10px] font-bold text-zinc-500 uppercase block">PROCESSED / SKIPPED</span>
+          <span className="text-lg sm:text-xl font-extrabold text-sky-400">{procRows.toLocaleString()}</span>
+          <span className="text-[10px] text-zinc-400 block font-mono">Deduplicated / processed</span>
+        </div>
+
+        <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
+          <span className="text-[10px] font-bold text-zinc-500 uppercase block">FAILED ROWS</span>
+          <span className={`text-lg sm:text-xl font-extrabold ${failRows > 0 ? 'text-rose-400' : 'text-zinc-400'}`}>
+            {failRows.toLocaleString()}
           </span>
-          <pre className="text-sky-400 whitespace-pre-wrap font-mono text-[11px]">
-            {JSON.stringify(job.stage_details, null, 2)}
-          </pre>
+          <span className="text-[10px] text-zinc-400 block font-mono">Schema errors</span>
+        </div>
+      </div>
+
+      {/* Step-by-Step Pipeline Timeline */}
+      <div className="p-4 rounded-none bg-zinc-950 border border-zinc-900 space-y-3">
+        <h4 className="text-xs font-bold text-zinc-300 uppercase tracking-wider flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-none bg-sky-400" />
+          Target Pipeline Stage Stepper
+        </h4>
+
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-xs font-mono">
+          {stages.map((stg, idx) => {
+            const isDone = isCompleted || (currentStep > idx);
+            const isCurrent = isRunning && currentStep === idx;
+
+            return (
+              <div
+                key={stg.key}
+                className={`p-3 rounded-none border transition-all ${isDone
+                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'
+                    : isCurrent
+                      ? 'bg-sky-400/15 border-sky-400 text-sky-400 shadow-[0_0_12px_rgba(56,189,248,0.2)] animate-pulse'
+                      : 'bg-black border-zinc-900 text-zinc-600'
+                  }`}
+              >
+                <div className="flex items-center justify-between text-[10px] font-bold uppercase mb-1">
+                  <span>{stg.label}</span>
+                  <span>{isDone ? '✓' : isCurrent ? '⚡' : '○'}</span>
+                </div>
+                <div className="text-[11px] font-bold truncate text-white">{stg.desc}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* AI Error Diagnosis & Remediation Card (Failed State) */}
+      {isFailed && (
+        <div className="p-5 rounded-none bg-rose-950/30 border border-rose-500/50 space-y-4 text-xs font-mono shadow-[0_0_25px_rgba(244,63,94,0.15)]">
+          <div className="flex items-center justify-between border-b border-rose-500/30 pb-3 font-sans">
+            <div className="flex items-center gap-2">
+              <span className="w-2.5 h-2.5 bg-rose-500 animate-ping rounded-none" />
+              <h4 className="text-sm font-extrabold text-rose-300 uppercase tracking-wider">
+                🤖 AI Execution Failure Diagnosis & Self-Healing Guide
+              </h4>
+            </div>
+            {diagnosis?.root_cause_category && (
+              <span className="px-2.5 py-0.5 text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                {diagnosis.root_cause_category}
+              </span>
+            )}
+          </div>
+
+          {/* Diagnosis Plain English Summary */}
+          {diagnosis?.summary ? (
+            <div className="text-zinc-200 text-xs font-sans leading-relaxed">
+              <strong className="text-rose-400 uppercase font-mono mr-2 font-bold">Explanation:</strong>
+              {diagnosis.summary}
+            </div>
+          ) : (
+            <div className="text-rose-400 text-xs leading-relaxed font-sans">
+              <strong className="uppercase font-mono mr-2 font-bold">Raw Error Trace:</strong>
+              {job.error_message || 'Execution error encountered during ETL streaming.'}
+            </div>
+          )}
+
+          {/* Remediation Steps */}
+          {diagnosis?.fix_steps && diagnosis.fix_steps.length > 0 && (
+            <div className="space-y-1.5 p-3 bg-black/60 border border-rose-500/30">
+              <span className="text-[10px] font-bold text-sky-400 uppercase tracking-wider block">
+                🛠️ Step-by-Step Remediation Actions:
+              </span>
+              <ul className="list-disc list-inside text-zinc-300 text-[11px] space-y-1">
+                {diagnosis.fix_steps.map((step: string, sIdx: number) => (
+                  <li key={sIdx}>{step}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Copyable Fix Command (With Password Placeholders) */}
+          {diagnosis?.copyable_fix_command && (
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between text-[10px] font-bold text-amber-400 uppercase">
+                <span>📋 Copyable Container Fix Command (Password Placeholders Retained):</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(diagnosis.copyable_fix_command || '');
+                    toast.success('Remediation command copied to clipboard!');
+                  }}
+                  className="px-2 py-0.5 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 border border-amber-400/30 uppercase text-[9px] font-bold"
+                >
+                  Copy Command
+                </button>
+              </div>
+              <pre className="p-3 bg-zinc-950 border border-zinc-800 text-amber-300/90 text-[11px] font-mono whitespace-pre-wrap overflow-x-auto">
+                {diagnosis.copyable_fix_command}
+              </pre>
+            </div>
+          )}
+
+          {/* Trigger Diagnosis Manual Button if missing */}
+          {!diagnosis && (
+            <button
+              type="button"
+              onClick={handleTriggerDiagnosis}
+              disabled={isDiagnosing}
+              className="py-2 px-4 bg-rose-500 hover:bg-rose-400 text-black text-xs font-bold uppercase tracking-wider border border-rose-500 font-mono transition-colors"
+            >
+              {isDiagnosing ? 'Analyzing Error with AI...' : '🤖 Synthesize AI Diagnosis'}
+            </button>
+          )}
         </div>
       )}
 
-      {/* Error Message if Failed */}
-      {isFailed && job.error_message && (
-        <div className="p-4 rounded-none bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-mono">
-          🚨 <strong>Execution Failure:</strong> {job.error_message}
+      {/* Live Agent Terminal Log Output */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between text-xs text-zinc-400 font-bold uppercase">
+          <span>Agent Real-Time Execution Log Stream</span>
+          <span className="text-[10px] text-sky-400">{logs.length} Log Events</span>
         </div>
-      )}
+
+        <div className="p-4 rounded-none bg-zinc-950 border border-zinc-900 text-xs font-mono max-h-40 overflow-y-auto space-y-1">
+          {logs.length === 0 ? (
+            <div className="text-zinc-600 italic">Waiting for initial log events from Docker Agent...</div>
+          ) : (
+            logs.map((log: string, lIdx: number) => (
+              <div key={lIdx} className="text-sky-300/90 hover:text-white transition-colors text-[11px]">
+                {log}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
     </div>
   );
 };

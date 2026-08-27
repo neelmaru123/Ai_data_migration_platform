@@ -1,6 +1,6 @@
 ---
 name: code-decision-flow-auditor
-description: Log code design choices in DECISIONS.md, map entry points and execution flow in EXECUTION_FLOW.md, and quiz the developer before accepting major code changes. Use whenever writing non-trivial code or implementing features.
+description: Log code design choices in docs/DECISIONS.md, map entry points and execution flow in docs/EXECUTION_FLOW.md, and quiz the developer before accepting major code changes. Use whenever writing non-trivial code or implementing features.
 ---
 
 # Code Decision & Execution Flow Auditor
@@ -9,11 +9,11 @@ This skill enforces deep transparency and codebase comprehension when generating
 
 ---
 
-## 1. Decision Logging (`DECISIONS.md`)
+## 1. Decision Logging (`docs/DECISIONS.md`)
 
-Whenever introducing non-trivial code, architectural changes, or new dependencies, **automatically create or update `DECISIONS.md`** at the root of the workspace.
+Whenever introducing non-trivial code, architectural changes, or new dependencies, **automatically create or update `docs/DECISIONS.md`** inside the `docs/` folder.
 
-### Required Section Format for `DECISIONS.md`:
+### Required Section Format for `docs/DECISIONS.md`:
 
 ```markdown
 ## [YYYY-MM-DD] - [Feature / Change Title]
@@ -37,9 +37,9 @@ Brief summary of the architectural or implementation decision made.
 
 ---
 
-## 2. Execution Flow Mapping (`EXECUTION_FLOW.md`)
+## 2. Execution Flow Mapping (`docs/EXECUTION_FLOW.md`)
 
-Document how execution travels through the codebase for the new or modified functionality. Maintain `EXECUTION_FLOW.md` (or append a dedicated section) detailing:
+Document how execution travels through the codebase for the new or modified functionality. Maintain `docs/EXECUTION_FLOW.md` (or append a dedicated section) detailing:
 
 ### Required Execution Flow Format:
 
@@ -81,6 +81,6 @@ Before finalizing any major code changes or asking the developer to accept the o
 
 ## Summary Checklist for AI Workflows
 
-- [ ] Updated `DECISIONS.md` with rationale, libraries used, and trade-offs.
-- [ ] Updated `EXECUTION_FLOW.md` with entry point, function call order, and modified files.
+- [ ] Updated `docs/DECISIONS.md` with rationale, libraries used, and trade-offs.
+- [ ] Updated `docs/EXECUTION_FLOW.md` with entry point, function call order, and modified files.
 - [ ] Quizzed the developer on key changes before concluding major tasks.

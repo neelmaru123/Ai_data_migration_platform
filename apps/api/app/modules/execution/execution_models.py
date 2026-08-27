@@ -52,6 +52,7 @@ class MigrationJob(Base):
         DateTime(timezone=True), nullable=True
     )
     error_message: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    ai_diagnosis: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON_TYPE, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

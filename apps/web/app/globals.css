@@ -49,4 +49,36 @@
   code, pre, kbd, samp, .font-mono {
     font-family: var(--font-mono);
   }
+
+  /* Custom Dark Cyberpunk Scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #000000;
+    border-left: 1px solid #18181b;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #27272a;
+    border-radius: 0px;
+    border: 1px solid #3f3f46;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #38bdf8;
+    box-shadow: 0 0 10px rgba(56, 189, 248, 0.5);
+  }
+
+  ::-webkit-scrollbar-corner {
+    background: #000000;
+  }
+
+  /* Firefox Scrollbar Support */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #27272a #000000;
+  }
 }

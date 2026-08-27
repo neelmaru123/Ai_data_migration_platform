@@ -11,10 +11,14 @@ export const planService = {
    * Create and generate an AI migration plan for an agent
    */
   async createPlan(agentId: string, targetConfig: TargetDatabaseConfig): Promise<PlanDetailResponse> {
-    const response = await apiClient.post<PlanDetailResponse>('/plans/generate', {
-      agent_id: agentId,
-      target_config: targetConfig,
-    });
+    const response = await apiClient.post<PlanDetailResponse>(
+      '/plans/generate',
+      {
+        agent_id: agentId,
+        target_config: targetConfig,
+      },
+      { timeout: 180000 } // 3 minutes timeout for complex LLM generation graph (EC-09)
+    );
     return response.data;
   },
 
@@ -46,9 +50,13 @@ export const planService = {
    * Refine an existing migration plan using natural language prompt feedback
    */
   async refinePlan(planId: string, userFeedback: string): Promise<PlanDetailResponse> {
-    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/refine`, {
-      user_feedback: userFeedback,
-    });
+    const response = await apiClient.post<PlanDetailResponse>(
+      `/plans/${planId}/refine`,
+      {
+        user_feedback: userFeedback,
+      },
+      { timeout: 180000 } // 3 minutes timeout for LLM plan refinement (EC-09)
+    );
     return response.data;
   },
 
@@ -65,6 +73,30 @@ export const planService = {
    */
   async approvePlan(planId: string): Promise<PlanDetailResponse> {
     const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/approve`);
+    return response.data;
+  },
+
+  /**
+   * Fetch all version snapshots for a migration plan
+   */
+  async listPlanVersions(planId: string): Promise<import('../types/migrationPlan').PlanVersionListItem[]> {
+    const response = await apiClient.get<import('../types/migrationPlan').PlanVersionListItem[]>(`/plans/${planId}/versions`);
+    return response.data;
+  },
+
+  /**
+   * Fetch full AST details for a specific version snapshot
+   */
+  async getPlanVersion(planId: string, versionNumber: number): Promise<import('../types/migrationPlan').PlanVersionDetailResponse> {
+    const response = await apiClient.get<import('../types/migrationPlan').PlanVersionDetailResponse>(`/plans/${planId}/versions/${versionNumber}`);
+    return response.data;
+  },
+
+  /**
+   * Restore plan AST to a historical version snapshot
+   */
+  async restorePlanVersion(planId: string, versionNumber: number): Promise<PlanDetailResponse> {
+    const response = await apiClient.post<PlanDetailResponse>(`/plans/${planId}/versions/${versionNumber}/restore`);
     return response.data;
   },
 };

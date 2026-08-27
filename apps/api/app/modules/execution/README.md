@@ -126,11 +126,23 @@ The `execution` module manages **Data Plane Migration Job Dispatch and Progress 
 
 | HTTP Method | Route Path | Description | Service Function Called | Auth Required |
 | :--- | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/jobs/create/{plan_id}` | Instantiate migration job from approved plan | `ExecutionService.create_execution_job` | User JWT |
-| `POST` | `/api/v1/jobs/{job_id}/progress` | Agent telemetry update (progress, rows, table) | `ExecutionService.update_job_progress` | Agent Token |
-| `GET` | `/api/v1/jobs/agent/pending` | Fetch pending execution tasks for agent | `ExecutionService.get_pending_tasks_for_agent` | Agent Token |
-| `GET` | `/api/v1/jobs` | List user's execution jobs | `ExecutionService.list_jobs_for_user` | User JWT |
-| `GET` | `/api/v1/jobs/{job_id}` | Get specific job status & progress metrics | `ExecutionService.get_job_by_id` | User JWT |
+| `POST` | `/api/v1/plans/{plan_id}/execute` | Instantiate migration job from approved plan | `ExecutionService.create_execution_job` | User JWT |
+| `POST` | `/api/v1/execution/{job_id}/progress` | Agent telemetry update (progress, rows, table) | `ExecutionService.update_job_progress` | Agent Token |
+| `GET` | `/api/v1/agents/tasks` | Fetch pending execution tasks for agent | `ExecutionService.get_pending_tasks_for_agent` | Agent Token |
+| `GET` | `/api/v1/executions` | List user's execution jobs | `ExecutionService.list_jobs_for_user` | User JWT |
+| `GET` | `/api/v1/executions/{job_id}` | Get specific job status & progress metrics | `ExecutionService.get_job_by_id` | User JWT |
+| `POST` | `/api/v1/executions/{job_id}/resume` | Resume crashed/interrupted migration job | `ExecutionService.resume_execution_job` | User JWT |
+
+### Key Concurrency & Resilience Features
+1. **Active Execution Concurrency Lock**:
+   - `create_execution_job()` checks for existing active jobs (`queued`, `preparing`, `running`) linked to `plan_id`.
+   - Raises HTTP `409 Conflict` if duplicate execution is attempted, preventing duplicate job queues.
+2. **Atomic Task Claiming (`FOR UPDATE SKIP LOCKED`)**:
+   - `get_pending_tasks_for_agent()` locks queued job rows with `FOR UPDATE SKIP LOCKED` and transitions status to `preparing` within the same atomic database transaction, preventing race conditions when multiple agent workers poll for tasks.
+3. **Execution Error Watchdog Recovery**:
+   - `check_stale_jobs()` checks active jobs updated > 5 minutes ago and marks them as `failed` if agent pings halt.
+4. **Enhanced Telemetry (`skipped_rows`)**:
+   - `ExecutionProgressUpdate` schema includes `skipped_rows` for reporting `ON CONFLICT DO NOTHING` / `INSERT IGNORE` duplicate row skips.
 
 ---
 

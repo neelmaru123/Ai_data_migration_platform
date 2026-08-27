@@ -3,12 +3,13 @@ Migration Plans Domain — Business Logic Service
 Handles plan creation, retrieval, and lifecycle management.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -20,7 +21,11 @@ from app.modules.migration_plans.migration_plans_engine.migration_plans_llm impo
     MetadataContextSerializer,
     llm_plan_generator,
 )
-from app.modules.migration_plans.migration_plans_models import MigrationPlan, MigrationPlanSnapshot
+from app.modules.migration_plans.migration_plans_models import (
+    MigrationPlan,
+    MigrationPlanSnapshot,
+    MigrationPlanVersion,
+)
 from app.modules.migration_plans.migration_plans_schemas import (
     PlanDetailResponse,
     PlanResponse,
@@ -203,6 +208,19 @@ class MigrationPlanService:
             )
             session.add(join_row)
 
+        # Create Version 1 snapshot
+        initial_version = MigrationPlanVersion(
+            migration_plan_id=migration_plan.id,
+            version_number=1,
+            edit_type="initial_ai_generation",
+            user_feedback=target_config.custom_instructions if target_config else None,
+            plan_data=plan_ast_dict or {"error": "Generation failed"},
+            is_valid=is_valid,
+            confidence_score=plan_ast_dict.get("confidence_score", 0.9) if plan_ast_dict else 0.0,
+            validation_errors=val_res_dict,
+        )
+        session.add(initial_version)
+
         await session.commit()
         return migration_plan
 
@@ -276,6 +294,24 @@ class MigrationPlanService:
         else:
             plan.status = "edited"
 
+        # Compute next version number and persist version snapshot
+        stmt_ver = select(func.coalesce(func.max(MigrationPlanVersion.version_number), 0)).where(
+            MigrationPlanVersion.migration_plan_id == plan.id
+        )
+        max_ver = (await session.execute(stmt_ver)).scalar_one()
+        next_ver = max_ver + 1
+
+        version_snapshot = MigrationPlanVersion(
+            migration_plan_id=plan.id,
+            version_number=next_ver,
+            edit_type="manual_ast_edit",
+            plan_data=plan_data,
+            is_valid=plan.is_valid,
+            confidence_score=plan_data.get("confidence_score", 1.0) if isinstance(plan_data, dict) else 1.0,
+            validation_errors=plan.validation_errors,
+        )
+        session.add(version_snapshot)
+
         await session.commit()
         return plan
 
@@ -292,6 +328,13 @@ class MigrationPlanService:
 
         await MigrationPlanService._check_active_execution_lock(session, plan.id)
 
+        # Acquire row lock to serialize concurrent refinement updates (EC-24)
+        stmt_lock = select(MigrationPlan).where(MigrationPlan.id == plan.id).with_for_update()
+        res_lock = await session.execute(stmt_lock)
+        locked_plan = res_lock.scalar_one_or_none()
+        if locked_plan:
+            plan = locked_plan
+
         if not plan.agent:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -307,18 +350,34 @@ class MigrationPlanService:
             if plan.target_config
             else "postgresql"
         )
+        custom_instructions = (
+            plan.target_config.get("custom_instructions", "")
+            if plan.target_config
+            else ""
+        )
 
         context_str = MetadataContextSerializer.serialize(
             snapshots=snapshots,
             source_aliases=alias_map,
             target_db_type=target_db_type,
+            custom_instructions=custom_instructions,
         )
 
-        refined_ast_obj = llm_plan_generator.refine(
-            context_str=context_str,
-            current_ast_dict=plan.plan_data,
-            user_feedback=user_feedback,
-        )
+        try:
+            refined_ast_obj = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_plan_generator.refine,
+                    context_str=context_str,
+                    current_ast_dict=plan.plan_data,
+                    user_feedback=user_feedback,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="LLM plan refinement timed out after 60 seconds. Please try again.",
+            )
 
         refined_ast_dict = refined_ast_obj.model_dump(mode="json")
         val_res = MigrationPlanValidator.validate(refined_ast_dict, snapshots, alias_map)
@@ -328,6 +387,112 @@ class MigrationPlanService:
         plan.is_valid = val_res.is_valid
         plan.validation_errors = val_dict
         plan.status = "edited" if val_res.is_valid else "invalid_edits"
+
+        # Compute next version number and insert version snapshot
+        stmt_ver = select(func.coalesce(func.max(MigrationPlanVersion.version_number), 0)).where(
+            MigrationPlanVersion.migration_plan_id == plan.id
+        )
+        max_ver = (await session.execute(stmt_ver)).scalar_one()
+        next_ver = max_ver + 1
+
+        version_snapshot = MigrationPlanVersion(
+            migration_plan_id=plan.id,
+            version_number=next_ver,
+            edit_type="llm_refinement",
+            user_feedback=user_feedback,
+            plan_data=refined_ast_dict,
+            is_valid=val_res.is_valid,
+            confidence_score=refined_ast_dict.get("confidence_score", 0.9) if isinstance(refined_ast_dict, dict) else 0.9,
+            validation_errors=val_dict,
+        )
+        session.add(version_snapshot)
+
+        await session.commit()
+        return plan
+
+    @staticmethod
+    async def list_plan_versions(
+        session: AsyncSession,
+        plan_id: uuid.UUID,
+    ) -> List[MigrationPlanVersion]:
+        """Fetch all versions of a migration plan, ordered from newest to oldest."""
+        stmt = (
+            select(MigrationPlanVersion)
+            .where(MigrationPlanVersion.migration_plan_id == plan_id)
+            .order_by(MigrationPlanVersion.version_number.desc())
+        )
+        res = await session.execute(stmt)
+        return list(res.scalars().all())
+
+    @staticmethod
+    async def get_plan_version(
+        session: AsyncSession,
+        plan_id: uuid.UUID,
+        version_number: int,
+    ) -> Optional[MigrationPlanVersion]:
+        """Fetch a specific version of a migration plan by plan ID and version number."""
+        stmt = select(MigrationPlanVersion).where(
+            MigrationPlanVersion.migration_plan_id == plan_id,
+            MigrationPlanVersion.version_number == version_number,
+        )
+        res = await session.execute(stmt)
+        return res.scalar_one_or_none()
+
+    @staticmethod
+    async def restore_plan_version(
+        session: AsyncSession,
+        plan: MigrationPlan,
+        version_number: int,
+    ) -> MigrationPlan:
+        """Restores a migration plan to a historical AST version."""
+        from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import (
+            MigrationPlanValidator,
+        )
+
+        await MigrationPlanService._check_active_execution_lock(session, plan.id)
+
+        target_version = await MigrationPlanService.get_plan_version(
+            session, plan.id, version_number
+        )
+        if not target_version:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Version {version_number} not found for migration plan '{plan.id}'.",
+            )
+
+        # Update live plan with historical AST data
+        plan.plan_data = target_version.plan_data
+
+        if plan.agent:
+            snapshots, alias_map = await MigrationPlanService._fetch_latest_snapshots_for_agent(
+                session, plan.agent
+            )
+            val_res = MigrationPlanValidator.validate(target_version.plan_data, snapshots, alias_map)
+            val_dict = val_res.model_dump(mode="json")
+            plan.is_valid = val_res.is_valid
+            plan.validation_errors = val_dict
+            plan.status = "edited" if val_res.is_valid else "invalid_edits"
+        else:
+            plan.status = "edited"
+
+        # Compute next version number for recording the restoration event
+        stmt_ver = select(func.coalesce(func.max(MigrationPlanVersion.version_number), 0)).where(
+            MigrationPlanVersion.migration_plan_id == plan.id
+        )
+        max_ver = (await session.execute(stmt_ver)).scalar_one()
+        next_ver = max_ver + 1
+
+        restored_snapshot = MigrationPlanVersion(
+            migration_plan_id=plan.id,
+            version_number=next_ver,
+            edit_type="version_restored",
+            user_feedback=f"Restored from version {version_number}",
+            plan_data=target_version.plan_data,
+            is_valid=plan.is_valid,
+            confidence_score=target_version.confidence_score,
+            validation_errors=plan.validation_errors,
+        )
+        session.add(restored_snapshot)
 
         await session.commit()
         return plan
@@ -377,7 +542,7 @@ class MigrationPlanService:
                     detail=f"Cannot approve invalid plan: {val_res.explanation}",
                 )
 
-        plan.status = "completed"
+        plan.status = "approved"
         await session.commit()
 
         if plan.agent_id:
@@ -388,7 +553,7 @@ class MigrationPlanService:
                     "data": {
                         "plan_id": str(plan.id),
                         "agent_id": str(plan.agent_id),
-                        "status": "completed",
+                        "status": "approved",
                     },
                 },
             )

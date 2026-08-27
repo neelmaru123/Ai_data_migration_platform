@@ -113,3 +113,20 @@ export interface PlanDetailResponse extends PlanResponse {
   validation_errors?: Record<string, any> | null;
   validation_warnings?: string[] | null;
 }
+
+export interface PlanVersionListItem {
+  id: string;
+  migration_plan_id: string;
+  version_number: number;
+  edit_type: 'initial_ai_generation' | 'llm_refinement' | 'manual_ast_edit' | 'version_restored' | string;
+  user_feedback?: string | null;
+  is_valid?: boolean;
+  confidence_score?: number;
+  created_at: string;
+}
+
+export interface PlanVersionDetailResponse extends PlanVersionListItem {
+  plan_data: TransformationPlanAST;
+  validation_errors?: Record<string, any> | null;
+}
+

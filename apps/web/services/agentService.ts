@@ -40,6 +40,13 @@ export const agentService = {
   },
 
   /**
+   * Delete an existing agent and un-link its attached data sources
+   */
+  async deleteAgent(agentId: string): Promise<void> {
+    await apiClient.delete(`/agents/${agentId}`);
+  },
+
+  /**
    * Initialize WebSocket subscription for live Agent heartbeats
    */
   connectAgentWebSocket(
@@ -49,11 +56,19 @@ export const agentService = {
     onError?: (err: Event) => void
   ): WebSocket {
     const wsBaseUrl = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000/api/v1';
-    const ws = new WebSocket(`${wsBaseUrl}/agents/ws/${agentId}?token=${jwtToken}`);
+    const ws = new WebSocket(`${wsBaseUrl}/agents/ws/${agentId}`);
+
+    ws.onopen = () => {
+      // Send secure JSON auth frame on open (EC-10)
+      ws.send(JSON.stringify({ type: 'auth', token: jwtToken }));
+    };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        if (data.event === 'AUTH_SUCCESS') {
+          return;
+        }
         onMessage(data);
       } catch {
         // Ignored raw strings

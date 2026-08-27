@@ -19,10 +19,26 @@ export const executionService = {
   },
 
   /**
+   * List all execution jobs for a specific migration plan
+   */
+  async listPlanJobs(planId: string): Promise<ExecutionJobResponse[]> {
+    const response = await apiClient.get<ExecutionJobResponse[]>(`/plans/${planId}/jobs`);
+    return response.data;
+  },
+
+  /**
    * List all execution jobs for the current user
    */
   async listUserExecutions(): Promise<ExecutionJobResponse[]> {
     const response = await apiClient.get<ExecutionJobResponse[]>('/executions');
+    return response.data;
+  },
+
+  /**
+   * Trigger AI failure diagnosis synthesis for a failed execution job
+   */
+  async diagnoseJobFailure(jobId: string): Promise<ExecutionJobResponse> {
+    const response = await apiClient.post<ExecutionJobResponse>(`/executions/${jobId}/diagnose`);
     return response.data;
   },
 };

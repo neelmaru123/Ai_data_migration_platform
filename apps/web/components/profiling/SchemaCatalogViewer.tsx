@@ -21,7 +21,11 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
   selectedSourceId,
   onSourceSelect,
 }) => {
-  const defaultSource = dataSources.find((ds) => ds.role === 'source') || dataSources[0];
+  // Filter catalog tabs to display ONLY Source Databases during schema inspection & plan generation phase
+  const sourceDataSources = dataSources.filter((ds) => ds.role === 'source' || ds.role === 'both');
+  const displayDataSources = sourceDataSources.length > 0 ? sourceDataSources : dataSources;
+
+  const defaultSource = displayDataSources[0];
 
   const [activeSourceId, setActiveSourceId] = useState<string>(
     selectedSourceId || defaultSource?.id || ''
@@ -32,11 +36,9 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
   const [activeTab, setActiveTab] = useState<'columns' | 'constraints' | 'relationships'>('columns');
   const [searchQuery, setSearchQuery] = useState<string>('');
 
-  const sortedDataSources = [...dataSources].sort((a, b) => {
-    if (a.role === 'source' && b.role !== 'source') return -1;
-    if (a.role !== 'source' && b.role === 'source') return 1;
-    return 0;
-  });
+  const sortedDataSources = [...displayDataSources];
+
+  const activeSource = dataSources.find((ds) => ds.id === activeSourceId) || defaultSource;
 
   // Handle prop changes for activeSourceId
   useEffect(() => {
@@ -102,20 +104,37 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
     item.schemaName.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const validHealthyStatuses = ['healthy', 'profiled', 'active', 'connected', 'ok'];
+
+  const activeSourceHasError =
+    !snapshot &&
+    activeSource &&
+    ((activeSource.status && !validHealthyStatuses.includes(activeSource.status.toLowerCase())) ||
+      (activeSource.last_error && activeSource.last_error.length > 0));
+
+  const isPlaceholderError =
+    activeSourceHasError &&
+    (activeSource.last_error || '').toLowerCase().includes('placeholder');
+
   return (
     <div className="w-full space-y-6">
       {/* Top Source Tabs */}
-      <div className="border border-zinc-800 bg-black p-1.5 rounded-none flex items-center gap-2 overflow-x-auto">
+      <div className="border border-zinc-800 bg-black p-1.5 rounded-none flex items-center gap-2 overflow-x-auto font-mono">
         {sortedDataSources.map((ds) => {
           const isSelected = activeSourceId === ds.id;
           const isTarget = ds.role === 'target';
+          const explicitErrorStatuses = ['failed', 'unreachable', 'error', 'invalid'];
+          const hasError =
+            ds.status &&
+            explicitErrorStatuses.includes(ds.status.toLowerCase()) &&
+            Boolean(ds.last_error && ds.last_error.trim().length > 0);
 
           return (
             <button
               key={ds.id}
               type="button"
               onClick={() => handleSourceTabChange(ds.id)}
-              className={`px-4 py-2 rounded-none text-xs font-mono font-bold uppercase tracking-wider transition-all border whitespace-nowrap ${
+              className={`px-4 py-2 rounded-none text-xs font-bold uppercase tracking-wider transition-all border whitespace-nowrap flex items-center gap-2 ${
                 isSelected
                   ? isTarget
                     ? 'bg-blue-500/15 border-blue-500 text-blue-400 shadow-[0_0_15px_rgba(59,130,246,0.2)]'
@@ -123,12 +142,38 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
                   : 'bg-zinc-950 border-zinc-900 text-zinc-400 hover:border-zinc-800 hover:text-white'
               }`}
             >
-              <span className="text-[10px] opacity-60 mr-1.5">[{ds.role.toUpperCase()}]</span>
-              {ds.name} ({ds.type.toUpperCase()})
+              <span className="text-[10px] opacity-60">[{ds.role.toUpperCase()}]</span>
+              <span>{ds.name} ({ds.type.toUpperCase()})</span>
+              {hasError && <span className="text-amber-400 font-bold">⚠️</span>}
             </button>
           );
         })}
       </div>
+
+      {/* Diagnostic Warning Alert if active source has credential error or connection failure */}
+      {activeSourceHasError && (
+        <div className="p-5 rounded-none bg-amber-500/10 border border-amber-500/40 space-y-3 font-mono text-xs shadow-xl">
+          <div className="flex items-center gap-2 font-bold text-amber-300 uppercase tracking-wider text-sm">
+            <span>🚨</span>
+            <span>
+              {isPlaceholderError
+                ? `SCHEMA PROFILING SKIPPED FOR '${activeSource?.name.toUpperCase()}': UNFILLED CREDENTIAL PLACEHOLDERS`
+                : `DATABASE CONNECTION FAILURE FOR '${activeSource?.name.toUpperCase()}'`}
+            </span>
+          </div>
+
+          <div className="p-3 bg-black/80 border border-amber-500/30 text-amber-200 text-xs font-mono whitespace-pre-wrap">
+            {activeSource?.last_error || 'Database is unreachable. Please verify network host and login credentials.'}
+          </div>
+
+          <div className="p-3 bg-zinc-950 border border-zinc-800 text-[11px] text-sky-400 font-mono space-y-1">
+            <span className="font-bold text-white uppercase block">💡 Recommended Fix:</span>
+            <p className="text-zinc-300 leading-relaxed">
+              Replace placeholders (e.g. <code className="text-amber-300 font-bold">&lt;SRC_SRC_DB_1_PASSWORD&gt;</code>) with actual database passwords in your <code className="text-sky-400 font-bold">docker run</code> command and re-run it.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Snapshot Header Stats & Status */}
       {snapshot && (
@@ -163,16 +208,30 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
           <p>Loading database catalog metadata...</p>
         </div>
       ) : !snapshot || allTables.length === 0 ? (
-        <div className="p-12 text-center rounded-none bg-black border border-zinc-800 space-y-4">
+        <div className="p-12 text-center rounded-none bg-black border border-zinc-800 space-y-4 font-mono shadow-xl">
+          <div className="w-12 h-12 rounded-none bg-sky-400/10 border border-sky-400/30 text-sky-400 flex items-center justify-center mx-auto text-xl font-bold">
+            ⚡
+          </div>
           <div className="text-sky-400 font-mono text-sm font-bold uppercase tracking-wider">
-            Waiting for Agent Database Profiling...
+            Waiting for Agent Database Schema Introspection...
           </div>
           <p className="text-zinc-400 text-xs max-w-xl mx-auto leading-relaxed">
-            Run your Docker agent container on your database server. Once connected, it will automatically introspect tables, columns, constraints, and relationships and upload the schema snapshot.
+            Ensure your Docker Agent daemon is running on your host database server. Once connected, the agent automatically introspects schema metadata (tables, columns, constraints, relationships) and syncs the snapshot here.
           </p>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (activeSourceId) handleSourceTabChange(activeSourceId);
+              }}
+              className="py-2.5 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase border border-sky-400/40 transition-colors"
+            >
+              🔄 Refresh Schema Snapshot
+            </button>
+          </div>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start">
+        <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start font-mono">
           {/* Left Panel: Table Browser */}
           <div className="md:col-span-4 rounded-none bg-black border border-zinc-800 p-4 space-y-4 shadow-xl">
             <div className="space-y-2">

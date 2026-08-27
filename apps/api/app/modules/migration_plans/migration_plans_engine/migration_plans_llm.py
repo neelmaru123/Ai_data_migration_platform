@@ -46,11 +46,12 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 5. CANONICAL NAMING & CASING STANDARD:
    - ALL target table names and column names MUST be in clean, lowercase snake_case (e.g. user_accounts, created_at).
 6. PRIMARY KEYS & AUDIT COLUMNS STANDARD:
-   - Every target table MUST have a primary key column named 'id' (UUID or BIGINT).
-   - Every target table MUST include enterprise audit timestamp columns 'created_at' and 'updated_at' (TIMESTAMPTZ/TIMESTAMP) using transformation_type 'new_column_added'.
+   - Every target table MUST have a primary key column named 'id' (VARCHAR(36) for MySQL, UUID/BIGINT for PostgreSQL).
+   - Every target table MUST include enterprise audit timestamp columns 'created_at' and 'updated_at' (DATETIME for MySQL, TIMESTAMPTZ for PostgreSQL) using transformation_type 'new_column_added'.
    - Merged tables MUST include a '_source_origin' column (VARCHAR) to track data lineage per row.
-7. TWO-PHASE DDL HYGIENE & CONSTRAINT NAMING:
-   - pre_migration_ddl: include CREATE EXTENSION and CREATE TABLE DDL for target tables. MUST NOT contain ANY inline or table-level FOREIGN KEY constraints.
+7. TWO-PHASE DDL HYGIENE & DIALECT COMPLIANCE:
+   - pre_migration_ddl: include CREATE TABLE DDL for target tables (and CREATE EXTENSION only if target is PostgreSQL). MUST NOT contain ANY inline or table-level FOREIGN KEY constraints.
+   - For MySQL targets: DO NOT use 'gen_random_uuid()' or 'UUID' data types in DDL. Use 'VARCHAR(36) PRIMARY KEY' or 'BIGINT AUTO_INCREMENT PRIMARY KEY'.
    - post_migration_ddl: include CREATE INDEX and ALTER TABLE ... ADD CONSTRAINT FOREIGN KEY DDL statements.
    - Index naming convention: idx_{tablename}_{columnname}
    - Foreign key constraint naming convention: fk_{srctable}_{tgttable}_{columnname}
@@ -72,8 +73,11 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 15. POSTGRESQL ARRAYS & JSON CROSS-DIALECT CONVERSION:
     - When target is MySQL/SQLite and source column is a Postgres Array (TEXT[], INT[]):
       - Use 'array_to_csv' for simple text arrays (e.g. tags -> "tag1,tag2").
-      - Use 'array_to_json' for complex or numeric arrays (e.g. scores -> "[10,20,30]").
+      - Use 'array_to_json' for complex or structured arrays.
     - When target is PostgreSQL: Preserve native JSONB / ARRAY types using 'type_cast'.
+16. STRICT SOURCE DATABASE IDENTIFIER BINDING:
+    - In each table_blueprint, source_table.source_db_id MUST strictly match the exact source database identifier (e.g. 'src_db_1', 'src_db_2', 'src_db_3') under which that specific table was provided in the metadata context.
+    - NEVER assign a table (e.g., 'products', 'orders', 'customers') to a source_db_id where that table does NOT exist in the metadata context!
 
 ALLOWED transformation_type TAXONOMY (column level):
   direct_copy         → Copy column value as-is from source to target

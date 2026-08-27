@@ -37,7 +37,7 @@ def test_sql_conflict_skip_count_verification():
     mock_engine = MagicMock()
     mock_engine.begin.return_value.__enter__.return_value = mock_conn
 
-    with patch("execution_engine._get_engine", return_value=mock_engine):
+    with patch("engine.writers.target_writer._get_engine", return_value=mock_engine):
         successful, failed, skipped = TargetWriterFactory.bulk_load(
             db_url="postgresql://localhost/testdb",
             engine_type="postgresql",

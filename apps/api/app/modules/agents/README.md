@@ -169,16 +169,28 @@ The `agents` module manages on-premise **Docker Agent Daemons**. It generates se
 
 ---
 
-## 5. API Routes Specification (`agents_routes.py`)
+## 5. API Routes & WebSocket Specification (`agents_routes.py`)
 
 | HTTP Method | Route Path | Description | Service Function Called | Auth Required |
 | :--- | :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/agents/register` | Register new agent and generate API token | `AgentService.create_agent` | User JWT |
+| `POST` | `/api/v1/agents` | Register new agent and generate API token | `AgentService.create_agent` | User JWT |
 | `GET` | `/api/v1/agents` | List user's registered agents | `AgentService.list_agents` | User JWT |
 | `GET` | `/api/v1/agents/{agent_id}` | Get agent details and status | `AgentService.get_agent_by_id` | User JWT |
 | `GET` | `/api/v1/agents/{agent_id}/docker-command` | Generate Docker run deployment command | `AgentService.get_docker_command` | User JWT |
 | `POST` | `/api/v1/agents/heartbeat` | Agent daemon health & status ping | `AgentService.heartbeat` | Agent Token (`X-Agent-Token`) |
 | `DELETE` | `/api/v1/agents/{agent_id}` | Unregister and delete agent | `AgentService.delete_agent` | User JWT |
+| `WS` | `/api/v1/agents/ws/{agent_id}` | Real-time agent status & signal WebSocket | `manager.connect` | First-Frame Auth / Token Query |
+
+### Key Security & Robustness Features
+1. **WebSocket First-Frame JSON Authentication**:
+   - WebSocket endpoint accepts initial JSON auth message frame `{ "type": "auth", "token": "<jwt>" }` upon opening.
+   - Prevents exposing sensitive JWT tokens in URL query strings (`?token=<jwt>`).
+2. **Watchdog Queued Job Recovery**:
+   - `check_stale_agents_and_jobs()` queries dead agents (>60s inactivity) and automatically fails orphaned jobs in `queued`, `preparing`, or `running` status with explicit diagnostic failure messages.
+3. **Explicit Container Credentials Requirement**:
+   - `auto_register_agent()` requires explicit `USER_EMAIL` and `USER_PASSWORD` environment variables in container environments, rejecting hard-coded test credentials.
+4. **Deterministic Target DB Selection**:
+   - Agents sort container environment keys matching `DEST_*` alphabetically and select the primary target URL, issuing warning logs when multiple destination DBs exist.
 
 ---
 

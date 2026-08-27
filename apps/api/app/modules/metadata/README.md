@@ -141,6 +141,14 @@ The `metadata` module manages **Zero-Data Catalog Metadata Storage**. It stores 
 | `GET` | `/api/v1/metadata/snapshots/{snapshot_id}` | Get specific snapshot details | `MetadataService.get_snapshot_by_id` | User JWT |
 | `DELETE` | `/api/v1/metadata/snapshots/{snapshot_id}` | Delete snapshot | `MetadataService.delete_snapshot` | User JWT |
 
+### Key Introspection & Scaling Features
+1. **Large Schema Introspection Cap**:
+   - On databases with 500+ tables, `AgentMetadataEngine` automatically truncates metadata inspection to top 500 tables ordered by estimated row count (`estimated_rows DESC`).
+   - Prevents database connection and HTTP request timeouts on enterprise schemas with thousands of tables.
+2. **MongoDB Document Sampling & Recursive Path Flattening**:
+   - Samples up to 1,000 documents per collection across depth = 3.
+   - Calculates field occurrence frequencies, BSON types, and coverage percentages, representing nested JSON structures as flat dot-notation column attributes (`address.city`).
+
 ---
 
 ## 6. Inter-Module Dependencies

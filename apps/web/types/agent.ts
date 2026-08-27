@@ -20,6 +20,9 @@ export interface DataSourceResponse {
   type: ValidSourceType;
   role: ValidSourceRole;
   identifier: string;
+  status?: string;
+  last_error?: string | null;
+  last_checked_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -36,7 +39,7 @@ export interface AgentResponse {
   user_id: string;
   name: string;
   agent_identifier: string;
-  status: 'online' | 'offline' | 'busy' | string;
+  status: 'online' | 'offline' | 'degraded' | 'busy' | string;
   version?: string | null;
   api_token?: string | null;
   last_seen_at?: string | null;

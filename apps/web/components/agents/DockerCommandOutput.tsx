@@ -276,10 +276,10 @@ export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
         </button>
 
         <a
-          href="/sources"
+          href={`/sources?agentId=${agent.id}`}
           className="w-full sm:w-auto inline-flex items-center justify-center gap-2 py-3 px-8 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 hover:scale-[1.01]"
         >
-          <span>Proceed to Data Sources</span>
+          <span>Proceed to Schema Inspection</span>
           <ArrowRight className="w-4 h-4" />
         </a>
       </div>

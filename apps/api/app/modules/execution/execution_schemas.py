@@ -45,6 +45,7 @@ class ExecutionJobResponse(BaseModel):
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     error_message: Optional[str] = None
+    ai_diagnosis: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
 

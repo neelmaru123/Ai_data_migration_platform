@@ -34,7 +34,7 @@ export default function RegisterForm() {
   const onSubmit = (data: UserRegisterPayload) => {
     registerMutation.mutate(data, {
       onSuccess: () => {
-        router.push('/');
+        router.push('/dashboard');
       },
     });
   };

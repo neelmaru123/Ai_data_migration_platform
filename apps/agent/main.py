@@ -45,7 +45,7 @@ def sync_metadata_snapshots(backend_url: str, agent_token: str):
             if not snapshot_data:
                 continue
 
-            payload = json.dumps(snapshot_data).encode("utf-8")
+            payload = json.dumps(snapshot_data, default=str).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
                 with urllib.request.urlopen(req, timeout=15.0) as resp:
@@ -346,8 +346,12 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
     Auto-registers an Agent with the backend if USER_EMAIL and USER_PASSWORD (or default test credentials)
     are available, auto-detecting data sources from environment variables.
     """
-    user_email = os.getenv("USER_EMAIL", "complex_test@example.com")
-    user_pass = os.getenv("USER_PASSWORD", "Password123!")
+    user_email = os.getenv("USER_EMAIL")
+    user_pass = os.getenv("USER_PASSWORD")
+    if not user_email or not user_pass:
+        logger.error("Auto-registration failed: USER_EMAIL and USER_PASSWORD environment variables must be provided when AGENT_TOKEN is not set.")
+        return None
+
     agent_name = os.getenv("AGENT_NAME", "Docker Agent")
     agent_ident = os.getenv("AGENT_IDENTIFIER", f"docker_agent_{int(time.time())}")
 
@@ -429,15 +433,26 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
 
             logger.info(f"Discovered {len(tasks)} pending execution job(s) for this agent!")
 
-            # Fetch source & target database URLs from environment
+            # Fetch source & target database URLs from environment (EC-13)
             src_urls = {}
-            dest_url = ""
+            dest_urls = {}
             for k, v in os.environ.items():
                 if ("SRC_" in k or "SOURCE_DB" in k) and ("URL" in k or "URI" in k):
                     ident = extract_identifier_from_env_key(k)
                     src_urls[ident] = v
-                elif ("DEST_" in k or "DEST_DB" in k) and ("URL" in k or "URI" in k):
-                    dest_url = v
+                elif ("DEST_" in k or "DEST_DB" in k or "TARGET_" in k) and ("URL" in k or "URI" in k):
+                    dest_urls[k] = v
+
+            dest_url = ""
+            if dest_urls:
+                sorted_keys = sorted(dest_urls.keys())
+                primary_key = sorted_keys[0]
+                dest_url = dest_urls[primary_key]
+                if len(sorted_keys) > 1:
+                    logger.warning(
+                        f"Multiple destination database URLs detected ({sorted_keys}). "
+                        f"Selected primary target '{primary_key}'."
+                    )
 
             if not dest_url:
                 dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", ""))
@@ -446,31 +461,53 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                 logger.error("No destination database environment variables (DEST_*_URL) detected. Cannot execute migration jobs.")
                 return
 
+            from engine.progress_reporter import ProgressReporter
+            from engine.orchestrator import ExecutionOrchestrator
+
             for task in tasks:
                 job_id = task.get("job_id")
                 plan_id = task.get("migration_plan_id")
-                logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
 
-                # Fetch full plan AST from API using Agent token auth
-                plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
-                req_plan = urllib.request.Request(
-                    plan_url,
-                    headers={"X-Agent-Token": clean_token},
-                    method="GET"
-                )
-                with urllib.request.urlopen(req_plan, timeout=15.0) as r_plan:
-                    plan_ast = json.loads(r_plan.read().decode("utf-8"))
+                try:
+                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
 
-                # Import and run execution engine
-                from execution_engine import ExecutionOrchestrator
-                ExecutionOrchestrator.run_job(
-                    backend_url=backend_url,
-                    agent_token=clean_token,
-                    job_id=job_id,
-                    plan_ast=plan_ast,
-                    source_db_urls=src_urls,
-                    target_db_url=dest_url,
-                )
+                    # Fetch full plan AST from API using Agent token auth
+                    plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
+                    req_plan = urllib.request.Request(
+                        plan_url,
+                        headers={"X-Agent-Token": clean_token},
+                        method="GET"
+                    )
+                    with urllib.request.urlopen(req_plan, timeout=15.0) as r_plan:
+                        plan_ast = json.loads(r_plan.read().decode("utf-8"))
+                    
+                    target_engine_type = "postgresql"
+                    if dest_url.startswith("mongodb://") or dest_url.startswith("mongodb+srv://") or "mongo" in dest_url.lower():
+                        target_engine_type = "mongodb"
+                    elif "mysql" in dest_url.lower():
+                        target_engine_type = "mysql"
+                    elif "sqlite" in dest_url.lower():
+                        target_engine_type = "sqlite"
+
+                    ExecutionOrchestrator.run_job(
+                        backend_url=backend_url,
+                        agent_token=clean_token,
+                        job_id=job_id,
+                        plan_ast=plan_ast,
+                        source_db_urls=src_urls,
+                        target_db_url=dest_url,
+                        target_engine_type=target_engine_type,
+                    )
+                except Exception as run_err:
+                    logger.error(f"Execution error for job '{job_id}': {run_err}")
+                    try:
+                        ProgressReporter.report(
+                            backend_url, clean_token, job_id,
+                            status="failed", progress=0.0,
+                            error_message=f"Agent Execution Failure: {str(run_err)}"
+                        )
+                    except Exception as rep_err:
+                        logger.error(f"Failed to report job failure to backend: {rep_err}")
     except Exception as exc:
         logger.warning(f"Task polling check exception: {exc}")
 

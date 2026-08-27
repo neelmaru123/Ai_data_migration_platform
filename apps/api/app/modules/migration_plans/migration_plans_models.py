@@ -5,7 +5,7 @@ Migration Plans Domain Database Models
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, List, Optional
-from sqlalchemy import DateTime, Float, ForeignKey, String, JSON
+from sqlalchemy import DateTime, Float, ForeignKey, JSON, String, desc
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -84,3 +84,40 @@ class MigrationPlan(Base):
     jobs: Mapped[List["MigrationJob"]] = relationship(
         "MigrationJob", back_populates="plan", cascade="all, delete-orphan"
     )
+    versions: Mapped[List["MigrationPlanVersion"]] = relationship(
+        "MigrationPlanVersion",
+        back_populates="plan",
+        cascade="all, delete-orphan",
+        order_by=lambda: desc(MigrationPlanVersion.version_number),
+    )
+
+
+class MigrationPlanVersion(Base):
+    """Historical snapshot of a MigrationPlan's AST state at a specific version point."""
+    __tablename__ = "migration_plan_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    migration_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("migration_plans.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    version_number: Mapped[int] = mapped_column(nullable=False)
+    edit_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    user_feedback: Mapped[Optional[str]] = mapped_column(nullable=True)
+    plan_data: Mapped[Any] = mapped_column(JSON_TYPE, nullable=False)
+    is_valid: Mapped[Optional[bool]] = mapped_column(nullable=True, default=True)
+    confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    validation_errors: Mapped[Optional[Any]] = mapped_column(JSON_TYPE, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    # Relationships
+    plan: Mapped["MigrationPlan"] = relationship("MigrationPlan", back_populates="versions")
+

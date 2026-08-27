@@ -150,7 +150,8 @@ def run_multi_source_migration_simulation():
             email VARCHAR(255) UNIQUE NOT NULL,
             name VARCHAR(255),
             source_origin VARCHAR(50),
-            migrated_at VARCHAR(100)
+            migrated_at VARCHAR(100),
+            extra_attributes TEXT
         );
         """
     ]
@@ -161,13 +162,13 @@ def run_multi_source_migration_simulation():
     # 6. BULK INSERT INTO TARGET DATABASE
     # --------------------------------------------------------------------------
     print("[Step 6] Bulk Loading Merged DataFrame into Target Database...")
-    succ, fail = TargetWriterFactory.bulk_load(
+    succ, fail, skip = TargetWriterFactory.bulk_load(
         db_url=target_db_url,
         engine_type=target_engine_type,
         table_name="target_unified_users",
         df=merged_df
     )
-    print(f"  [OK] Bulk Insert Results: {succ} successful rows, {fail} failed rows.\n")
+    print(f"  [OK] Bulk Insert Results: {succ} successful rows, {fail} failed rows, {skip} skipped rows.\n")
 
     # --------------------------------------------------------------------------
     # 7. QUERY & VALIDATE FINAL DATABASE STATE
@@ -175,16 +176,16 @@ def run_multi_source_migration_simulation():
     print("[Step 7] Querying Target Database to Validate Results...")
     engine = create_engine(target_db_url)
     with engine.connect() as conn:
-        result = conn.execute(text("SELECT id, email, name, source_origin, migrated_at FROM target_unified_users ORDER BY email ASC;"))
+        result = conn.execute(text("SELECT id, email, name, source_origin, migrated_at, extra_attributes FROM target_unified_users ORDER BY email ASC;"))
         rows = result.fetchall()
 
     print("\n" + "=" * 80)
     print(" VERIFIED DATABASE RECORDS IN 'target_unified_users':")
     print("=" * 80)
-    print(f"{'ID':<38} | {'EMAIL':<22} | {'NAME':<16} | {'SOURCE ORIGIN':<14}")
+    print(f"{'ID':<38} | {'EMAIL':<22} | {'NAME':<16} | {'SOURCE ORIGIN':<14} | {'EXTRA ATTRS':<25}")
     print("-" * 80)
     for r in rows:
-        print(f"{r[0]:<38} | {r[1]:<22} | {r[2]:<16} | {r[3]:<14}")
+        print(f"{r[0]:<38} | {r[1]:<22} | {r[2]:<16} | {r[3]:<14} | {str(r[5]):<25}")
     print("=" * 80)
 
     # Assertions

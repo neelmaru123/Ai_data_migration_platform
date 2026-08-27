@@ -40,7 +40,7 @@ class ConnectionManager:
                 try:
                     await connection.send_text(json.dumps(message))
                 except Exception as exc:
-                    logger.warning(f"Error sending WebSocket message: {exc}")
+                    logger.debug(f"Notice sending WebSocket message for agent '{agent_id}': {exc}")
                     disconnected.append(connection)
 
             for conn in disconnected:
