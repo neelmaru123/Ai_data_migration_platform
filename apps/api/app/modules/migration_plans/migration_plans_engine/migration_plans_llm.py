@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Prompt Version — bump when system prompt changes so stored plans are traceable
 # ============================================================================
-PROMPT_VERSION = "v1.0.0"
+PROMPT_VERSION = "v1.1.0"
 
 # ============================================================================
 # System Prompt Template
@@ -68,7 +68,7 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 13. Temperature is 0.0. Output MUST be deterministic, valid JSON matching the schema exactly.
 14. MONGODB / NOSQL TO SQL CONVERSION:
     - High-coverage fields (coverage >= 20%): Use 'nosql_field_promote' or 'json_flatten' to extract into dedicated SQL columns.
-    - Nested document paths (e.g., address.city): Use 'json_flatten' to convert to snake_case target columns (e.g. address_city).
+    - Nested document paths (e.g. address.city): Use 'json_flatten' to convert to snake_case target columns (e.g. address_city).
     - Unmapped or low-coverage fields (< 20%): Preserve zero data loss by storing in a catch-all column named 'extra_attributes' (JSONB for PostgreSQL, JSON for MySQL, TEXT for SQLite) using 'json_stringify'.
 15. POSTGRESQL ARRAYS & JSON CROSS-DIALECT CONVERSION:
     - When target is MySQL/SQLite and source column is a Postgres Array (TEXT[], INT[]):
@@ -78,6 +78,34 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 16. STRICT SOURCE DATABASE IDENTIFIER BINDING:
     - In each table_blueprint, source_table.source_db_id MUST strictly match the exact source database identifier (e.g. 'src_db_1', 'src_db_2', 'src_db_3') under which that specific table was provided in the metadata context.
     - NEVER assign a table (e.g., 'products', 'orders', 'customers') to a source_db_id where that table does NOT exist in the metadata context!
+17. CRITICAL — MERGE TABLE MULTI-SOURCE COLUMN BINDING RULE:
+    When a target table has transformation_type="merge" and pulls from 2+ source tables,
+    EVERY target column mapping (except new_column_added and default_constant) MUST declare
+    a source_columns entry for EACH participating source table — using the EXACT column name
+    from THAT source database (which may differ across DBs).
+
+    Example: target table 'customers' merges from src_db_1.pg_customers and src_db_2.mysql_accounts.
+    The target column 'email' must be:
+    {
+      "target_column_name": "email",
+      "transformation_type": "type_cast",
+      "source_columns": [
+        { "identifier": "src_db_1", "table_name": "pg_customers",   "column_name": "email" },
+        { "identifier": "src_db_2", "table_name": "mysql_accounts", "column_name": "email_address" }
+      ]
+    }
+    NOT just one source. If the concept is the same (email vs email_address, full_name vs first_name+last_name),
+    LIST ALL VARIANTS from ALL participating sources. Use merge_concat if one source stores it as a
+    single field and another stores it split. NEVER leave a source table unrepresented in source_columns
+    for a merge table column — doing so will cause NULL insertion failures at execution time.
+
+    Column name equivalence examples you MUST recognize and map correctly:
+    - email / email_address / contact_email / user_email → same semantic concept
+    - first_name / fname / given_name / full_name (when split) → same concept
+    - last_name / lname / family_name / surname → same concept
+    - phone / mobile / telephone / phone_number / contact_number → same concept
+    - created_at / created_time / creation_date / registration_date → same concept
+    - customer_id / account_id / user_id / client_id (when referencing same entity) → same concept
 
 ALLOWED transformation_type TAXONOMY (column level):
   direct_copy         → Copy column value as-is from source to target

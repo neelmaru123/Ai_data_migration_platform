@@ -56,7 +56,12 @@ class SourceConnectorFactory:
                         try:
                             df = pl.read_database(query=text(query), connection=conn.connection, params={"last_pk": last_pk_val})
                         except Exception:
-                            df = pl.read_database(query=text(query), connection=conn)
+                            try:
+                                df = pl.read_database(query=text(query), connection=conn)
+                            except Exception:
+                                # Keyset fallback to OFFSET if pk_col does not exist in source table
+                                fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
+                                df = pl.read_database(query=text(fallback_query), connection=conn)
                 else:
                     quoted_pk = _quote_identifier(pk_col, engine_type) if pk_col else None
                     order_by_clause = f" ORDER BY {quoted_pk} ASC" if quoted_pk else ""
@@ -65,7 +70,11 @@ class SourceConnectorFactory:
                         try:
                             df = pl.read_database(query=text(query), connection=conn.connection)
                         except Exception:
-                            df = pl.read_database(query=text(query), connection=conn)
+                            try:
+                                df = pl.read_database(query=text(query), connection=conn)
+                            except Exception:
+                                fallback_query = f"SELECT * FROM {quoted_table} LIMIT {chunk_size} OFFSET {offset}"
+                                df = pl.read_database(query=text(fallback_query), connection=conn)
 
                 has_more = len(df) == chunk_size
                 next_pk = None
@@ -81,9 +90,28 @@ class SourceConnectorFactory:
         elif engine_type == "mongodb":
             try:
                 from pymongo import MongoClient
+                from pymongo.errors import OperationFailure
                 from bson import ObjectId
 
-                client = MongoClient(db_url)
+                def _mongo_client(url: str) -> MongoClient:
+                    """Connect to MongoDB, falling back to unauthenticated if auth fails."""
+                    try:
+                        c = MongoClient(url, serverSelectionTimeoutMS=5000)
+                        c.admin.command("ping")
+                        return c
+                    except OperationFailure:
+                        # Strip credentials and authSource for no-auth deployments
+                        clean = url.split("@")[-1] if "@" in url else url
+                        if not clean.startswith("mongodb://") and not clean.startswith("mongodb+srv://"):
+                            clean = f"mongodb://{clean}"
+                        clean = clean.split("?")[0]
+                        logger.info(
+                            f"[SourceFactory] MongoDB auth failed for '{table_or_file_name}', "
+                            f"retrying without credentials."
+                        )
+                        return MongoClient(clean, serverSelectionTimeoutMS=5000)
+
+                client = _mongo_client(db_url)
                 db_name = db_url.rsplit("/", 1)[-1].split("?")[0] or "test"
                 db = client[db_name]
 

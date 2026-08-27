@@ -14,14 +14,19 @@ logger = logging.getLogger("docker-agent-execution")
 def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
     """
     Sanitizes Python object types in row dicts before DB binding.
-    Ensures UUIDs, dicts, lists, and datetimes are serialized to target-compatible formats:
-    - MySQL / SQLite: dicts/lists -> JSON strings, UUIDs -> str, datetimes -> ISO strings.
-    - PostgreSQL: dicts -> JSON strings, UUIDs -> str, datetimes -> ISO strings.
-    - MongoDB: dicts/lists -> native, UUIDs -> str.
+    Handles every Python type that SQLAlchemy cannot natively adapt:
+    - uuid.UUID           → str
+    - datetime            → ISO-8601 string
+    - Decimal             → str (preserves precision)
+    - bytes               → hex string
+    - set / frozenset     → sorted list, then JSON / pg-array
+    - dict / list         → JSON string (MySQL/SQLite) or pg-array literal (PostgreSQL lists)
+    - MongoDB: dicts/lists → native Python objects (pymongo handles them)
     """
     import json
     import uuid
     from datetime import datetime
+    from decimal import Decimal
 
     if not rows:
         return rows
@@ -29,6 +34,13 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
     engine_type_clean = (engine_type or "").lower().strip()
     is_mongo = engine_type_clean in ("mongodb", "mongo")
     is_postgres = "postgres" in engine_type_clean
+
+    def _pg_array_literal(lst: list) -> str:
+        """Format a Python list as a PostgreSQL array literal: {"a","b","c"}."""
+        def _escape(elem):
+            s = str(elem).replace("\\", "\\\\").replace('"', '\\"')
+            return f'"{s}"'
+        return "{" + ",".join(_escape(e) for e in lst) + "}"
 
     sanitized = []
     for r in rows:
@@ -40,10 +52,27 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
                 clean_row[k] = str(v)
             elif isinstance(v, datetime):
                 clean_row[k] = v.isoformat()
-            elif isinstance(v, (dict, list)):
+            elif isinstance(v, Decimal):
+                clean_row[k] = str(v)
+            elif isinstance(v, bytes):
+                clean_row[k] = v.hex()
+            elif isinstance(v, (set, frozenset)):
+                lst = sorted(str(e) for e in v)
+                if is_mongo:
+                    clean_row[k] = lst
+                elif is_postgres:
+                    clean_row[k] = _pg_array_literal(lst)
+                else:
+                    clean_row[k] = json.dumps(lst, ensure_ascii=False, default=str)
+            elif isinstance(v, list):
                 if is_mongo:
                     clean_row[k] = v
-                elif is_postgres and isinstance(v, list):
+                elif is_postgres:
+                    clean_row[k] = _pg_array_literal(v)
+                else:
+                    clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
+            elif isinstance(v, dict):
+                if is_mongo:
                     clean_row[k] = v
                 else:
                     clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
@@ -51,6 +80,7 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
                 clean_row[k] = v
         sanitized.append(clean_row)
     return sanitized
+
 
 
 class TargetWriterFactory:

@@ -159,8 +159,15 @@ class ExecutionOrchestrator:
                         for col in column_mappings:
                             if col.get("is_primary_key"):
                                 src_cols = col.get("source_columns", [])
-                                if src_cols and "column_name" in src_cols[0]:
+                                for sc in src_cols:
+                                    sc_tbl = sc.get("table_name")
+                                    sc_ident = sc.get("identifier")
+                                    if (sc_tbl and sc_tbl == src_table) or (sc_ident and (sc_ident == src_ident or sc_ident in str(src_ident))):
+                                        pk_col = sc.get("column_name")
+                                        break
+                                if not pk_col and src_cols and "column_name" in src_cols[0]:
                                     pk_col = src_cols[0]["column_name"]
+                                if pk_col:
                                     break
 
                         if src_engine == "mongodb" and not pk_col:

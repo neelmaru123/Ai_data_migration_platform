@@ -173,6 +173,29 @@ class MigrationPlanValidator:
                                             f"without explicit conversion expression template."
                                         )
 
+            # Stage B2: Multi-source column binding completeness for MERGE tables
+            # Validates that each non-generated column mapping lists source_columns for
+            # EVERY source table participating in the merge — missing entries will produce
+            # NULL values in the target and cause NOT NULL constraint violations.
+            if table_map.transformation_type == "merge" and len(table_map.source_tables) > 1:
+                source_identifiers = {st.identifier for st in table_map.source_tables}
+                skip_types = {"new_column_added", "default_constant", "drop_column"}
+                for col_map in table_map.column_mappings:
+                    if col_map.transformation_type in skip_types:
+                        continue
+                    if not col_map.target_column_name:
+                        continue
+                    declared_identifiers = {sc.identifier for sc in col_map.source_columns}
+                    missing = source_identifiers - declared_identifiers
+                    if missing:
+                        warnings.append(
+                            f"MERGE Table '{target_table_name}': Target column '{col_map.target_column_name}' "
+                            f"is missing source_columns entries for source(s): {sorted(missing)}. "
+                            f"Rows from these sources will produce NULL values for this column, "
+                            f"which may violate NOT NULL constraints. Add the correct column_name "
+                            f"from each source database to source_columns."
+                        )
+
             # Stage C: Deduplication Key Validity
             if table_map.conflict_resolution and table_map.conflict_resolution.deduplication_key:
                 dedup_key = table_map.conflict_resolution.deduplication_key.lower()
