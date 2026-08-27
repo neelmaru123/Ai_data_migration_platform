@@ -23,22 +23,28 @@ export default function DashboardPage() {
   const [agentToDelete, setAgentToDelete] = useState<AgentDetailResponse | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
 
-  const fetchAgents = async () => {
+  const fetchAgents = async (isInitial = true) => {
     try {
-      setLoading(true);
+      if (isInitial) setLoading(true);
       setErrorMsg(null);
       const list = await agentService.listAgents();
       setAgents(list);
     } catch (err: any) {
-      const msg = err.response?.data?.detail || err.message || 'Failed to fetch registered agents.';
-      setErrorMsg(msg);
+      if (isInitial) {
+        const msg = err.response?.data?.detail || err.message || 'Failed to fetch registered agents.';
+        setErrorMsg(msg);
+      }
     } finally {
-      setLoading(false);
+      if (isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchAgents();
+    fetchAgents(true);
+    const interval = setInterval(() => {
+      fetchAgents(false);
+    }, 5000);
+    return () => clearInterval(interval);
   }, []);
 
   const handleOpenDockerCmdModal = async (ag: AgentDetailResponse) => {

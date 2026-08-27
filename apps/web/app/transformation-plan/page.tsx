@@ -80,7 +80,7 @@ function TransformationPlanContent() {
             </a>
             <span className="text-zinc-600">/</span>
             <a
-              href={plan ? `/sources?agentId=${plan.agent_id}` : '/dashboard'}
+              href={plan?.agent_id ? `/sources?agentId=${plan.agent_id}` : '/sources'}
               className="text-sky-400 hover:text-sky-300 font-bold"
             >
               Agent Schema Catalog
@@ -90,10 +90,10 @@ function TransformationPlanContent() {
           </div>
 
           <a
-            href={plan ? `/sources?agentId=${plan.agent_id}` : '/dashboard'}
+            href={plan?.agent_id ? `/sources?agentId=${plan.agent_id}` : '/sources'}
             className="text-xs font-mono font-bold text-sky-400 hover:text-sky-300 uppercase transition-colors flex items-center gap-1 bg-sky-400/10 px-3 py-1.5 border border-sky-400/30"
           >
-            ← Back to Agent Catalog Profiler
+            ← Back to Agent Catalog
           </a>
         </div>
 

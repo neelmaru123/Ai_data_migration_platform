@@ -348,7 +348,7 @@ class AgentService:
         failed_jobs_count = 0
 
         for agent in stale_agents:
-            # Check if there is an active job updated recently AND agent was seen recently (keeps agent alive during progress reports)
+            # Keep agent online if job is actively reporting progress AND agent was seen recently
             stmt_active_job = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
                 MigrationJob.status.in_(["running", "preparing"]),

@@ -208,16 +208,28 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
           <p>Loading database catalog metadata...</p>
         </div>
       ) : !snapshot || allTables.length === 0 ? (
-        !activeSourceHasError && (
-          <div className="p-12 text-center rounded-none bg-black border border-zinc-800 space-y-4">
-            <div className="text-sky-400 font-mono text-sm font-bold uppercase tracking-wider">
-              Waiting for Agent Database Profiling...
-            </div>
-            <p className="text-zinc-400 text-xs max-w-xl mx-auto leading-relaxed">
-              Run your Docker agent container on your database server. Once connected, it will automatically introspect tables, columns, constraints, and relationships and upload the schema snapshot.
-            </p>
+        <div className="p-12 text-center rounded-none bg-black border border-zinc-800 space-y-4 font-mono shadow-xl">
+          <div className="w-12 h-12 rounded-none bg-sky-400/10 border border-sky-400/30 text-sky-400 flex items-center justify-center mx-auto text-xl font-bold">
+            ⚡
           </div>
-        )
+          <div className="text-sky-400 font-mono text-sm font-bold uppercase tracking-wider">
+            Waiting for Agent Database Schema Introspection...
+          </div>
+          <p className="text-zinc-400 text-xs max-w-xl mx-auto leading-relaxed">
+            Ensure your Docker Agent daemon is running on your host database server. Once connected, the agent automatically introspects schema metadata (tables, columns, constraints, relationships) and syncs the snapshot here.
+          </p>
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (activeSourceId) handleSourceTabChange(activeSourceId);
+              }}
+              className="py-2.5 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase border border-sky-400/40 transition-colors"
+            >
+              🔄 Refresh Schema Snapshot
+            </button>
+          </div>
+        </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-start font-mono">
           {/* Left Panel: Table Browser */}

@@ -126,18 +126,21 @@ export default function ExecutionPage() {
         </div>
 
         {/* Selected Job Live Banner */}
-        {selectedJob && (
-          <div className="space-y-3">
-            <div className="text-xs font-mono font-bold text-sky-400 uppercase tracking-wider flex items-center gap-2">
-              <span className="w-2 h-2 rounded-none bg-sky-400 inline-block animate-pulse" />
-              Active Job Live Progression: {selectedJob.id}
+        {selectedJob && (() => {
+          const isJobActive = ['running', 'queued', 'preparing'].includes((selectedJob.status || '').toLowerCase());
+          return (
+            <div className="space-y-3">
+              <div className="text-xs font-mono font-bold text-sky-400 uppercase tracking-wider flex items-center gap-2">
+                <span className={`w-2 h-2 rounded-none bg-sky-400 inline-block ${isJobActive ? 'animate-pulse' : ''}`} />
+                {isJobActive ? 'Active Job Live Progression:' : 'Selected Execution Run Summary:'} {selectedJob.id}
+              </div>
+              <JobExecutionBanner
+                job={selectedJob}
+                onJobUpdated={handleJobUpdated}
+              />
             </div>
-            <JobExecutionBanner
-              job={selectedJob}
-              onJobUpdated={handleJobUpdated}
-            />
-          </div>
-        )}
+          );
+        })()}
 
         {/* Executions History Table */}
         <div className="space-y-4 font-mono">
@@ -186,7 +189,22 @@ export default function ExecutionPage() {
                           isSel ? 'bg-sky-400/5 border-l-2 border-l-sky-400' : ''
                         }`}
                       >
-                        <td className="p-3 font-bold text-sky-400 truncate max-w-[120px]">{j.id}</td>
+                        <td className="p-3 font-bold text-sky-400">
+                          <div className="flex items-center gap-1.5" title={j.id}>
+                            <span className="truncate max-w-[110px]">{j.id}</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                navigator.clipboard.writeText(j.id);
+                              }}
+                              className="text-[9px] text-zinc-500 hover:text-sky-300 font-mono px-1 py-0.5 border border-zinc-800 hover:border-sky-400/40 uppercase"
+                              title="Copy full Job ID"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                        </td>
                         <td className="p-3">
                           <span
                             className={`px-2 py-0.5 text-[9px] font-bold uppercase rounded-none border ${

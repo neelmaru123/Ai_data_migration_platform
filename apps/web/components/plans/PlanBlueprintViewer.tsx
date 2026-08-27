@@ -575,7 +575,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           <div className="pt-2 flex justify-center gap-4">
             <button
               type="button"
-              onClick={() => window.location.href = '/profiling'}
+              onClick={() => window.location.href = `/sources?agentId=${plan.agent_id}`}
               className="py-3 px-6 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors"
             >
               Return to Schema Inspector & Retry
@@ -966,8 +966,14 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
 
       {/* JSON AST Modal */}
       {showJsonModal && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn">
-          <div className="p-6 rounded-none bg-zinc-950 border border-zinc-800 w-full max-w-4xl max-h-[85vh] flex flex-col space-y-4 shadow-2xl">
+        <div
+          onClick={() => setShowJsonModal(false)}
+          className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="p-6 rounded-none bg-zinc-950 border border-zinc-800 w-full max-w-4xl max-h-[85vh] flex flex-col space-y-4 shadow-2xl"
+          >
             <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
               <h3 className="text-xs font-mono font-bold uppercase tracking-wider text-white">
                 Raw Transformation Plan AST (JSON)
@@ -975,9 +981,9 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               <button
                 type="button"
                 onClick={() => setShowJsonModal(false)}
-                className="text-zinc-400 hover:text-white font-mono text-sm font-bold"
+                className="text-zinc-400 hover:text-white font-mono text-sm font-bold p-1"
               >
-                ✕
+                ✕ Close
               </button>
             </div>
             <pre className="p-4 rounded-none bg-black border border-zinc-900 text-sky-400 font-mono text-xs overflow-auto flex-1 max-h-[60vh]">
@@ -989,7 +995,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                 onClick={() => setShowJsonModal(false)}
                 className="py-2.5 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-white text-xs font-mono font-bold uppercase border border-zinc-800"
               >
-                Close
+                Close Modal
               </button>
             </div>
           </div>

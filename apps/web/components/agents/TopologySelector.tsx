@@ -131,8 +131,16 @@ export const TopologySelector: React.FC<TopologySelectorProps> = ({
           Select Migration Topology
         </h2>
         <p className="text-zinc-400 text-xs max-w-2xl mx-auto leading-relaxed">
-          Choose your source-to-destination architecture below. The platform will dynamically construct schema synchronization pipelines.
+          Choose your source-to-destination architecture below. Topology defines how many source databases you want to combine into a single destination database.
         </p>
+        <div className="p-3 bg-zinc-950 border border-sky-400/20 max-w-xl mx-auto text-[11px] font-mono text-sky-300 text-left">
+          💡 <strong>What is Topology?</strong>
+          <span className="text-zinc-400 block mt-0.5">
+            • <strong>1 to 1:</strong> Migrate 1 source DB directly into 1 target DB.<br />
+            • <strong>2 to 1 / 3 to 1:</strong> Consolidate data from 2 or 3 separate DBs into 1 merged target DB.<br />
+            • <strong>Custom:</strong> Merge N source DBs into 1 target DB.
+          </span>
+        </div>
       </div>
 
       {/* Sharp Top Selector Tabs */}

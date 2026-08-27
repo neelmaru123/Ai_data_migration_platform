@@ -3,6 +3,7 @@ Migration Plans Domain — Business Logic Service
 Handles plan creation, retrieval, and lifecycle management.
 """
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
@@ -362,11 +363,21 @@ class MigrationPlanService:
             custom_instructions=custom_instructions,
         )
 
-        refined_ast_obj = llm_plan_generator.refine(
-            context_str=context_str,
-            current_ast_dict=plan.plan_data,
-            user_feedback=user_feedback,
-        )
+        try:
+            refined_ast_obj = await asyncio.wait_for(
+                asyncio.to_thread(
+                    llm_plan_generator.refine,
+                    context_str=context_str,
+                    current_ast_dict=plan.plan_data,
+                    user_feedback=user_feedback,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="LLM plan refinement timed out after 60 seconds. Please try again.",
+            )
 
         refined_ast_dict = refined_ast_obj.model_dump(mode="json")
         val_res = MigrationPlanValidator.validate(refined_ast_dict, snapshots, alias_map)
@@ -531,7 +542,7 @@ class MigrationPlanService:
                     detail=f"Cannot approve invalid plan: {val_res.explanation}",
                 )
 
-        plan.status = "completed"
+        plan.status = "approved"
         await session.commit()
 
         if plan.agent_id:
@@ -542,7 +553,7 @@ class MigrationPlanService:
                     "data": {
                         "plan_id": str(plan.id),
                         "agent_id": str(plan.agent_id),
-                        "status": "completed",
+                        "status": "approved",
                     },
                 },
             )
