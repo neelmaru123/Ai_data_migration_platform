@@ -117,7 +117,6 @@ class DDLExecutor:
 
         logger.info(f"Executing {len(ddl_statements)} {stage_label} statements...")
         engine = _get_engine(db_url)
-
         for stmt in ddl_statements:
             stmt_clean = stmt.strip()
             if "mysql" in db_url.lower() and "create extension" in stmt_clean.lower():
@@ -129,6 +128,26 @@ class DDLExecutor:
                 continue
 
             stmt_sanitized = DDLExecutor._sanitize_ddl_statement(stmt_clean, db_url)
+
+            # Pre-Migration DDL: Reset pre-existing target tables & FKs to guarantee exact blueprint schema alignment
+            if stage_label == "Pre-Migration DDL" and stmt_clean.upper().startswith("CREATE TABLE"):
+                import re
+                match = re.search(r'CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`]?([a-zA-Z0-9_]+)["`]?', stmt_clean, re.IGNORECASE)
+                if match:
+                    tbl = match.group(1)
+                    try:
+                        with engine.begin() as conn:
+                            if "postgres" in db_url.lower():
+                                conn.execute(text(f'DROP TABLE IF EXISTS "{tbl}" CASCADE;'))
+                            elif "mysql" in db_url.lower():
+                                conn.execute(text(f'SET FOREIGN_KEY_CHECKS=0;'))
+                                conn.execute(text(f'DROP TABLE IF EXISTS `{tbl}`;'))
+                                conn.execute(text(f'SET FOREIGN_KEY_CHECKS=1;'))
+                            else:
+                                conn.execute(text(f'DROP TABLE IF EXISTS "{tbl}";'))
+                        logger.info(f"Pre-migration DDL: Reset pre-existing target table '{tbl}' for clean schema alignment.")
+                    except Exception as drop_exc:
+                        logger.warning(f"Notice while clearing pre-existing target table '{tbl}': {drop_exc}")
 
             try:
                 with engine.begin() as conn:

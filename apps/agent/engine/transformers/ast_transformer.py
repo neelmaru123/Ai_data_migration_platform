@@ -248,7 +248,10 @@ class ASTTransformer:
                         def _parse_dt(v):
                             if v is None:
                                 return None
-                            s = str(v).strip().replace(" ", "T")
+                            s = str(v).strip()
+                            if s.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()"):
+                                return datetime.now(timezone.utc).isoformat()
+                            s = s.replace(" ", "T")
                             for fmt in (
                                 "%Y-%m-%dT%H:%M:%S%.f%z",
                                 "%Y-%m-%dT%H:%M:%S%z",
@@ -313,17 +316,26 @@ class ASTTransformer:
             # ----------------------------------------------------------
             elif trans_type == "default_constant":
                 val = const_val if const_val is not None else ""
-                exprs.append(pl.lit(str(val)).alias(target_col))
+                s_val = str(val).strip()
+                target_dtype = col_spec.get("target_data_type", "").lower()
+                if s_val.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()") or (
+                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp")) and not s_val
+                ):
+                    exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
+                else:
+                    exprs.append(pl.lit(s_val).alias(target_col))
 
             # ----------------------------------------------------------
             # 6. new_column_added
             # ----------------------------------------------------------
             elif trans_type == "new_column_added":
                 target_dtype = col_spec.get("target_data_type", "").lower()
-                if const_val is not None and str(const_val) != "":
-                    exprs.append(pl.lit(str(const_val)).alias(target_col))
+                s_val = str(const_val).strip() if const_val is not None else ""
+                if s_val.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()"):
+                    exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
+                elif const_val is not None and s_val != "":
+                    exprs.append(pl.lit(s_val).alias(target_col))
                 elif "uuid" in target_dtype or target_col.endswith("_id") or target_col == "id":
-                    # NULL FK/UUID columns — let DB default or FK resolution fill them
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))
                 elif any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp")):
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))

@@ -161,25 +161,42 @@ class TargetWriterFactory:
 
         # 2. PostgreSQL, MySQL & SQLite Target Writer
         else:
+            from datetime import datetime, timezone
             engine = _get_engine(db_url)
             columns = list(rows[0].keys())
 
+            # Sanitize literal timestamp function strings (e.g. "CURRENT_TIMESTAMP") to valid ISO datetime strings
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for r in rows:
+                for k, v in r.items():
+                    if isinstance(v, str) and v.strip().upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()"):
+                        r[k] = now_iso
+
             quoted_table = _quote_identifier(table_name, engine_type)
 
-            # Auto-align missing target columns (e.g. _source_origin lineage column)
-            try:
-                with engine.begin() as col_conn:
-                    for col in columns:
-                        q_col = _quote_identifier(col, engine_type)
-                        if "postgres" in engine_type:
+            # Auto-align missing target columns and auto-convert integer columns to TEXT/UUID if incoming data contains UUIDs
+            for col in columns:
+                q_col = _quote_identifier(col, engine_type)
+                if "postgres" in engine_type:
+                    try:
+                        with engine.begin() as col_conn:
                             col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN IF NOT EXISTS {q_col} TEXT;'))
-                        elif "mysql" in engine_type:
-                            try:
-                                col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN {q_col} TEXT;'))
-                            except Exception:
-                                pass
-            except Exception:
-                pass
+                    except Exception:
+                        pass
+
+                    sample_val = rows[0].get(col) if rows else None
+                    if isinstance(sample_val, str) and "-" in sample_val and len(sample_val) >= 32:
+                        try:
+                            with engine.begin() as col_conn:
+                                col_conn.execute(text(f'ALTER TABLE {quoted_table} ALTER COLUMN {q_col} TYPE TEXT USING {q_col}::text;'))
+                        except Exception:
+                            pass
+                elif "mysql" in engine_type:
+                    try:
+                        with engine.begin() as col_conn:
+                            col_conn.execute(text(f'ALTER TABLE {quoted_table} ADD COLUMN {q_col} TEXT;'))
+                    except Exception:
+                        pass
 
             quoted_cols = [_quote_identifier(c, engine_type) for c in columns]
             col_names = ", ".join(quoted_cols)

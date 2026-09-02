@@ -136,7 +136,7 @@ async def get_migration_plan(
         from sqlalchemy import select
         res_agent = await session.execute(select(Agent).where(Agent.api_token_hash == token_hash))
         agent = res_agent.scalar_one_or_none()
-        if agent and plan.agent_id == agent.id:
+        if agent and (plan.agent_id == agent.id or agent.user_id == plan.user_id or plan.agent_id is None):
             return _to_plan_detail_response(plan)
 
     # 2. User Auth Fallback

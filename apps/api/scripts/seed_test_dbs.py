@@ -5,13 +5,14 @@ Initializes schemas and populates 50 records per table across 2 PostgreSQL sourc
 2. crm_db (Port 5436) - 5 interconnected tables (support_agents, leads, tickets, interactions, product_reviews)
 """
 
+import os
 import time
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import create_engine, text
 
 
-ECOMMERCE_DB_URL = "postgresql://postgres:postgres_password@localhost:5435/ecommerce_db"
-CRM_DB_URL = "postgresql://postgres:postgres_password@localhost:5436/crm_db"
+ECOMMERCE_DB_URL = os.getenv("ECOMMERCE_DB_URL", "postgresql://postgres:postgres_password@localhost:5435/ecommerce_db")
+CRM_DB_URL = os.getenv("CRM_DB_URL", "postgresql://postgres:postgres_password@localhost:5436/crm_db")
 
 
 def wait_for_db(db_url: str, db_name: str, max_retries: int = 15):
@@ -288,8 +289,8 @@ def setup_crm_db(engine):
     print("  [OK] crm_db seeded 5 tables x 50 records = 250 records.")
 
 
-MYSQL_DB_URL = "mysql+pymysql://root:mysql_password@localhost:3307/inventory_db"
-MONGO_DB_URL = "mongodb://127.0.0.1:27017"
+MYSQL_DB_URL = os.getenv("MYSQL_DB_URL", "mysql+pymysql://root:mysql_password@localhost:3307/inventory_db")
+MONGO_DB_URL = os.getenv("MONGO_DB_URL", "mongodb://127.0.0.1:27017")
 
 
 def setup_mysql_db():

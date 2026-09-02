@@ -129,7 +129,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={fetchAgents}
+              onClick={() => fetchAgents(true)}
               className="py-3 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-mono font-bold uppercase tracking-wider border border-zinc-800 transition-colors flex items-center gap-2"
             >
               <RefreshCw className="w-3.5 h-3.5" />

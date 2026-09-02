@@ -128,7 +128,7 @@ class ExecutionService:
         stmt_select = (
             select(MigrationJob.id)
             .where(
-                MigrationJob.agent_id == agent_id,
+                or_(MigrationJob.agent_id == agent_id, MigrationJob.agent_id.is_(None)),
                 or_(
                     MigrationJob.status == "queued",
                     and_(
@@ -159,7 +159,7 @@ class ExecutionService:
                     ),
                 ),
             )
-            .values(status="preparing", updated_at=now)
+            .values(status="preparing", agent_id=agent_id, updated_at=now)
         )
         res_update = await session.execute(stmt_update)
         if res_update.rowcount == 0:
@@ -269,7 +269,7 @@ class ExecutionService:
         """
         stmt = select(MigrationJob).where(MigrationJob.id == job_id)
         if agent_id:
-            stmt = stmt.where(MigrationJob.agent_id == agent_id)
+            stmt = stmt.where(or_(MigrationJob.agent_id == agent_id, MigrationJob.agent_id.is_(None)))
 
         res = await session.execute(stmt)
         job = res.scalar_one_or_none()
@@ -278,6 +278,9 @@ class ExecutionService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Execution job '{job_id}' not found or access denied for this agent.",
             )
+
+        if agent_id and not job.agent_id:
+            job.agent_id = agent_id
 
         now = datetime.now(timezone.utc)
         if update.status == "running" and job.started_at is None:

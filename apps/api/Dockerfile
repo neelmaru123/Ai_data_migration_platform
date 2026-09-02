@@ -6,7 +6,6 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     POETRY_VERSION=2.4.1 \
     POETRY_HOME="/opt/poetry" \
-    POETRY_VIRTUALENVS_IN_PROJECT=true \
     POETRY_NO_INTERACTION=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -19,21 +18,21 @@ RUN pip install "poetry==$POETRY_VERSION"
 
 COPY pyproject.toml poetry.lock* /app/
 
-RUN poetry install --no-root --only main
+RUN poetry config virtualenvs.create false && poetry install --no-root --only main
 
 FROM python:3.11-slim as runner
 
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PYTHONDONTWRITEBYTECODE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/.venv /app/.venv
+COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 COPY . /app
 
 EXPOSE 8000

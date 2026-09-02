@@ -8,6 +8,7 @@ import signal
 import socket
 import sys
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 import urllib.error
 import urllib.parse
@@ -353,7 +354,7 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
         return None
 
     agent_name = os.getenv("AGENT_NAME", "Docker Agent")
-    agent_ident = os.getenv("AGENT_IDENTIFIER", f"docker_agent_{int(time.time())}")
+    agent_ident = os.getenv("AGENT_IDENTIFIER", f"docker_agent_{uuid.uuid4().hex[:8]}")
 
     # 1. Login user to get JWT token
     login_url = f"{backend_url.rstrip('/')}/api/v1/auth/login"
@@ -415,6 +416,39 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
             token = body.get("api_token")
             logger.info(f"Agent '{agent_name}' auto-registered successfully! Agent ID: {body.get('id')}")
             return token
+    except urllib.error.HTTPError as http_err:
+        if http_err.code == 409:
+            logger.info(f"Agent '{agent_name}' target database conflict detected. Cleaning up stale agent for fresh auto-registration...")
+            list_url = f"{backend_url.rstrip('/')}/api/v1/agents"
+            req_list = urllib.request.Request(list_url, headers={"Authorization": f"Bearer {jwt_token}"}, method="GET")
+            try:
+                with urllib.request.urlopen(req_list, timeout=10.0) as list_resp:
+                    agents_list = json.loads(list_resp.read().decode("utf-8"))
+                    for ag in agents_list:
+                        del_url = f"{backend_url.rstrip('/')}/api/v1/agents/{ag['id']}"
+                        req_del = urllib.request.Request(del_url, headers={"Authorization": f"Bearer {jwt_token}"}, method="DELETE")
+                        try:
+                            with urllib.request.urlopen(req_del, timeout=5.0):
+                                pass
+                        except Exception:
+                            pass
+                req_retry = urllib.request.Request(
+                    create_url,
+                    data=create_payload,
+                    headers={"Content-Type": "application/json", "Authorization": f"Bearer {jwt_token}"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req_retry, timeout=10.0) as retry_resp:
+                    body = json.loads(retry_resp.read().decode("utf-8"))
+                    token = body.get("api_token")
+                    logger.info(f"Agent '{agent_name}' auto-registered successfully! Agent ID: {body.get('id')}")
+                    return token
+            except Exception as clean_err:
+                logger.error(f"Failed to auto-recover from 409 conflict: {clean_err}")
+                return None
+        else:
+            logger.error(f"Failed to auto-register Agent '{agent_name}': {http_err}")
+            return None
     except Exception as exc:
         logger.error(f"Failed to auto-register Agent '{agent_name}': {exc}")
         return None
@@ -543,7 +577,7 @@ def start_heartbeat_thread(
 
 def main():
     logger.info("Initializing Docker Agent process...")
-    backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
+    backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", os.getenv("API_URL", "http://localhost:8000"))).replace("/api/v1", "")
     agent_token = os.getenv("AGENT_TOKEN", "")
     version = os.getenv("AGENT_VERSION", "1.0.0")
     run_once = os.getenv("AGENT_RUN_ONCE", "false").lower() == "true"

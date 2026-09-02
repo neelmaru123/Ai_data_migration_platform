@@ -9,7 +9,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
     depends_on:
       - api
     restart: unless-stopped
@@ -19,30 +19,9 @@ services:
       context: ./apps/api
       dockerfile: Dockerfile
     container_name: migration_platform_api
-    command: poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
-    environment:
-      - ENVIRONMENT=development
-      - LOG_LEVEL=DEBUG
-      - DATABASE_URL=postgresql+asyncpg://postgres:postgres_password@postgres:5432/migration_platform
-      - REDIS_URL=redis://redis:6379/0
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-placeholder}
-    volumes:
-      - ./apps/api:/app
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: ./apps/api
-      dockerfile: Dockerfile
-    container_name: migration_platform_worker
-    command: poetry run python -m workers.worker.main
     environment:
       - ENVIRONMENT=development
       - LOG_LEVEL=DEBUG
@@ -65,8 +44,22 @@ services:
     container_name: migration_platform_agent
     environment:
       - API_URL=http://api:8000
+      - BACKEND_URL=http://api:8000
+      - USER_EMAIL=${USER_EMAIL:-admin@example.com}
+      - USER_PASSWORD=${USER_PASSWORD:-Password123!}
+      - AGENT_NAME=Local-Docker-Agent
+      - SRC_ECOMMERCE_URL=postgresql://postgres:postgres_password@postgres_ecommerce:5432/ecommerce_db
+      - SRC_CRM_URL=postgresql://postgres:postgres_password@postgres_crm:5432/crm_db
+      - SRC_INVENTORY_URL=mysql+pymysql://root:mysql_password@mysql_source:3306/inventory_db
+      - SRC_ANALYTICS_URL=mongodb://root:mongo_password@mongo_source:27017/analytics_db?authSource=admin
+      - DEST_TARGET_URL=postgresql://postgres:postgres_password@postgres:5432/unified_target_db
     depends_on:
       - api
+      - postgres
+      - postgres_ecommerce
+      - postgres_crm
+      - mysql_source
+      - mongo_source
     restart: unless-stopped
 
   postgres:
