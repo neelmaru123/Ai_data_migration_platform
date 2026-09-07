@@ -362,6 +362,9 @@ async def test_stale_agent_and_orphaned_job_watchdog():
         res_a = await session.execute(stmt_agent)
         updated_agent = res_a.scalar_one()
         assert updated_agent.status == "offline"
+        assert updated_agent.last_error is not None
+        assert "stopped reporting heartbeats" in updated_agent.last_error
+        assert updated_agent.error_category == "DISCONNECTED_UNEXPECTEDLY"
 
         stmt_job = select(MigrationJob).where(MigrationJob.id == running_job.id)
         res_j = await session.execute(stmt_job)
@@ -371,3 +374,87 @@ async def test_stale_agent_and_orphaned_job_watchdog():
         assert updated_job.completed_at is not None
 
     await test_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fatal_error_reporting_endpoint_and_heartbeat_error():
+    """
+    Verifies emergency fatal error reporting:
+    1. Agent reports fatal error via POST /api/v1/agents/fatal-error with X-Agent-ID header.
+    2. Backend updates agent.last_error, agent.error_category, and sets status='error'.
+    3. Agent later recovers and sends online heartbeat -> last_error is cleared.
+    """
+    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+    async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    TestSession = async_sessionmaker(bind=test_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def override_get_db():
+        async with TestSession() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    async with TestSession() as session:
+        from app.modules.users.users_models import User
+        user = User(
+            email="fatal_test@example.com",
+            password_hash="hashed_pwd",
+            name="Fatal Error User",
+        )
+        session.add(user)
+        await session.flush()
+
+        raw_token = "ag_live_fatal_test_token_12345"
+        from app.modules.agents.agents_dependencies import hash_agent_token
+        agent = Agent(
+            user_id=user.id,
+            name="Fatal Error Agent",
+            agent_identifier="agent_fatal_test",
+            api_token_hash=hash_agent_token(raw_token),
+            status="online",
+            last_seen_at=datetime.now(timezone.utc),
+        )
+        session.add(agent)
+        await session.commit()
+        agent_id = agent.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        # 1. Report fatal startup crash via POST /api/v1/agents/fatal-error
+        fatal_res = await client.post(
+            "/api/v1/agents/fatal-error",
+            headers={"X-Agent-ID": str(agent_id)},
+            json={
+                "error_message": "Agent token rejected by backend (HTTP 401). Check AGENT_TOKEN.",
+                "error_category": "AUTH_ERROR",
+            },
+        )
+        assert fatal_res.status_code == 200
+        data = fatal_res.json()
+        assert data["status"] == "error"
+        assert data["last_error"] == "Agent token rejected by backend (HTTP 401). Check AGENT_TOKEN."
+        assert data["error_category"] == "AUTH_ERROR"
+
+        # 2. Agent recovers with valid token and sends online heartbeat
+        hb_res = await client.post(
+            "/api/v1/agents/heartbeat",
+            headers={"X-Agent-Token": raw_token},
+            json={"status": "online"},
+        )
+        assert hb_res.status_code == 200
+        hb_data = hb_res.json()
+        assert hb_data["status"] == "online"
+        assert hb_data["last_error"] is None
+        assert hb_data["error_category"] is None
+
+    app.dependency_overrides.clear()
+    await test_engine.dispose()
+

@@ -53,13 +53,27 @@ class DataSourceHealthReport(BaseModel):
 
 
 class AgentHeartbeat(BaseModel):
-    """Request payload for agent periodic heartbeat status ping and data source diagnostics."""
+    """Request payload for agent periodic heartbeat status ping, fatal stopping errors, and data source diagnostics."""
     status: VALID_AGENT_STATUS = "online"
     version: Optional[str] = Field(None, max_length=50, examples=["1.0.1"])
     data_sources: Optional[List[DataSourceHealthReport]] = Field(
         default=None,
         description="Optional list of health diagnostics for attached data sources",
     )
+    error_message: Optional[str] = Field(
+        None,
+        description="Diagnostic explanation if the agent encountered a fatal error causing it to stop or degrade.",
+    )
+    error_category: Optional[str] = Field(
+        None,
+        description="Category tag for the stopping error (e.g. CONFIG_ERROR, AUTH_ERROR, RUNTIME_CRASH).",
+    )
+
+
+class AgentFatalErrorRequest(BaseModel):
+    """Emergency fatal error reporting payload when an agent is stopping."""
+    error_message: str = Field(..., description="Description of the fatal stopping error")
+    error_category: str = Field(default="FATAL_ERROR", description="Category tag for the stopping error")
 
 
 VALID_AGENT_ACTION = Literal["SHUTDOWN", "ENTER_IDLE_MODE", "RESUME_ACTIVE_MODE"]
@@ -75,6 +89,9 @@ class AgentResponse(BaseModel):
     version: Optional[str] = None
     api_token: Optional[str] = None
     last_seen_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    error_category: Optional[str] = None
+    last_error_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
     # Control directive fields — backend uses these to command the agent

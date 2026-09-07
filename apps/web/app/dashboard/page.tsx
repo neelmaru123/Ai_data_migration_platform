@@ -129,7 +129,7 @@ export default function DashboardPage() {
           <div className="flex items-center gap-3">
             <button
               type="button"
-              onClick={fetchAgents}
+              onClick={() => fetchAgents()}
               className="py-3 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-mono font-bold uppercase tracking-wider border border-zinc-800 transition-colors flex items-center gap-2"
             >
               <RefreshCw className="w-3.5 h-3.5" />
@@ -221,6 +221,8 @@ export default function DashboardPage() {
                 const stLower = (ag.status || 'offline').toLowerCase();
                 const isOnline = stLower === 'online';
                 const isDegraded = stLower === 'degraded';
+                const isError = stLower === 'error';
+                const hasFatalError = Boolean(ag.last_error && (isError || stLower === 'offline'));
 
                 return (
                   <div
@@ -238,6 +240,8 @@ export default function DashboardPage() {
                                   ? 'bg-sky-400 shadow-[0_0_10px_#38bdf8] animate-pulse'
                                   : isDegraded
                                   ? 'bg-amber-400 shadow-[0_0_10px_#f59e0b] animate-pulse'
+                                  : isError || hasFatalError
+                                  ? 'bg-rose-500 shadow-[0_0_10px_#f43f5e] animate-pulse'
                                   : 'bg-zinc-600'
                               }`}
                             />
@@ -247,10 +251,12 @@ export default function DashboardPage() {
                                   ? 'bg-sky-400/15 text-sky-400 border-sky-400/30'
                                   : isDegraded
                                   ? 'bg-amber-400/15 text-amber-400 border-amber-400/30'
+                                  : isError || hasFatalError
+                                  ? 'bg-rose-500/20 text-rose-400 border-rose-500/40 animate-pulse'
                                   : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                               }`}
                             >
-                              {stLower.toUpperCase()}
+                              {(isError || hasFatalError ? 'ERROR' : stLower).toUpperCase()}
                             </span>
                           </div>
                           <h3 className="text-lg font-extrabold text-white uppercase font-sans tracking-wide group-hover:text-sky-400 transition-colors">
@@ -277,6 +283,28 @@ export default function DashboardPage() {
                           v{ag.version || '1.0.0'}
                         </span>
                       </div>
+
+                      {/* Fatal Stopping Error Notice Box */}
+                      {hasFatalError && (
+                        <div className="p-3 bg-rose-950/40 border border-rose-500/40 text-xs font-mono space-y-1">
+                          <div className="flex items-center justify-between text-[10px] font-bold text-rose-400 uppercase">
+                            <span>🚨 Fatal Stopping Error</span>
+                            {ag.error_category && (
+                              <span className="px-1.5 py-0.2 bg-rose-500/20 border border-rose-500/30 text-[9px]">
+                                {ag.error_category.replace(/_/g, ' ')}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-rose-300/90 line-clamp-3" title={ag.last_error || ''}>
+                            {ag.last_error}
+                          </p>
+                          {ag.last_error_at && (
+                            <span className="text-[9px] text-zinc-500 block">
+                              Reported: {new Date(ag.last_error_at).toLocaleTimeString()}
+                            </span>
+                          )}
+                        </div>
+                      )}
 
                       {/* Connected Data Sources List */}
                       <div className="space-y-2 pt-1 border-t border-zinc-900">

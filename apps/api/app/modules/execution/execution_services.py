@@ -317,9 +317,15 @@ class ExecutionService:
                 if update.status == "running":
                     agent_obj.status = "busy"
                     agent_obj.idle_since = None   # Actively running — clear idle marker
-                elif update.status in ["completed", "failed"]:
+                elif update.status == "completed":
                     agent_obj.status = "online"
                     agent_obj.idle_since = now    # Job done — start idle tracking for Option C/A
+                elif update.status == "failed":
+                    agent_obj.status = "error"
+                    agent_obj.last_error = f"Migration job '{job.id}' failed: {update.error_message or 'Fatal execution failure.'}"
+                    agent_obj.error_category = "JOB_EXECUTION_FAILURE"
+                    agent_obj.last_error_at = now
+                    agent_obj.idle_since = now
 
         await session.commit()
         await session.refresh(job)

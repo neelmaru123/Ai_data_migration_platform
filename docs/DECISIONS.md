@@ -740,3 +740,38 @@ Implemented an **AI-Powered Execution Error Diagnosis & Self-Healing UI System**
 - Automatic background diagnosis runs on the API server asynchronously without delaying the HTTP progress response returned to the Docker Agent.
 - Future enhancements can introduce automated blueprint AST auto-repair for recoverable schema mismatches.
 
+---
+
+## [2026-09-07] - Agent Fatal Stopping Error Capture and UI Notification System
+
+### 1. Decision Summary
+Implemented a targeted **Fatal Stopping Error Capture System** that detects and surfaces critical errors that prevent Docker agents from running or executing tasks, without cluttering the UI with normal terminal stdout/stderr stream logs.
+
+Key components:
+1. **Control Plane Schema Extension (`010_add_error_fields_to_agents.py`)**: Added `last_error` (`Text`), `error_category` (`String(100)`), and `last_error_at` (`DateTime(timezone=True)`) to the `agents` table.
+2. **Dual-Channel Error Reporting in Agent Engine (`apps/agent/main.py`)**:
+   - For authenticated runtime failures: Agent reports via `POST /api/v1/agents/heartbeat` with `error_message` and `error_category`.
+   - For unauthenticated startup failures (missing token, invalid token 401/403, missing DB configs, or unhandled exceptions): Agent reports via an unauthenticated emergency endpoint `POST /api/v1/agents/fatal-error` passing `X-Agent-ID`, then safely terminates (`os._exit(1)`).
+3. **Control Plane Watchdog Detection (`check_stale_agents_and_jobs`)**:
+   - If an agent container crashes abruptly, gets killed by Docker OOM killer, or disconnects without emitting a fatal payload, the 60s background watchdog tags the agent with `error_category = "DISCONNECTED_UNEXPECTEDLY"` and a descriptive explanation, broadcasting the event via WebSocket.
+4. **Auto-Recovery on Successful Reconnect**:
+   - When an agent reconnects and sends a healthy heartbeat, `process_agent_heartbeat()` clears `last_error` and `error_category`, resetting the agent to healthy `online`.
+5. **Targeted Frontend UI Callout**:
+   - `apps/web/components/agents/AgentStatusBanner.tsx`: Prominently renders a sleek red diagnostic banner (`🚨 DOCKER AGENT STOPPING ERROR DETECTED`) showing category tag, timestamp, error text, and actionable resolution steps.
+   - `apps/web/app/dashboard/page.tsx`: Displays an error status pill and red alert badge directly on affected agent cards.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Streaming entire raw terminal logs (thousands of lines of Python bytecode, DB reflection queries, connection pool stats) to the browser is noisy, wastes bandwidth, and obscures the actual root cause when an agent stops working. The user explicitly requested to only display errors that stop the agent from running.
+- **Why Emergency Endpoint (`POST /api/v1/agents/fatal-error`)**: If an agent is supplied an expired or invalid `AGENT_TOKEN`, standard heartbeat endpoints reject it with HTTP 401 Unauthorized. Without an unauthenticated emergency reporting channel keyed by `X-Agent-ID`, startup authentication failures could never be displayed in the UI.
+- **Why Watchdog Fallback**: In real-world Docker environments, containers can be abruptly killed via `SIGKILL`, `docker stop`, host reboots, or host port conflicts. The agent process cannot execute cleanup code on `SIGKILL`. The control plane watchdog ensures even ungraceful terminations are tagged with clear diagnostics rather than silently remaining unexplained.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Streaming All Container Logs via Docker Socket / WebSockets**
+  - *Rejected*: Violates user requirement to only show stopping errors; adds high CPU/bandwidth overhead and security risks associated with exposing Docker daemon sockets.
+- **Alternative B: Retaining Fatal Error Indefinitely Even After Reconnection**
+  - *Rejected*: Confuses users when an agent has been fixed and restarted. Automatically clearing `last_error` upon a healthy `online` heartbeat provides self-healing feedback.
+
+### 4. Trade-offs & Future Considerations
+- The emergency `/fatal-error` endpoint is strictly rate-limited and validates `agent_id` existence to prevent abuse.
+- In the future, automated remediation recommendations (like port conflict detection or firewall testing) can be expanded using the LLM error diagnosis pipeline.
+

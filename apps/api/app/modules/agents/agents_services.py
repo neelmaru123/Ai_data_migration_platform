@@ -242,6 +242,17 @@ class AgentService:
         if heartbeat.version:
             agent.version = heartbeat.version.strip()
 
+        # Update fatal stopping error if reported
+        if heartbeat.error_message or heartbeat.status == "error":
+            agent.last_error = heartbeat.error_message
+            agent.error_category = heartbeat.error_category or "FATAL_ERROR"
+            agent.last_error_at = now
+            agent.status = "error"
+        elif heartbeat.status == "online":
+            # Agent recovered and is healthy online — clear active fatal stopping error
+            agent.last_error = None
+            agent.error_category = None
+
         # Update attached Data Sources health diagnostics if provided in heartbeat
         data_sources_summary = []
         if heartbeat.data_sources and agent.data_sources:
@@ -440,6 +451,9 @@ class AgentService:
                 "status": agent.status,
                 "version": agent.version,
                 "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
+                "last_error": agent.last_error,
+                "error_category": agent.error_category,
+                "last_error_at": agent.last_error_at.isoformat() if agent.last_error_at else None,
                 "action": action,
                 "data_sources": data_sources_summary if data_sources_summary else [
                     {
@@ -466,10 +480,68 @@ class AgentService:
             version=agent.version,
             api_token=None,  # Never expose raw token in responses
             last_seen_at=agent.last_seen_at,
+            last_error=agent.last_error,
+            error_category=agent.error_category,
+            last_error_at=agent.last_error_at,
             created_at=agent.created_at,
             updated_at=agent.updated_at,
             action=action,
             action_reason=action_reason,
+        )
+
+    @staticmethod
+    async def record_fatal_error(
+        session: AsyncSession,
+        agent_id: uuid.UUID,
+        error_message: str,
+        error_category: str = "FATAL_ERROR",
+    ) -> AgentResponse:
+        """
+        Records an emergency fatal error reported by an agent (e.g. startup crash, token failure)
+        and broadcasts real-time alert to UI subscribers.
+        """
+        stmt = select(Agent).where(Agent.id == agent_id).options(selectinload(Agent.data_sources))
+        res = await session.execute(stmt)
+        agent = res.scalar_one_or_none()
+        if not agent:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+        now = datetime.now(timezone.utc)
+        agent.status = "error"
+        agent.last_error = error_message
+        agent.error_category = error_category
+        agent.last_error_at = now
+        await session.commit()
+        await session.refresh(agent)
+
+        await manager.broadcast_to_agent(
+            str(agent.id),
+            {
+                "event": "AGENT_STATUS_CHANGED",
+                "agent_id": str(agent.id),
+                "status": "error",
+                "last_error": agent.last_error,
+                "error_category": agent.error_category,
+                "last_error_at": agent.last_error_at.isoformat(),
+            },
+        )
+
+        return AgentResponse(
+            id=agent.id,
+            user_id=agent.user_id,
+            name=agent.name,
+            agent_identifier=agent.agent_identifier,
+            status=agent.status,
+            version=agent.version,
+            api_token=None,
+            last_seen_at=agent.last_seen_at,
+            last_error=agent.last_error,
+            error_category=agent.error_category,
+            last_error_at=agent.last_error_at,
+            created_at=agent.created_at,
+            updated_at=agent.updated_at,
+            action=None,
+            action_reason=None,
         )
 
     @staticmethod
@@ -514,6 +586,12 @@ class AgentService:
                 continue
 
             agent.status = "offline"
+            agent.error_category = "DISCONNECTED_UNEXPECTEDLY"
+            agent.last_error = (
+                f"Agent stopped reporting heartbeats for over {stale_threshold_seconds}s. "
+                "The Docker container may have exited, crashed, or lost network connectivity."
+            )
+            agent.last_error_at = datetime.now(timezone.utc)
             logger.warning(
                 f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}). Marked offline."
             )
@@ -526,6 +604,9 @@ class AgentService:
                     "agent_id": str(agent.id),
                     "status": "offline",
                     "reason": "heartbeat_timeout",
+                    "last_error": agent.last_error,
+                    "error_category": agent.error_category,
+                    "last_error_at": agent.last_error_at.isoformat(),
                     "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
                 },
             )

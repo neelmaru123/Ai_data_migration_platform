@@ -7,7 +7,7 @@ import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, ClassVar, List, Optional
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint
+from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -56,6 +56,21 @@ class Agent(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="Timestamp when agent last became idle (no active jobs). Set on job complete/fail, cleared on new job queued. Used to determine ENTER_IDLE_MODE / SHUTDOWN directives.",
+    )
+    last_error: Mapped[Optional[str]] = mapped_column(
+        Text,
+        nullable=True,
+        comment="Human-readable description of the fatal error that stopped or degraded the agent.",
+    )
+    error_category: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Category tag for the fatal error (e.g. CONFIG_ERROR, AUTH_ERROR, RUNTIME_CRASH, DISCONNECTED_UNEXPECTEDLY).",
+    )
+    last_error_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when the fatal stopping error occurred or was recorded.",
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

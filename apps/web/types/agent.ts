@@ -39,10 +39,13 @@ export interface AgentResponse {
   user_id: string;
   name: string;
   agent_identifier: string;
-  status: 'online' | 'offline' | 'degraded' | 'busy' | string;
+  status: 'online' | 'offline' | 'degraded' | 'busy' | 'error' | string;
   version?: string | null;
   api_token?: string | null;
   last_seen_at?: string | null;
+  last_error?: string | null;
+  error_category?: string | null;
+  last_error_at?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -264,10 +264,12 @@ def send_heartbeat(
     agent_token: str,
     version: str,
     override_status: Optional[str] = None,
+    error_message: Optional[str] = None,
+    error_category: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Sends periodic heartbeat ping and data source diagnostics to backend API.
-    Computes status ('online', 'degraded', or 'offline') based on health checks or override.
+    Sends periodic heartbeat ping, diagnostics, or fatal stopping error to backend API.
+    Computes status ('online', 'degraded', 'error', or 'offline') based on health checks or override.
     Returns the backend control directive string if one was issued (e.g. 'ENTER_IDLE_MODE',
     'RESUME_ACTIVE_MODE', 'SHUTDOWN'), or None if no directive was given.
     """
@@ -277,9 +279,9 @@ def send_heartbeat(
         "X-Agent-Token": agent_token,
     }
 
-    if override_status == "offline":
+    if override_status in ("offline", "error"):
         ds_reports = None
-        computed_status = "offline"
+        computed_status = override_status
     else:
         # Collect latest connection diagnostics for all configured local databases concurrently
         ds_reports = collect_data_sources_health()
@@ -296,6 +298,8 @@ def send_heartbeat(
         "status": computed_status,
         "version": version,
         "data_sources": ds_reports if ds_reports else None,
+        "error_message": error_message,
+        "error_category": error_category,
     }
     payload = json.dumps(payload_data).encode("utf-8")
 
@@ -324,10 +328,69 @@ def send_heartbeat(
                 return action
     except urllib.error.HTTPError as err:
         logger.error(f"Agent heartbeat failed with HTTP status {err.code}: {err.reason}")
+        raise
     except Exception as exc:
         logger.error(f"Could not connect to backend at {url}: {exc}")
+        raise
 
     return None
+
+
+def report_fatal_error_and_exit(
+    backend_url: str,
+    agent_token: str,
+    version: str,
+    error_message: str,
+    error_category: str = "FATAL_ERROR",
+    exit_code: int = 1,
+):
+    """
+    Transmits an emergency fatal error notification to the backend so the user
+    can see the exact failure reason in the Web UI, then terminates the container process.
+    """
+    logger.error(f"[FATAL AGENT ERROR - {error_category}]: {error_message}")
+    agent_id = os.getenv("AGENT_ID")
+
+    # 1. Try authenticated heartbeat with error payload first
+    reported = False
+    if agent_token and backend_url:
+        try:
+            send_heartbeat(
+                backend_url=backend_url,
+                agent_token=agent_token,
+                version=version,
+                override_status="error",
+                error_message=error_message,
+                error_category=error_category,
+            )
+            reported = True
+            logger.info("Fatal stopping error successfully synced to backend for UI presentation.")
+        except Exception as sync_err:
+            logger.debug(f"Authenticated heartbeat error reporting failed: {sync_err}")
+
+    # 2. Fallback to emergency /fatal-error endpoint if unauthenticated (e.g. token rejected)
+    if not reported and agent_id and backend_url:
+        try:
+            fatal_url = f"{backend_url.rstrip('/')}/api/v1/agents/fatal-error"
+            fatal_payload = json.dumps({
+                "error_message": error_message,
+                "error_category": error_category,
+            }).encode("utf-8")
+            fatal_req = urllib.request.Request(
+                fatal_url,
+                data=fatal_payload,
+                headers={"Content-Type": "application/json", "X-Agent-ID": agent_id},
+                method="POST",
+            )
+            with urllib.request.urlopen(fatal_req, timeout=5.0) as f_resp:
+                if f_resp.status in (200, 201):
+                    reported = True
+                    logger.info("Emergency fatal stopping error successfully synced to backend for UI presentation.")
+        except Exception as f_err:
+            logger.warning(f"Could not transmit emergency fatal error to backend: {f_err}")
+
+    logger.info(f"Docker Agent terminating with exit code {exit_code}.")
+    os._exit(exit_code)
 
 
 def log_configured_databases():
@@ -491,8 +554,14 @@ def poll_and_execute_tasks(
                 dest_url = os.getenv("DEST_DB_4_URL", os.getenv("DEST_DB_1_URL", ""))
 
             if not dest_url:
-                logger.error("No destination database environment variables (DEST_*_URL) detected. Cannot execute migration jobs.")
-                return
+                report_fatal_error_and_exit(
+                    backend_url=backend_url,
+                    agent_token=clean_token,
+                    version=os.getenv("AGENT_VERSION", "1.0.0"),
+                    error_message="No destination database environment variables (DEST_*_URL or DEST_DB_URL) detected. Migration cannot run without a target database.",
+                    error_category="CONFIG_ERROR",
+                    exit_code=1,
+                )
 
             from engine.progress_reporter import ProgressReporter
             from engine.orchestrator import ExecutionOrchestrator
@@ -655,8 +724,14 @@ def main():
         agent_token = auto_register_agent(backend_url)
 
     if not agent_token:
-        logger.error("Could not obtain AGENT_TOKEN. Docker Agent cannot start unauthenticated.")
-        return
+        report_fatal_error_and_exit(
+            backend_url=backend_url,
+            agent_token="",
+            version=version,
+            error_message="AGENT_TOKEN environment variable is missing. The Docker agent cannot run unauthenticated.",
+            error_category="MISSING_TOKEN",
+            exit_code=1,
+        )
 
     stop_event = threading.Event()
     is_shutting_down = False
@@ -681,6 +756,7 @@ def main():
     max_retries = 5
     backoff_seconds = 3
     connected = False
+    last_handshake_err = None
 
     for attempt in range(1, max_retries + 1):
         logger.info(f"Executing startup connection handshake with backend (attempt {attempt}/{max_retries})...")
@@ -688,15 +764,32 @@ def main():
             send_heartbeat(backend_url, agent_token, version)
             connected = True
             break
-        except Exception:
-            pass
+        except urllib.error.HTTPError as http_err:
+            last_handshake_err = http_err
+            if http_err.code in (401, 403):
+                report_fatal_error_and_exit(
+                    backend_url=backend_url,
+                    agent_token=agent_token,
+                    version=version,
+                    error_message=f"Agent token was rejected by backend (HTTP {http_err.code}: Unauthorized). Please verify the AGENT_TOKEN in your docker run command.",
+                    error_category="AUTH_ERROR",
+                    exit_code=1,
+                )
+        except Exception as exc:
+            last_handshake_err = exc
         if attempt < max_retries:
             logger.warning(f"Handshake failed. Retrying in {backoff_seconds} seconds...")
             time.sleep(backoff_seconds)
 
     if not connected:
-        logger.error(f"Agent startup handshake failed after {max_retries} attempts. Check backend logs and AGENT_TOKEN.")
-        return
+        report_fatal_error_and_exit(
+            backend_url=backend_url,
+            agent_token=agent_token,
+            version=version,
+            error_message=f"Agent startup handshake failed after {max_retries} attempts: {last_handshake_err}. Verify BACKEND_URL and host network connectivity.",
+            error_category="CONNECTION_ERROR",
+            exit_code=1,
+        )
 
     logger.info("Agent process is online and securely connected to backend.")
 
@@ -737,4 +830,17 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as unhandled_exc:
+        _backend_url = os.getenv("BACKEND_URL", os.getenv("API_BASE_URL", "http://localhost:8000")).replace("/api/v1", "")
+        _agent_token = os.getenv("AGENT_TOKEN", "")
+        _version = os.getenv("AGENT_VERSION", "1.0.0")
+        report_fatal_error_and_exit(
+            backend_url=_backend_url,
+            agent_token=_agent_token,
+            version=_version,
+            error_message=f"Unhandled agent runtime crash: {str(unhandled_exc)}",
+            error_category="RUNTIME_CRASH",
+            exit_code=1,
+        )
