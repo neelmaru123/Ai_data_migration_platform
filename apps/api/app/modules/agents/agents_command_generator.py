@@ -169,7 +169,7 @@ class AgentCommandGenerator:
         bash_lines = [
             "docker run -d \\",
             f"  --name {container_name} \\",
-            "  --restart unless-stopped \\",
+            "  --restart on-failure \\",
             "  --add-host=host.docker.internal:host-gateway \\",
         ]
         for k, v in env_vars.items():
@@ -181,7 +181,7 @@ class AgentCommandGenerator:
         ps_lines = [
             "docker run -d `",
             f"  --name {container_name} `",
-            "  --restart unless-stopped `",
+            "  --restart on-failure `",
             "  --add-host=host.docker.internal:host-gateway `",
         ]
         for k, v in env_vars.items():
@@ -192,7 +192,7 @@ class AgentCommandGenerator:
         # 3. Build Single-line command
         env_flags = " ".join([f'-e {k}="{cls._escape_bash(v)}"' for k, v in env_vars.items()])
         docker_command_oneline = (
-            f"docker run -d --name {container_name} --restart unless-stopped "
+            f"docker run -d --name {container_name} --restart on-failure "
             f"--add-host=host.docker.internal:host-gateway {env_flags} {resolved_image}"
         )
 

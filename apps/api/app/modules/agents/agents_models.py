@@ -52,6 +52,11 @@ class Agent(Base):
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    idle_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Timestamp when agent last became idle (no active jobs). Set on job complete/fail, cleared on new job queued. Used to determine ENTER_IDLE_MODE / SHUTDOWN directives.",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

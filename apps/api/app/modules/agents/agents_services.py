@@ -26,8 +26,15 @@ from app.modules.agents.agents_schemas import (
     AgentUpdate,
 )
 from app.modules.execution.execution_models import MigrationJob
+from sqlalchemy import and_
 from app.modules.sources.sources_models import DataSource
 from app.modules.sources.sources_schemas import DataSourceResponse
+
+# ---------------------------------------------------------------------------
+# Option C — Adaptive Idle Heartbeat thresholds
+# ---------------------------------------------------------------------------
+_IDLE_MODE_THRESHOLD_SECONDS = 300   # 5 minutes: switch to 5-min standby heartbeat
+# ---------------------------------------------------------------------------
 
 
 class AgentService:
@@ -214,11 +221,12 @@ class AgentService:
     @staticmethod
     async def process_agent_heartbeat(
         session: AsyncSession, agent: Agent, heartbeat: AgentHeartbeat
-    ) -> Agent:
+    ) -> AgentResponse:
         """
         Process periodic heartbeat ping from authenticated agent.
         Updates agent status, version, last_seen_at, and data sources health diagnostics.
         Emits AGENT_CONNECTED on transition to online, AGENT_DISCONNECTED on offline, or AGENT_HEARTBEAT on recurring pings.
+        Returns AgentResponse with optional action directive (ENTER_IDLE_MODE, RESUME_ACTIVE_MODE, SHUTDOWN).
         """
         now = datetime.now(timezone.utc)
 
@@ -242,13 +250,40 @@ class AgentService:
             for ds in agent.data_sources:
                 ident_lower = ds.identifier.lower().strip()
                 source_map[ident_lower] = ds
-                if ident_lower.startswith("src_"):
-                    source_map[ident_lower[4:]] = ds
-                elif ident_lower.startswith("dest_"):
-                    source_map[ident_lower[5:]] = ds
-                else:
-                    source_map[f"src_{ident_lower}"] = ds
-                    source_map[f"dest_{ident_lower}"] = ds
+
+                clean_id = ident_lower
+                if clean_id.startswith("src_"):
+                    clean_id = clean_id[4:]
+                elif clean_id.startswith("dest_"):
+                    clean_id = clean_id[5:]
+                elif clean_id.startswith("dst_"):
+                    clean_id = clean_id[4:]
+
+                source_map[clean_id] = ds
+                source_map[f"src_{clean_id}"] = ds
+                source_map[f"dest_{clean_id}"] = ds
+                source_map[f"dst_{clean_id}"] = ds
+
+            # Fallback for single source or single destination data sources
+            sources_by_role = {"source": [], "destination": []}
+            for ds in agent.data_sources:
+                role = (ds.role or "").lower()
+                if "src" in role or "source" in role:
+                    sources_by_role["source"].append(ds)
+                elif "dest" in role or "dst" in role or "target" in role:
+                    sources_by_role["destination"].append(ds)
+
+            if len(sources_by_role["destination"]) == 1:
+                single_dest = sources_by_role["destination"][0]
+                for generic_key in ("db", "dest", "dest_db", "dst", "dst_db", "target"):
+                    if generic_key not in source_map:
+                        source_map[generic_key] = single_dest
+
+            if len(sources_by_role["source"]) == 1:
+                single_src = sources_by_role["source"][0]
+                for generic_key in ("source", "source_db", "src", "src_db"):
+                    if generic_key not in source_map:
+                        source_map[generic_key] = single_src
 
             updated_data_sources = set()
             for report in heartbeat.data_sources:
@@ -276,7 +311,7 @@ class AgentService:
                         "last_checked_at": ds.last_checked_at.isoformat(),
                     })
                 else:
-                    logger.warning(
+                    logger.debug(
                         f"Unmatched health report identifier '{report.identifier}' for agent '{agent.id}'"
                     )
 
@@ -292,6 +327,110 @@ class AgentService:
         else:
             event_name = "AGENT_HEARTBEAT"
 
+        # ---------------------------------------------------------------
+        # Option A + C: Determine backend control directive
+        # Priority order:
+        #   1. Active job → RESUME_ACTIVE_MODE (fast heartbeat)
+        #   2. Most recent job completed successfully → SHUTDOWN (container exits)
+        #   3. Idle 5+ min with no successful job → ENTER_IDLE_MODE (standby)
+        # ---------------------------------------------------------------
+        action: Optional[str] = None
+        action_reason: Optional[str] = None
+
+        if agent.idle_since is not None and heartbeat.status != "offline":
+            # Priority 1: Check for any currently active/queued job
+            stmt_active = select(MigrationJob).where(
+                MigrationJob.agent_id == agent.id,
+                MigrationJob.status.in_(["queued", "preparing", "running"]),
+            )
+            res_active = await session.execute(stmt_active)
+            active_job = res_active.scalar_one_or_none()
+
+            if active_job:
+                # Job is running — clear idle marker, restore fast heartbeat
+                agent.idle_since = None
+                await session.commit()
+                action = "RESUME_ACTIVE_MODE"
+                action_reason = (
+                    f"Active migration job '{active_job.id}' detected. "
+                    "Restoring 20-second heartbeat frequency."
+                )
+                logger.info(
+                    f"Agent '{agent.name}' ({agent.id}): active job detected — issuing RESUME_ACTIVE_MODE."
+                )
+            else:
+                # Priority 2: Check if the most recent job completed successfully
+                # If so, the migration is done — shut down the container (Option A auto-trigger).
+                stmt_latest_job = (
+                    select(MigrationJob)
+                    .where(MigrationJob.agent_id == agent.id)
+                    .order_by(MigrationJob.completed_at.desc().nullslast())
+                    .limit(1)
+                )
+                res_latest = await session.execute(stmt_latest_job)
+                latest_job = res_latest.scalar_one_or_none()
+
+                if latest_job and latest_job.status == "completed":
+                    # Check if the job completed recently (within 120s).
+                    # If completed long ago, the container was restarted by the user to perform new tasks.
+                    is_recent_completion = False
+                    if latest_job.completed_at:
+                        comp_time = (
+                            latest_job.completed_at
+                            if latest_job.completed_at.tzinfo
+                            else latest_job.completed_at.replace(tzinfo=timezone.utc)
+                        )
+                        if (now - comp_time).total_seconds() <= 120:
+                            is_recent_completion = True
+
+                    if is_recent_completion:
+                        # Option A: Migration finished recently — issue SHUTDOWN directive
+                        action = "SHUTDOWN"
+                        action_reason = (
+                            f"Migration job '{latest_job.id}' completed successfully. "
+                            "Initiating graceful container shutdown."
+                        )
+                        logger.info(
+                            f"Agent '{agent.name}' ({agent.id}): job '{latest_job.id}' completed recently — "
+                            "issuing SHUTDOWN directive."
+                        )
+                    else:
+                        # Job completed in a prior run; agent was restarted by user for new work.
+                        # Apply Option C standby rules instead of auto-shutdown.
+                        idle_since_aware = (
+                            agent.idle_since
+                            if agent.idle_since.tzinfo
+                            else agent.idle_since.replace(tzinfo=timezone.utc)
+                        )
+                        idle_seconds = (now - idle_since_aware).total_seconds()
+                        if idle_seconds >= 300:
+                            action = "ENTER_IDLE_MODE"
+                            action_reason = f"Agent idle for {int(idle_seconds)}s — entering low-power standby mode."
+                        else:
+                            action = "RESUME_ACTIVE_MODE"
+                else:
+                    # Priority 3: No completed job (never ran, or last job failed / was queued)
+                    # Apply Option C: slow down heartbeat after 5-min idle grace window.
+                    idle_since_aware = (
+                        agent.idle_since
+                        if agent.idle_since.tzinfo
+                        else agent.idle_since.replace(tzinfo=timezone.utc)
+                    )
+                    idle_seconds = (now - idle_since_aware).total_seconds()
+
+                    if idle_seconds >= _IDLE_MODE_THRESHOLD_SECONDS:
+                        # Option C: 5+ minutes idle — slow heartbeat, container stays alive
+                        action = "ENTER_IDLE_MODE"
+                        action_reason = (
+                            f"No active migration tasks for {int(idle_seconds // 60)} minutes. "
+                            "Switching to 5-minute standby heartbeat. Container remains active and ready."
+                        ) 
+                        logger.info(
+                            f"Agent '{agent.name}' ({agent.id}): idle for {int(idle_seconds // 60)}m "
+                            "— issuing ENTER_IDLE_MODE."
+                        )
+                    # else: within 5-min grace window, no directive issued yet
+
         # Broadcast real-time signal to Web App subscribers
         await manager.broadcast_to_agent(
             str(agent.id),
@@ -301,6 +440,7 @@ class AgentService:
                 "status": agent.status,
                 "version": agent.version,
                 "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
+                "action": action,
                 "data_sources": data_sources_summary if data_sources_summary else [
                     {
                         "id": str(ds.id),
@@ -316,7 +456,21 @@ class AgentService:
             },
         )
 
-        return agent
+        # Build and return AgentResponse with embedded control directive
+        return AgentResponse(
+            id=agent.id,
+            user_id=agent.user_id,
+            name=agent.name,
+            agent_identifier=agent.agent_identifier,
+            status=agent.status,
+            version=agent.version,
+            api_token=None,  # Never expose raw token in responses
+            last_seen_at=agent.last_seen_at,
+            created_at=agent.created_at,
+            updated_at=agent.updated_at,
+            action=action,
+            action_reason=action_reason,
+        )
 
     @staticmethod
     async def check_stale_agents_and_jobs(

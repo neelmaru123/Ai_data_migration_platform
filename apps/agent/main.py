@@ -81,10 +81,17 @@ def extract_identifier_from_env_key(env_key: str) -> str:
     elif k.endswith("_URI"):
         k = k[:-4]
 
+    if k in ("SOURCE_DB", "SRC"):
+        return "source_db"
+    if k in ("DEST_DB", "DEST", "DST"):
+        return "dest_db"
+
     if k.startswith("SRC_"):
         k = k[4:]
     elif k.startswith("DEST_"):
         k = k[5:]
+    elif k.startswith("DST_"):
+        k = k[4:]
     return k.lower()
 
 
@@ -202,15 +209,26 @@ def collect_data_sources_health() -> List[Dict[str, Any]]:
     """
     items_to_test: List[tuple[str, str]] = []
     seen_identifiers = set()
+    seen_urls = set()
 
-    for k, v in os.environ.items():
-        if (k.startswith("SRC_") or k.startswith("DEST_") or k in ("SOURCE_DB_URL", "DEST_DB_URL")) and (
+    # Sort env keys so specific ones (e.g. DEST_DST_DB_2_URL) come before generic ones (DEST_DB_URL)
+    env_keys = sorted(
+        os.environ.keys(),
+        key=lambda k: (k in ("SOURCE_DB_URL", "DEST_DB_URL", "SOURCE_DB_URI", "DEST_DB_URI"), len(k)),
+    )
+
+    for k in env_keys:
+        v = os.environ[k]
+        if (k.startswith("SRC_") or k.startswith("DEST_") or k.startswith("DST_") or k in ("SOURCE_DB_URL", "DEST_DB_URL")) and (
             "URL" in k or "URI" in k
         ):
             raw_id = extract_identifier_from_env_key(k)
-            if raw_id in seen_identifiers:
+            norm_url = v.strip()
+            if raw_id in seen_identifiers or (norm_url and norm_url in seen_urls):
                 continue
             seen_identifiers.add(raw_id)
+            if norm_url:
+                seen_urls.add(norm_url)
             items_to_test.append((raw_id, v))
 
     if not items_to_test:
@@ -246,10 +264,12 @@ def send_heartbeat(
     agent_token: str,
     version: str,
     override_status: Optional[str] = None,
-) -> bool:
+) -> Optional[str]:
     """
     Sends periodic heartbeat ping and data source diagnostics to backend API.
     Computes status ('online', 'degraded', or 'offline') based on health checks or override.
+    Returns the backend control directive string if one was issued (e.g. 'ENTER_IDLE_MODE',
+    'RESUME_ACTIVE_MODE', 'SHUTDOWN'), or None if no directive was given.
     """
     url = f"{backend_url.rstrip('/')}/api/v1/agents/heartbeat"
     headers = {
@@ -284,9 +304,10 @@ def send_heartbeat(
         with urllib.request.urlopen(req, timeout=5.0) as resp:
             if resp.status == 200:
                 body = json.loads(resp.read().decode("utf-8"))
+                action = body.get("action")  # Optional backend control directive
                 if computed_status == "offline":
                     logger.info(f"Offline status synced with backend (Agent ID: {body.get('id')}).")
-                    return True
+                    return action  # None for offline
 
                 healthy_count = sum(1 for r in (ds_reports or []) if r.get("is_healthy"))
                 failing_count = len(ds_reports or []) - healthy_count
@@ -297,13 +318,16 @@ def send_heartbeat(
                 for r in (ds_reports or []):
                     if not r.get("is_healthy"):
                         logger.warning(f"  [!] DataSource '{r.get('identifier')}' unreachable: {r.get('error_message')}")
-                return True
+
+                if action:
+                    logger.info(f"Backend directive received: [{action}] — {body.get('action_reason', '')}")
+                return action
     except urllib.error.HTTPError as err:
         logger.error(f"Agent heartbeat failed with HTTP status {err.code}: {err.reason}")
     except Exception as exc:
         logger.error(f"Could not connect to backend at {url}: {exc}")
 
-    return False
+    return None
 
 
 def log_configured_databases():
@@ -420,7 +444,11 @@ def auto_register_agent(backend_url: str) -> Optional[str]:
         return None
 
 
-def poll_and_execute_tasks(backend_url: str, agent_token: str):
+def poll_and_execute_tasks(
+    backend_url: str,
+    agent_token: str,
+    heartbeat_config: Optional["HeartbeatConfig"] = None,
+):
     """Polls backend GET /api/v1/agents/tasks for pending migration execution jobs."""
     clean_token = agent_token.strip()
     url = f"{backend_url.rstrip('/')}/api/v1/agents/tasks"
@@ -432,6 +460,11 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
                 return
 
             logger.info(f"Discovered {len(tasks)} pending execution job(s) for this agent!")
+
+            # Snap back to fast 20-sec heartbeat immediately when a job is found
+            # (don't wait for next backend directive — this is the direct trigger path)
+            if heartbeat_config is not None:
+                heartbeat_config.enter_active_mode()
 
             # Fetch source & target database URLs from environment (EC-13)
             src_urls = {}
@@ -515,25 +548,90 @@ def poll_and_execute_tasks(backend_url: str, agent_token: str):
 import threading
 
 
+class HeartbeatConfig:
+    """
+    Thread-safe mutable heartbeat interval configuration.
+    Shared between the background HeartbeatThread and the main task polling loop.
+
+    Active mode  (20s) : used during job execution or while idle < 5 minutes.
+    Idle mode   (300s) : Option C standby — container stays alive, heartbeat every 5 minutes.
+    """
+    ACTIVE_INTERVAL: int = 20    # seconds during active job / initial grace period
+    IDLE_INTERVAL: int = 300     # seconds in Option C standby (5 minutes)
+
+    def __init__(self) -> None:
+        self._interval = self.ACTIVE_INTERVAL
+        self._lock = threading.Lock()
+
+    def enter_idle_mode(self) -> None:
+        """Switch to 5-minute standby heartbeat (Option C). Container stays alive."""
+        with self._lock:
+            if self._interval != self.IDLE_INTERVAL:
+                self._interval = self.IDLE_INTERVAL
+                logger.info(
+                    "[OPTION C] Heartbeat switched to STANDBY mode (5-min interval). "
+                    "Container remains active and ready for new migration jobs."
+                )
+
+    def enter_active_mode(self) -> None:
+        """Restore 20-second fast heartbeat (used during job execution)."""
+        with self._lock:
+            if self._interval != self.ACTIVE_INTERVAL:
+                self._interval = self.ACTIVE_INTERVAL
+                logger.info(
+                    "[OPTION C] Heartbeat restored to ACTIVE mode (20-sec interval)."
+                )
+
+    @property
+    def current(self) -> int:
+        with self._lock:
+            return self._interval
+
+
 def start_heartbeat_thread(
     backend_url: str,
     agent_token: str,
     version: str,
     interval: int,
     stop_event: threading.Event,
+    heartbeat_config: "HeartbeatConfig",
 ) -> threading.Thread:
     """
     Launches a dedicated daemon background thread that sends periodic heartbeats
-    at regular intervals, independent of job execution.
+    at a rate determined by heartbeat_config.current (20s active / 300s idle standby).
+    Handles backend control directives:
+      - ENTER_IDLE_MODE   : switches to 5-min interval (Option C) — container stays alive
+      - RESUME_ACTIVE_MODE: restores 20-sec interval when a new job is detected
+      - SHUTDOWN          : sets stop_event to trigger graceful container exit (Option A)
     """
-    def _run():
-        logger.info(f"Background heartbeat loop started (interval: {interval}s).")
+    def _run() -> None:
+        logger.info(f"Background heartbeat loop started (initial interval: {heartbeat_config.current}s).")
         while not stop_event.is_set():
             try:
-                send_heartbeat(backend_url, agent_token, version)
+                action = send_heartbeat(backend_url, agent_token, version)
             except Exception as exc:
                 logger.warning(f"Background heartbeat exception: {exc}")
-            stop_event.wait(timeout=interval)
+                action = None
+
+            if action == "SHUTDOWN":
+                # Option A: Backend commanded graceful container shutdown
+                logger.info(
+                    "[OPTION A] Backend issued SHUTDOWN directive. "
+                    "Initiating graceful container exit..."
+                )
+                stop_event.set()  # Signals both heartbeat thread and main polling loop to stop
+                break
+
+            elif action == "ENTER_IDLE_MODE":
+                # Option C: No active jobs for 5+ min — slow down, container stays alive
+                heartbeat_config.enter_idle_mode()
+
+            elif action == "RESUME_ACTIVE_MODE":
+                # Backend confirmed an active job — snap back to fast mode
+                heartbeat_config.enter_active_mode()
+
+            stop_event.wait(timeout=heartbeat_config.current)
+
         logger.info("Background heartbeat loop terminated cleanly.")
 
     t = threading.Thread(target=_run, daemon=True, name="HeartbeatThread")
@@ -586,9 +684,12 @@ def main():
 
     for attempt in range(1, max_retries + 1):
         logger.info(f"Executing startup connection handshake with backend (attempt {attempt}/{max_retries})...")
-        if send_heartbeat(backend_url, agent_token, version):
+        try:
+            send_heartbeat(backend_url, agent_token, version)
             connected = True
             break
+        except Exception:
+            pass
         if attempt < max_retries:
             logger.warning(f"Handshake failed. Retrying in {backoff_seconds} seconds...")
             time.sleep(backoff_seconds)
@@ -610,15 +711,19 @@ def main():
         poll_and_execute_tasks(backend_url, agent_token)
         return
 
+    # Create shared HeartbeatConfig (Option C adaptive interval)
+    # Starts in ACTIVE mode (20s). Switches to IDLE mode (300s) on backend directive.
+    heartbeat_config = HeartbeatConfig()
+
     # Start dedicated background heartbeat thread so heartbeats continue during long ETL jobs
-    start_heartbeat_thread(backend_url, agent_token, version, interval, stop_event)
+    start_heartbeat_thread(backend_url, agent_token, version, interval, stop_event, heartbeat_config)
 
     # Continuous task polling loop in main thread
     logger.info(f"Starting continuous task polling loop (interval: {poll_interval}s)...")
     try:
         while not stop_event.is_set():
             try:
-                poll_and_execute_tasks(backend_url, agent_token)
+                poll_and_execute_tasks(backend_url, agent_token, heartbeat_config)
             except Exception as exc:
                 logger.warning(f"Task polling exception: {exc}")
             stop_event.wait(timeout=poll_interval)
@@ -627,6 +732,8 @@ def main():
     finally:
         stop_event.set()
         graceful_shutdown(backend_url, agent_token, version)
+        logger.info("Docker Agent process exiting cleanly.")
+        os._exit(0)
 
 
 if __name__ == "__main__":

@@ -62,6 +62,9 @@ class AgentHeartbeat(BaseModel):
     )
 
 
+VALID_AGENT_ACTION = Literal["SHUTDOWN", "ENTER_IDLE_MODE", "RESUME_ACTIVE_MODE"]
+
+
 class AgentResponse(BaseModel):
     """Basic response representation of an Agent."""
     id: UUID
@@ -74,6 +77,16 @@ class AgentResponse(BaseModel):
     last_seen_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    # Control directive fields — backend uses these to command the agent
+    # (e.g. slow heartbeat, resume fast mode, or shut down container)
+    action: Optional[str] = Field(
+        default=None,
+        description="Optional backend control directive: 'SHUTDOWN', 'ENTER_IDLE_MODE', or 'RESUME_ACTIVE_MODE'",
+    )
+    action_reason: Optional[str] = Field(
+        default=None,
+        description="Human-readable explanation for the issued action directive.",
+    )
 
     model_config = ConfigDict(from_attributes=True)
 

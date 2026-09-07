@@ -95,6 +95,14 @@ class ExecutionService:
                     ),
                 )
 
+        # Reset idle_since: agent is now active with a new job
+        if plan.agent_id:
+            stmt_reset_idle = select(Agent).where(Agent.id == plan.agent_id)
+            res_reset_idle = await session.execute(stmt_reset_idle)
+            agent_for_reset = res_reset_idle.scalar_one_or_none()
+            if agent_for_reset:
+                agent_for_reset.idle_since = None
+
         job = MigrationJob(
             migration_plan_id=plan_id,
             agent_id=plan.agent_id,
@@ -299,7 +307,7 @@ class ExecutionService:
         if update.error_message:
             job.error_message = update.error_message
 
-        # Refresh agent last_seen_at and status to prevent heartbeat starvation during ETL execution
+        # Refresh agent last_seen_at, status, and idle_since to prevent heartbeat starvation during ETL execution
         if job.agent_id:
             stmt_agent = select(Agent).where(Agent.id == job.agent_id)
             res_agent = await session.execute(stmt_agent)
@@ -308,8 +316,10 @@ class ExecutionService:
                 agent_obj.last_seen_at = now
                 if update.status == "running":
                     agent_obj.status = "busy"
+                    agent_obj.idle_since = None   # Actively running — clear idle marker
                 elif update.status in ["completed", "failed"]:
                     agent_obj.status = "online"
+                    agent_obj.idle_since = now    # Job done — start idle tracking for Option C/A
 
         await session.commit()
         await session.refresh(job)
