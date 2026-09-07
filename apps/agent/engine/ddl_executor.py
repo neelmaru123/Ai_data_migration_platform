@@ -52,14 +52,22 @@ class DDLExecutor:
         url_lower = db_url.lower()
 
         if "mysql" in url_lower:
+            # Strip PostgreSQL typecast operators e.g. ::jsonb, ::JSON, ::text
+            cleaned = re.sub(r'::[a-zA-Z0-9_]+', '', cleaned, flags=re.IGNORECASE)
+            # Convert PostgreSQL Array types e.g. TEXT[], VARCHAR(255)[], INT[] -> JSON
+            cleaned = re.sub(r'\b(TEXT|VARCHAR(?:\(\d+\))?|INT|INTEGER|BIGINT|FLOAT|DOUBLE|BOOLEAN)\[\]', 'JSON', cleaned, flags=re.IGNORECASE)
+            # Convert DOUBLE PRECISION -> DOUBLE
+            cleaned = re.sub(r'\bDOUBLE\s+PRECISION\b', 'DOUBLE', cleaned, flags=re.IGNORECASE)
+            # Convert MySQL invalid JSON/TEXT defaults e.g. DEFAULT '[]' -> DEFAULT ('[]')
+            cleaned = re.sub(r"DEFAULT\s+'(\[\]|\{\})'", r"DEFAULT ('\1')", cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(
-                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+gen_random_uuid\(\)',
+                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
                 'VARCHAR(36) PRIMARY KEY',
                 cleaned,
                 flags=re.IGNORECASE,
             )
             cleaned = re.sub(
-                r'\bDEFAULT\s+gen_random_uuid\(\)',
+                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
                 '',
                 cleaned,
                 flags=re.IGNORECASE,
@@ -75,15 +83,16 @@ class DDLExecutor:
             cleaned = re.sub(r'\bJSONB\b', 'JSON', cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r'\bSERIAL\b', 'BIGINT AUTO_INCREMENT', cleaned, flags=re.IGNORECASE)
             cleaned = re.sub(r'\bBIGSERIAL\b', 'BIGINT AUTO_INCREMENT', cleaned, flags=re.IGNORECASE)
+
         elif "sqlite" in url_lower:
             cleaned = re.sub(
-                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+gen_random_uuid\(\)',
+                r'\bUUID\s+PRIMARY\s+KEY\s+DEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
                 'TEXT PRIMARY KEY',
                 cleaned,
                 flags=re.IGNORECASE,
             )
             cleaned = re.sub(
-                r'\bDEFAULT\s+gen_random_uuid\(\)',
+                r'\bDEFAULT\s+(?:gen_random_uuid|uuid_generate_v4)\(\)',
                 '',
                 cleaned,
                 flags=re.IGNORECASE,
@@ -152,3 +161,4 @@ class DDLExecutor:
                 else:
                     logger.error(f"{stage_label} error for statement '{stmt_clean}': {exc}")
                     raise RuntimeError(f"{stage_label} failed for statement '{stmt_clean}': {exc}")
+

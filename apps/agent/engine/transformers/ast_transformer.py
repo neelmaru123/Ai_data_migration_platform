@@ -246,8 +246,8 @@ class ASTTransformer:
                         # then use map_elements to try multiple format patterns without
                         # relying on Polars-version-specific kwargs like use_earliest.
                         def _parse_dt(v):
-                            if v is None:
-                                return None
+                            if v is None or str(v).strip() in ("", "None", "null"):
+                                return datetime.now(timezone.utc).isoformat()
                             s = str(v).strip().replace(" ", "T")
                             for fmt in (
                                 "%Y-%m-%dT%H:%M:%S%.f%z",
@@ -261,7 +261,8 @@ class ASTTransformer:
                                     return _dt.strptime(s[:len(fmt)+5], fmt).isoformat()
                                 except Exception:
                                     pass
-                            return s  # passthrough as string if all formats fail
+                            # If parsing fails (e.g. non-date string "1"), fallback to current UTC timestamp
+                            return datetime.now(timezone.utc).isoformat()
 
                         dt_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
                             _parse_dt, return_dtype=pl.Utf8
