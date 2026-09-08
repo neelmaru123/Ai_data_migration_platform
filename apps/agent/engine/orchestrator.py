@@ -138,12 +138,13 @@ class ExecutionOrchestrator:
                         if not db_url:
                             if target_db_url and any(tag in norm_id for tag in ["dst", "dest", "target"]):
                                 db_url = target_db_url
-                            elif source_db_urls:
-                                logger.warning(
-                                    f"Could not strictly match source identifier '{src_ident}' to configured sources {list(source_db_urls.keys())}. "
-                                    f"Falling back to primary source database."
+                            else:
+                                raise ValueError(
+                                    f"Could not match source identifier '{src_ident}' to any configured "
+                                    f"source database. Configured sources: {list(source_db_urls.keys())}. "
+                                    f"Check that the migration plan's identifier matches an env var like "
+                                    f"SRC_{{name}}_URL, or that the naming convention matches."
                                 )
-                                db_url = list(source_db_urls.values())[0]
 
                         src_engine = "postgresql"
                         if db_url:

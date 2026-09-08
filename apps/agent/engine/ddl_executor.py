@@ -156,7 +156,7 @@ class DDLExecutor:
                     "referential integrity constraint violation",
                     "cannot add or update a child row",
                 ]
-                if any(kw in exc_str for kw in benign_keywords) or stage_label == "Post-Migration DDL":
+                if any(kw in exc_str for kw in benign_keywords):
                     logger.warning(f"{stage_label} notice/warning for statement '{stmt_clean}': {exc}")
                 else:
                     logger.error(f"{stage_label} error for statement '{stmt_clean}': {exc}")
