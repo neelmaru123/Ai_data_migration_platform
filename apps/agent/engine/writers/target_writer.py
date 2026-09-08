@@ -162,6 +162,23 @@ class TargetWriterFactory:
         # 2. PostgreSQL, MySQL & SQLite Target Writer
         else:
             engine = _get_engine(db_url)
+
+            # Fast connectivity check: distinguish "target DB is completely
+            # unreachable" (auth failure, wrong host, network down) from a
+            # per-row data/schema problem. Without this check, a dead target
+            # falls into the slow per-row retry loop below and produces a
+            # misleading "verify target schema" error instead of the real
+            # connection failure.
+            try:
+                with engine.connect() as _test_conn:
+                    pass
+            except Exception as conn_exc:
+                logger.error(f"Cannot connect to target database for table '{table_name}': {conn_exc}")
+                raise RuntimeError(
+                    f"Target database connection failed for table '{table_name}': {conn_exc}. "
+                    f"Verify the target DB URL, credentials, and network reachability."
+                ) from conn_exc
+
             columns = list(rows[0].keys())
 
             quoted_table = _quote_identifier(table_name, engine_type)

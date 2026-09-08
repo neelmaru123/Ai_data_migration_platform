@@ -8,6 +8,7 @@ import re
 from typing import Any, Dict
 import duckdb
 
+from .db import dispose_all_engines
 from .checkpoint import CheckpointManager
 from .ddl_executor import DDLExecutor
 from .progress_reporter import ProgressReporter
@@ -38,12 +39,22 @@ class ExecutionOrchestrator:
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
 
-        # Clean up stale DuckDB staging files from previous runs (EC-20)
+        # Clean up stale DuckDB staging files from OTHER completed/abandoned jobs
+        # (EC-20). Do NOT delete a staging file belonging to THIS job_id here —
+        # if one exists, it means this job crashed mid-merge on a previous attempt,
+        # and the per-table logic further below (which checks for and resets stale
+        # checkpoints before removing it) needs to see it first, or the crash
+        # recovery / checkpoint reset logic never fires and rows get silently
+        # skipped on resume.
         tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
         if os.path.exists(tmp_dir):
             try:
                 for fname in os.listdir(tmp_dir):
-                    if fname.startswith("staging_") and fname.endswith(".duckdb"):
+                    if (
+                        fname.startswith("staging_")
+                        and not fname.startswith(f"staging_{job_id}_")
+                        and fname.endswith(".duckdb")
+                    ):
                         try:
                             os.remove(os.path.join(tmp_dir, fname))
                             logger.info(f"Cleaned up stale staging file: {fname}")
@@ -100,6 +111,20 @@ class ExecutionOrchestrator:
                     os.makedirs(staging_dir, exist_ok=True)
                     staging_db_file = os.path.join(staging_dir, f"staging_{job_id}_{target_table}.duckdb")
                     if os.path.exists(staging_db_file):
+                        # A staging file already exists for this table — this means a
+                        # previous run of this job crashed mid-merge before it could
+                        # clean up. Since we are about to delete and recreate this
+                        # staging file, any per-source checkpoints that advanced past
+                        # offset 0 for this table are now stale (they'd point past
+                        # rows that no longer exist in the fresh staging DB). Reset
+                        # them so every source re-stages from the beginning, keeping
+                        # checkpoint state and staging-file state consistent.
+                        logger.warning(
+                            f"Found leftover staging file for table '{target_table}' from a previous "
+                            f"crashed run. Resetting per-source checkpoints for this table and re-staging "
+                            f"from scratch to avoid silent data loss."
+                        )
+                        CheckpointManager.clear_table_checkpoints(job_id, target_table)
                         try:
                             os.remove(staging_db_file)
                         except Exception:
@@ -241,7 +266,22 @@ class ExecutionOrchestrator:
             )
             DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
 
-            # Step 4: Mark Job Complete and Clean Checkpoints
+            # Step 4: Verify write success rate before declaring the job complete.
+            # Without this check, a target database that is completely unreachable
+            # (e.g. dead MongoDB target) can cause every single row to fail while
+            # the job still reports "completed" with 100% failure — this check
+            # prevents that.
+            if total_processed > 0:
+                failure_rate = total_failed / total_processed
+                if failure_rate > 0.50:
+                    raise RuntimeError(
+                        f"Migration job '{job_id}' aborted at completion check: "
+                        f"{total_failed}/{total_processed} rows failed ({failure_rate*100:.1f}%), "
+                        f"exceeding the 50% failure threshold. Target database may be unreachable "
+                        f"or schema/mapping may be misconfigured."
+                    )
+
+            # Step 5: Mark Job Complete and Clean Checkpoints
             CheckpointManager.clear_job_checkpoints(job_id)
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "completed", 100.0,
@@ -259,3 +299,8 @@ class ExecutionOrchestrator:
                 total_rows=total_estimated_rows, current_stage="failed", error_message=err_msg
             )
             raise
+        finally:
+            try:
+                dispose_all_engines()
+            except Exception:
+                pass

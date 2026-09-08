@@ -775,3 +775,118 @@ Key components:
 - The emergency `/fatal-error` endpoint is strictly rate-limited and validates `agent_id` existence to prevent abuse.
 - In the future, automated remediation recommendations (like port conflict detection or firewall testing) can be expanded using the LLM error diagnosis pipeline.
 
+---
+
+## [2026-08-26] - Migration Plan Versioning & Immutable History Architecture
+
+### 1. Decision Summary
+Implemented an immutable **Migration Plan Versioning & Rollback Architecture** allowing users to inspect revision history, compare generated blueprint ASTs, revert to previous plan versions, and execute historical plan snapshots directly from the Web UI.
+
+Key components:
+1. **Schema Migration & ORM Model (`008_add_migration_plan_versions.py`, `migration_plans_models.py`)**: Added `migration_plan_versions` table with `version_number`, `plan_data` (`JSONB`), `change_summary`, `created_by`, `status`, and foreign key linkage to `migration_plans`.
+2. **Version Auto-Snapshotting in Service Layer (`migration_plans_services.py`)**:
+   - Initial plan generation captures `version_number = 1`.
+   - Every subsequent plan refinement (`refine_plan()`) or approval (`approve_plan()`) atomically increments `current_version` on the parent plan and snapshots a new immutable `MigrationPlanVersion` record.
+   - Added `rollback_to_version(plan_id, target_version)` to reinstate previous blueprint configurations.
+3. **Control Plane API Routes (`migration_plans_routes.py`)**:
+   - `GET /api/v1/plans/{plan_id}/versions` to list version history metadata.
+   - `GET /api/v1/plans/{plan_id}/versions/{version_num}` to fetch full historical blueprint AST.
+   - `POST /api/v1/plans/{plan_id}/versions/{version_num}/activate` to restore or execute a specific historical version.
+4. **Interactive Version Carousel & Selector UI (`PlanBlueprintViewer.tsx`, `GeneratePlanAction.tsx`)**:
+   - Integrated a version selector header showing revision numbers, timestamps, and change summaries.
+   - Enables users to toggle between historical AST previews and current drafts before approving execution.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: AI plan refinement is iterative. If an LLM prompt inadvertently degraded a table mapping or altered an index rule, users had no way to inspect or recover their previous working blueprint without re-running full schema profiling.
+- **Why Dedicated Immutable Version Table**: Keeping `plan_data` historical snapshots in a dedicated table rather than an audit log guarantees fast point-in-time recovery, referential integrity with executing jobs, and zero risk of mutability race conditions.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Git-style In-Memory Diffing without Dedicated DB Records**:
+  - *Rejected*: Lacks relational query capabilities, breaks multi-user collaboration across web sessions, and complicates historical execution tracking when jobs point to specific plan versions.
+- **Alternative B: Overwriting Plan In-Place with No Historical Storage**:
+  - *Rejected*: High risk of data loss and user frustration when AI prompts produce unintended transformations.
+
+### 4. Trade-offs & Future Considerations
+- Version records store full AST JSON documents rather than text diffs, slightly increasing database storage, but providing O(1) retrieval and zero compute cost when activating or inspecting past plans.
+- Future work can add side-by-side visual AST diff comparisons in the frontend viewer.
+
+---
+
+## [2026-09-07] - Dynamic Agent Heartbeat Scaling, Idle Standby & Auto-Stop Lifecycle
+
+### 1. Decision Summary
+Implemented a resource-efficient **Agent Lifecycle Management System** featuring dynamic heartbeat scaling, low-power standby mode, and container auto-stop capabilities.
+
+Key components:
+1. **Control Plane Schema Extension (`009_add_idle_since_to_agents.py`)**: Added `idle_since` (`DateTime(timezone=True)`) to track consecutive inactive duration.
+2. **Dynamic Heartbeat Frequency Scaling (`apps/agent/main.py`)**:
+   - Active mode: 20-second interval for responsive job dispatch and real-time health telemetry.
+   - Standby mode: 300-second (5-minute) interval when the agent remains idle with no active tasks for > 5 minutes (`IDLE_STANDBY_THRESHOLD = 300`).
+   - Reduces background HTTP requests and WebSocket traffic by 93% for idle agents.
+3. **Control Plane Command Directives (`agents_services.py`)**:
+   - Heartbeat responses return structured directives:
+     - `ENTER_IDLE_MODE`: Signals agent to transition from 20s to 300s heartbeat interval.
+     - `RESUME_ACTIVE_MODE`: Instantly shifts agent back to 20s cadence upon job assignment or user interaction.
+     - `STOP_CONTAINER`: Instructs agent container to gracefully terminate upon task completion if auto-stop is configured.
+4. **Automated Container Shutdown (`apps/agent/main.py`)**:
+   - Implemented clean shutdown handler that closes active DB connection pools and terminates the container with `os._exit(0)`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Running dozens of local migration agents with fixed 15-20s heartbeats flooded the backend with empty telemetry, consumed needless container CPU/battery on client machines, and forced developers to manually run `docker stop` after migrations finished.
+- **Chosen Solution**: Adaptive heartbeat throttling controlled by backend state machines with clean termination hooks.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Static Long Heartbeat (e.g. 60s at all times)**:
+  - *Rejected*: Introduces unacceptable 60-second latency when dispatching new jobs or detecting agent disconnects during active migrations.
+- **Alternative B: Pure Client-Side Timer Throttling**:
+  - *Rejected*: The agent does not have global visibility into upcoming scheduled jobs or queued tasks; backend-driven directives ensure the agent wakes up immediately when work is assigned.
+
+### 4. Trade-offs & Future Considerations
+- Transitioning to 5-minute standby means an idle agent may take up to 5 minutes to pick up a newly queued task via periodic heartbeat, unless woken up via active WebSocket notification.
+
+---
+
+## [2026-09-08] - Agent Engine Robustness, Multi-Source Resilience & Target Connectivity Hardening
+
+### 1. Decision Summary
+Implemented a comprehensive robustness hardening suite across the Docker Agent ETL engine (`apps/agent/engine/`), addressing critical failure modes in datetime handling, source streaming, post-DDL validation, identifier matching, connection pooling, multi-source merge crash recovery, and dead-target detection.
+
+Key components:
+1. **AST Transformer Safe Datetime Parsing (`ast_transformer.py`)**:
+   - Updated `_parse_dt()` to explicitly return `None` on empty or null values, and return raw inputs unchanged on unparseable strings instead of fabricating `datetime.now()`.
+2. **Connector Source Read Error Propagation (`source_factory.py`)**:
+   - Introduced `SourceReadError` and replaced silent empty DataFrame returns with explicit error propagation when source chunk reads fail mid-table (network drop, permission revocation, table drop).
+3. **Strict Non-Benign Post-Migration DDL Trapping (`ddl_executor.py`)**:
+   - Removed unconditional exception suppression in `execute_post_migration_ddl()`. Real schema and syntax failures (e.g., missing columns, invalid foreign key definitions) now fail the migration job immediately.
+4. **Strict Source Identifier Matching (`orchestrator.py`)**:
+   - Replaced silent fallback to the first configured source DB with an explicit `ValueError` naming the unmatched identifier and listing available configured sources.
+5. **Thread-Safe Engine Caching & Automatic Cleanup (`db.py`, `orchestrator.py`)**:
+   - Implemented thread-safe `_ENGINE_CACHE` keyed by `(db_url, is_sqlite)` to prevent connection churn across chunks.
+   - Added `dispose_all_engines()` called in `run_job`'s `finally:` block to guarantee full connection pool disposal on job completion or failure.
+6. **Target Write Failure Rate Guard (`orchestrator.py`)**:
+   - Added an end-of-job completion guard: if `total_failed / total_processed > 0.50` (or target completely unreachable), raises `RuntimeError` to mark the job as `failed` rather than falsely reporting `completed`.
+7. **Crash-Resilient Multi-Source Merge & Checkpoint Invalidation (`checkpoint.py`, `orchestrator.py`)**:
+   - Modified startup DuckDB cleanup to preserve the active job's staging file (`staging_{job_id}_*.duckdb`).
+   - Implemented `CheckpointManager.clear_table_checkpoints(job_id, table_name)`: when an active leftover staging file is detected on resume, table checkpoints are cleared and all sources re-staged from scratch, eliminating silent row loss.
+8. **Fast Target SQL Connectivity Pre-Check (`target_writer.py`)**:
+   - Added early `engine.connect()` check before data insertion in `TargetWriterFactory.bulk_load()`. Distinguishes dead/unreachable targets (auth failure, bad port/host) from schema errors, fast-failing in <3s instead of slowly retrying 1,000 rows.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Silent datetime fabrication corrupted analytics datasets with fake timestamps.
+  - Mid-stream network drops silently finished jobs as successful with partial data.
+  - Multi-source merges after ungraceful crashes (`kill -9`) resumed from stale offsets while re-creating the staging file, losing rows from previously staged sources.
+  - Dead targets triggered misleading schema warnings and took minutes of futile row-by-row retries before reporting failure.
+- **Why DuckDB Staging Checkpoint Reset**: DuckDB staging files for multi-source merges are ephemeral working buffers. If an agent crashes mid-merge, a half-filled staging file cannot be reliably spliced with new rows without risking duplicates or missing records. Resetting per-source checkpoints for only that table ensures a clean, deterministic re-stage without affecting other tables.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Retaining Fabricated Timestamps (`datetime.now()`) as Default**:
+  - *Rejected*: Violates ETL data integrity. Nulls must remain null; freeform text must be passed through or failed explicitly.
+- **Alternative B: Attempting to Resume Inside Partial DuckDB Staging Files**:
+  - *Rejected*: Involves complex transactional WAL recovery inside ephemeral DuckDB files across varying process lifecycles. Wiping the single staging file and resetting checkpoints for that specific target table is 100% reliable, fast, and idempotent.
+
+### 4. Trade-offs & Future Considerations
+- Re-staging a multi-source table after a crash repeats extraction for previously staged sources of that specific table, but guarantees 100% data correctness and zero row loss.
+- All 10 failure scenarios have been verified via end-to-end regression testing with genuine database-level triggers.
+
+

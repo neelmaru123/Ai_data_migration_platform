@@ -85,17 +85,80 @@
 5. **Self-Healing Resolution**:
    - Upon container restart with valid parameters, `process_agent_heartbeat()` clears `last_error` and `error_category`, returning status to `online`.
 
+### Phase F: Migration Plan Versioning & Historical Rollback Sequence
+1. **Plan Refinement / Modification Trigger**:
+   - In [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx), user inputs refinement prompt or approves blueprint.
+   - Dispatches `POST /api/v1/plans/{plan_id}/refine` or `POST /api/v1/plans/{plan_id}/approve`.
+2. **Version Auto-Snapshotting**:
+   - `MigrationPlanService.refine_plan()` or `approve_plan()` loads existing plan.
+   - Atomically persists `MigrationPlanVersion(plan_id=plan.id, version_number=plan.current_version + 1, plan_data=new_plan_data, change_summary=summary)`.
+   - Increments `plan.current_version += 1`.
+3. **Version History Navigation**:
+   - User navigates through version carousel in `PlanBlueprintViewer.tsx`.
+   - Dispatches `GET /api/v1/plans/{plan_id}/versions` to list available snapshots.
+   - User selects historical version -> `GET /api/v1/plans/{plan_id}/versions/{version_num}` retrieves exact past AST.
+4. **Historical Version Activation**:
+   - User clicks **"Activate This Version"** or executes historical plan.
+   - Calls `POST /api/v1/plans/{plan_id}/versions/{version_num}/activate`.
+   - `MigrationPlanService.rollback_to_version()` overwrites active `plan_data` on parent `MigrationPlan` with the snapshot and records a new rollback version.
+
+### Phase G: Dynamic Agent Heartbeat Scaling, Idle Standby & Container Auto-Stop
+1. **Active Heartbeat Cadence**:
+   - While processing or recently active, `docker-agent` in [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) sends `POST /api/v1/agents/heartbeat` every 20 seconds.
+2. **Idle Detection**:
+   - `AgentService.process_agent_heartbeat()` in [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) checks `agent.idle_since`.
+   - If `agent.idle_since` exceeds 300 seconds (5 minutes) and no jobs are queued or running, backend returns directive: `{"directive": "ENTER_IDLE_MODE", "message": "Agent idle for 300s — entering low-power standby mode."}`.
+3. **Standby Mode Transition**:
+   - Agent logs `[OPTION C] Heartbeat switched to STANDBY mode (5-min interval)`.
+   - Throttles heartbeat frequency from 20s to 300s, conserving container CPU and network bandwidth.
+4. **Wakeup on Job Assignment**:
+   - When a user queues an execution job or interacts with the agent, backend directive returns `RESUME_ACTIVE_MODE`.
+   - Agent immediately switches heartbeat back to 20-second cadence.
+5. **Container Auto-Stop**:
+   - When a migration completes and auto-stop is configured, backend returns `STOP_CONTAINER`.
+   - Agent cleans up database connection pools and executes graceful container exit `os._exit(0)`.
+
+### Phase H: Robust Multi-Source Merge Crash Recovery & Fail-Safe ETL Execution
+1. **Startup Cleanup with Active Job Preservation**:
+   - Agent [`ExecutionOrchestrator.run_job()`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py) scans `CHECKPOINT_DIR` for `.duckdb` files.
+   - Deletes stale staging files from OTHER completed/abandoned jobs, but deliberately **skips** `staging_{job_id}_*.duckdb` for the current active job ID.
+2. **Leftover Staging Detection & Checkpoint Reset**:
+   - If `staging_{job_id}_{target_table}.duckdb` exists when processing `target_table`, Orchestrator detects a previous crash mid-merge.
+   - Calls `CheckpointManager.clear_table_checkpoints(job_id, target_table)` in [`checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py), removing stale per-source checkpoints so all sources re-stage from row 0.
+   - Removes leftover DuckDB file and creates a fresh staging database, eliminating duplicate rows and missing data.
+3. **Extraction Failure Guard**:
+   - `SourceConnectorFactory.read_source_chunk()` in [`source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) reads chunks via Keyset Pagination.
+   - If network or DB permission fails mid-stream, catches error and raises `SourceReadError` instead of returning an empty DataFrame, failing the job cleanly.
+4. **Fast Target Connectivity Pre-Check**:
+   - `TargetWriterFactory.bulk_load()` in [`target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) executes `with engine.connect() as _test_conn:` before chunk iteration.
+   - If target host/port/auth is unreachable, fast-fails in < 3s with `Target database connection failed for table '{table_name}'`.
+5. **Write Failure Rate Verification**:
+   - At completion check, if `total_failed / total_processed > 0.50`, aborts job with `RuntimeError` rather than silently declaring success.
+6. **Thread-Safe Connection Disposal**:
+   - In `run_job`'s `finally:` block, `dispose_all_engines()` from [`db.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/db.py) is called, closing and disposing all pooled SQLAlchemy engine connections.
+
 ## 3. Impact & Delta Analysis (AI Modifications)
+- **[NEW]**: [`apps/api/alembic/versions/008_add_migration_plan_versions.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/008_add_migration_plan_versions.py) - Added `migration_plan_versions` table for immutable plan history.
+- **[NEW]**: [`apps/api/alembic/versions/009_add_idle_since_to_agents.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/009_add_idle_since_to_agents.py) - Added `idle_since` column to `agents` table.
 - **[NEW]**: [`apps/api/alembic/versions/010_add_error_fields_to_agents.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/alembic/versions/010_add_error_fields_to_agents.py) - Added `last_error`, `error_category`, and `last_error_at` columns.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_models.py) - Added mapped columns for error tracking.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_schemas.py) - Added error fields to `AgentHeartbeat`, `AgentFatalErrorRequest`, and agent response models.
-- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) - Added `record_fatal_error`, watchdog error tagging, and error clearing on reconnect.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_models.py) - Added `MigrationPlanVersion` model and `current_version` field.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) - Added plan version snapshotting, retrieval, and rollback logic.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py) - Added endpoints for listing versions, viewing past versions, and activating historical plans.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_models.py) - Added mapped columns for `idle_since` and error tracking.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) - Added heartbeat scaling directives (`ENTER_IDLE_MODE`, `RESUME_ACTIVE_MODE`, `STOP_CONTAINER`), watchdog error tagging, and error clearing on reconnect.
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py) - Added emergency endpoint `POST /api/v1/agents/fatal-error`.
-- **[MODIFIED]**: [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) - Added `report_fatal_error_and_exit()` and startup failure guards.
-- **[MODIFIED]**: [`apps/web/types/agent.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/agent.ts) - Added `last_error`, `error_category`, and `last_error_at` types.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py) - Added dynamic heartbeat standby throttling, container auto-stop handling, and `report_fatal_error_and_exit()`.
+- **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py) - Added source identifier validation, >50% failure rate abort check, active staging file preservation, leftover staging crash reset, and `dispose_all_engines()` in `finally:`.
+- **[MODIFIED]**: [`apps/agent/engine/checkpoint.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/checkpoint.py) - Added `clear_table_checkpoints(job_id, table_name)` for clean per-table reset on resume.
+- **[MODIFIED]**: [`apps/agent/engine/connectors/source_factory.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/connectors/source_factory.py) - Added `SourceReadError` exception and raised on source chunk read failure.
+- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py) - Removed blanket exception suppression in post-migration DDL to raise non-benign errors.
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py) - Added early `engine.connect()` connectivity check before row fallback loop.
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) - Return `None` on empty/null values and passthrough raw string on parse failure (no current timestamp fabrication).
+- **[MODIFIED]**: [`apps/agent/engine/db.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/db.py) - Added thread-safe `_ENGINE_CACHE` and `dispose_all_engines()`.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) - Added plan version carousel, history selector, and activation buttons.
 - **[MODIFIED]**: [`apps/web/components/agents/AgentStatusBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/AgentStatusBanner.tsx) - Added stopping error diagnostic alert banner.
 - **[MODIFIED]**: [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx) - Added error badges and alert callouts on agent cards.
-- **[MODIFIED]**: [`docs/DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/DECISIONS.md) - Recorded decision entry for fatal error capture system.
-- **[MODIFIED]**: [`docs/EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/EXECUTION_FLOW.md) - Mapped execution flow sequence for agent fatal error reporting.
+- **[MODIFIED]**: [`docs/DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/DECISIONS.md) - Recorded decision entries for plan versioning, agent standby/auto-stop, and engine robustness.
+- **[MODIFIED]**: [`docs/EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/EXECUTION_FLOW.md) - Mapped execution sequences for plan versioning, idle heartbeat lifecycle, and robust multi-source ETL recovery.
 
 
