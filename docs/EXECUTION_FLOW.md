@@ -242,3 +242,27 @@
    - When transitioning to Step 3, [`DockerCommandOutput.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) calls `substituteConnectionPlaceholders()` to replace `<PREFIX_HOST>`, `<PREFIX_PORT>`, `<PREFIX_USER>`, and `<PREFIX_NAME>` with the user's typed values directly in browser memory.
    - Only `<PREFIX_PASSWORD>` remains as an explicit manual placeholder for the user to paste their password in their terminal.
 
+---
+
+# Execution Flow - Agent API Token Regeneration
+
+## 1. Entry Point
+- **API Endpoint**: `POST /api/v1/agents/{agent_id}/regenerate-token` in [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py).
+- **Service Handler**: `AgentService.regenerate_agent_token()` in [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py).
+- **Security Check**: `Depends(get_verified_agent)` asserts ownership and loads linked `data_sources`.
+
+## 2. Step-by-Step Execution Sequence
+1. **Request Authorization**: `get_verified_agent` extracts `agent_id`, queries the agent from the database, and validates `agent.user_id == current_user.id` (raises `403 Forbidden` on mismatch, `404 Not Found` if missing).
+2. **Token Generation & One-Way Hashing**:
+   - Generates cryptographically secure token string `raw_token = f"ag_live_{secrets.token_urlsafe(32)}"`.
+   - Computes SHA-256 hex digest: `token_hash = hash_agent_token(raw_token)`.
+3. **Atomic Hash Mutation**:
+   - Replaces `agent.api_token_hash = token_hash`.
+   - Executes `session.add(agent)` and `await session.commit()`.
+   - Any active container using the previous token immediately fails authentication on its next heartbeat or task poll (`401 Unauthorized`).
+4. **Command Rebuilding**:
+   - Reloads the agent entity with eagerly loaded `data_sources`.
+   - Invokes `AgentCommandGenerator.generate_command_payload(agent, agent.data_sources, raw_token=raw_token)` to construct fresh Bash, PowerShell, single-line, and `.env` commands embedding the newly minted token.
+5. **Single-Exposure Response**:
+   - Constructs and returns `AgentDetailResponse` containing `api_token = raw_token`.
+   - Once sent, `raw_token` is garbage-collected from backend memory and cannot be recovered again.

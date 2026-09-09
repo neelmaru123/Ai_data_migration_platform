@@ -157,6 +157,53 @@ class AgentService:
         return AgentDetailResponse.model_validate(response_dict)
 
     @staticmethod
+    async def regenerate_agent_token(
+        session: AsyncSession, agent: Agent
+    ) -> AgentDetailResponse:
+        """
+        Regenerates a Docker Agent's API token. The previous token's hash is
+        immediately invalidated -- any running agent container still using
+        the old token will fail authentication on its next request
+        (heartbeat, task poll, progress report) and must be redeployed with
+        the new token. Returns the new raw token ONCE, along with freshly
+        generated Docker commands pre-filled with it. The raw token is
+        never stored in plaintext and cannot be retrieved again after this
+        response, exactly like the initial creation flow.
+        """
+        raw_token = f"ag_live_{secrets.token_urlsafe(32)}"
+        token_hash = hash_agent_token(raw_token)
+        agent.api_token_hash = token_hash
+        session.add(agent)
+        await session.commit()
+
+        fetched_agent = await AgentService.get_agent_by_id(session, agent.id)
+        if fetched_agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve agent after token regeneration.",
+            )
+
+        cmd_payload = AgentCommandGenerator.generate_command_payload(
+            agent=fetched_agent,
+            data_sources=fetched_agent.data_sources,
+            raw_token=raw_token,
+        )
+
+        base_dict = AgentResponse.model_validate(fetched_agent).model_dump()
+        response_dict = {
+            **base_dict,
+            "data_sources": [
+                DataSourceResponse.model_validate(ds) for ds in (fetched_agent.data_sources or [])
+            ],
+            "api_token": raw_token,
+            "docker_command": cmd_payload["docker_command"],
+            "docker_command_powershell": cmd_payload["docker_command_powershell"],
+            "docker_command_oneline": cmd_payload["docker_command_oneline"],
+            "env_template": cmd_payload["env_template"],
+        }
+        return AgentDetailResponse.model_validate(response_dict)
+
+    @staticmethod
     async def get_agent_by_id(
         session: AsyncSession, agent_id: uuid.UUID
     ) -> Optional[Agent]:

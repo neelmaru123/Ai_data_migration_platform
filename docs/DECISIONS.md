@@ -1039,8 +1039,37 @@ Updated corresponding unit test assertions in [`test_agent_command_generator.py`
 ### 4. Trade-offs & Future Considerations
 - Database passwords remain manual placeholders (`<..._PASSWORD>`) that users must supply in their shell, preserving zero password exposure to the browser and backend.
 
+---
 
+## [2026-09-09] - Agent API Token Regeneration Endpoint (`POST /api/v1/agents/{agent_id}/regenerate-token`)
 
+### 1. Decision Summary
+Added an explicit, purely additive token regeneration endpoint `POST /api/v1/agents/{agent_id}/regenerate-token` in [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py) backed by `AgentService.regenerate_agent_token` in [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py).
 
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Raw API tokens are never persisted in plaintext in the database (only a one-way SHA-256 hash `api_token_hash` is stored). Because the raw token cannot be recovered or re-displayed after creation, users who lost their token or need to redeploy an agent had to rely on `<YOUR_AGENT_API_TOKEN>` placeholders.
+- **Chosen Solution**: Provide an explicit token regeneration action that:
+  1. Generates a new secure random token `ag_live_{secrets.token_urlsafe(32)}`.
+  2. Overwrites `agent.api_token_hash` with the new token's SHA-256 digest, atomically invalidating any existing container using the old token.
+  3. Returns the raw token **once only** in the response, together with freshly generated Docker run commands and environment templates pre-filled with the new token.
+- **Security Invariance**: Preserves zero-plaintext token storage. The server never stores the raw token, preventing credential leaks even in case of database exfiltration.
 
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Storing Plaintext or Reversibly Encrypted Tokens in DB**: Rejected as a severe security regression violating the principle of least privilege and zero-knowledge token management.
+- **Alternative B: Modifying Existing `GET /docker-command`**: Rejected because `GET` endpoints must be safe and idempotent under HTTP specifications; generating and persisting a new secret is a state-mutating operation that belongs on `POST`.
+
+### 4. Trade-offs & Future Considerations
+- **Running Container Invalidation**: Existing containers running with the old token will immediately be rejected on their next heartbeat or task poll with HTTP 401 Unauthorized. The frontend UI must present a clear confirmation modal warning before triggering this action.
+
+---
+
+## [2026-09-09] - Shared Docker Command Utilities & Dashboard Token Regeneration UI
+
+### 1. Decision Summary
+Extracted shared connection placeholder substitution logic into a dedicated module [`apps/web/lib/dockerCommandUtils.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/lib/dockerCommandUtils.ts), consumed by both [`DockerCommandOutput.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) and [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx). Integrated the "Regenerate Agent Token" action into the dashboard's Docker Command Modal with a safety confirmation banner and ephemeral connection detail re-entry fields.
+
+### 2. Why This Approach? (Rationale)
+- **Zero Drift Between Create & Dashboard Views**: Both the create-agent wizard and the dashboard command modal must resolve generic placeholders (`<PREFIX_HOST>`, `<PREFIX_PORT>`, etc.) identically to avoid discrepancy.
+- **Ephemeral Zero-Storage Connection Re-entry**: Because database host, port, username, and database name are never stored in the control plane, users viewing the command later can re-enter these fields client-side to auto-fill their command without transmitting them to the server.
+- **Confirmation Safety Guard**: Regenerating an API token is a disruptive operation that severs running agent containers. A two-step confirmation (`⚠ Regenerate Agent Token` -> warning banner + `Confirm Regenerate`) prevents accidental invalidation.
 

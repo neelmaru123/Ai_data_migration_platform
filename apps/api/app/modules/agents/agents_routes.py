@@ -75,6 +75,21 @@ async def get_agent_docker_command(
     return AgentService.get_agent_docker_command(agent=agent)
 
 
+@router.post("/{agent_id}/regenerate-token", response_model=AgentDetailResponse)
+async def regenerate_agent_token(
+    agent: Agent = Depends(get_verified_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Regenerates this agent's API token, immediately invalidating the
+    previous one. Any currently running Docker container using the old
+    token will fail authentication until redeployed with the new token.
+    Returns the new raw token ONCE -- it cannot be retrieved again after
+    this response.
+    """
+    return await AgentService.regenerate_agent_token(session=session, agent=agent)
+
+
 @router.get("/{agent_id}", response_model=AgentDetailResponse)
 async def get_agent(
     agent: Agent = Depends(get_verified_agent),

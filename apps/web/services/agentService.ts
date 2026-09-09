@@ -40,6 +40,17 @@ export const agentService = {
   },
 
   /**
+   * Regenerates an existing agent's API token. The previous token is
+   * immediately invalidated -- any running container using the old token
+   * will fail authentication until redeployed with the new one. Returns
+   * the new token ONCE, embedded in freshly generated Docker commands.
+   */
+  async regenerateAgentToken(agentId: string): Promise<AgentDetailResponse> {
+    const response = await apiClient.post<AgentDetailResponse>(`/agents/${agentId}/regenerate-token`);
+    return response.data;
+  },
+
+  /**
    * Delete an existing agent and un-link its attached data sources
    */
   async deleteAgent(agentId: string): Promise<void> {
