@@ -322,17 +322,47 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
 
 ### 3.6 Agent Status Heartbeat Sync
 - **HTTP Method & Path**: `POST /api/v1/agents/heartbeat`
-- **Purpose**: Periodic heartbeat sent by local Docker Agent to report container online status and database health.
-- **Where Used**: Local Docker Agent background loop every 20s (`main.py`).
+- **Purpose**: Periodic heartbeat sent by local Docker Agent to report container online status, version, stopping errors, and database health. Returns backend control directives (`action` and `action_reason`) for dynamic heartbeat throttling (standby mode) or container shutdown.
+- **Where Used**: Local Docker Agent background loop (`main.py`) — runs every 20s in active mode, or 300s (5-min) in idle standby mode.
 - **Auth**: Agent Token (`X-Agent-Token` header).
 - **Request Body**:
 ```json
 {
-  "agent_id": "38207dfd-7f8f-4d73-ae4a-9ffd8a06053a",
   "status": "online",
-  "database_statuses": { "db_1": "healthy", "db_2": "healthy" }
+  "version": "1.0.1",
+  "data_sources": [
+    {
+      "identifier": "src_db_1",
+      "is_healthy": true,
+      "latency_ms": 4.2,
+      "database_name": "ecommerce_prod"
+    }
+  ],
+  "error_message": null,
+  "error_category": null
 }
 ```
+- **Response** (`200 OK`):
+```json
+{
+  "id": "38207dfd-7f8f-4d73-ae4a-9ffd8a06053a",
+  "name": "E-Commerce Migration Agent",
+  "agent_identifier": "agent_prod_01",
+  "status": "online",
+  "version": "1.0.1",
+  "last_seen_at": "2026-09-08T12:00:00Z",
+  "last_error": null,
+  "error_category": null,
+  "last_error_at": null,
+  "action": "ENTER_IDLE_MODE",
+  "action_reason": "Agent idle for 300s — entering low-power standby mode."
+}
+```
+*Possible `action` directives:*
+- `null`: Continue regular 20s heartbeat cadence.
+- `"ENTER_IDLE_MODE"`: Agent switches heartbeat interval to 300s (5-min) standby.
+- `"RESUME_ACTIVE_MODE"`: Agent resumes 20s heartbeat upon job dispatch.
+- `"SHUTDOWN"`: Agent gracefully terminates container via `os._exit(0)`.
 
 ---
 
@@ -357,16 +387,32 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
     "job_id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
     "migration_plan_id": "52458d8e-889e-4244-91ec-364641262889",
     "status": "preparing",
-    "target_table": "users"
+    "created_at": "2026-09-08T12:00:00Z"
   }
 ]
 ```
 
 ---
 
-### 3.9 Delete Agent
+### 3.9 Report Agent Fatal Stopping Error (Emergency Endpoint)
+- **HTTP Method & Path**: `POST /api/v1/agents/fatal-error`
+- **Purpose**: Emergency reporting endpoint used by Docker agent when stopping due to startup crashes, authentication rejection (401/403), missing configurations, or unhandled exceptions. Does not require an authenticated bearer token; resolves agent identity via `X-Agent-ID` header or `agent_id` query parameter.
+- **Where Used**: Agent `report_fatal_error_and_exit()` in `apps/agent/main.py`.
+- **Auth**: Public / Header `X-Agent-ID` (or query param `?agent_id=...`).
+- **Request Body**:
+```json
+{
+  "error_message": "Invalid AGENT_TOKEN: Backend rejected credentials with 401 Unauthorized.",
+  "error_category": "AUTH_ERROR"
+}
+```
+- **Response** (`200 OK`): `AgentResponse` object with `status: "error"`, `last_error`, `error_category`, and `last_error_at`.
+
+---
+
+### 3.10 Delete Agent
 - **HTTP Method & Path**: `DELETE /api/v1/agents/{agent_id}`
-- **Purpose**: Deletes Agent entity and detaches data sources.
+- **Purpose**: Deletes Agent entity and cascade-detaches data sources.
 - **Where Used**: Web UI Delete Agent button.
 - **Auth**: User JWT.
 
@@ -492,9 +538,70 @@ Handles AI plan generation using Google Gemini 3.5 Flash Lite and AST plan retri
 
 ---
 
+### 5.8 List Migration Plan Versions
+- **HTTP Method & Path**: `GET /api/v1/plans/{plan_id}/versions`
+- **Purpose**: Lists all immutable historical version snapshots for a migration plan. Returns lightweight metadata (version number, creation timestamp, author, optional changelog comment) without the bulky AST payload for efficient history timeline rendering.
+- **Where Used**: Web UI Plan Version History drawer / timeline (`/plans/[id]`).
+- **Auth**: User JWT.
+- **Response** (`200 OK`):
+```json
+[
+  {
+    "id": "8f5a11c0-3f41-4e7a-9a99-b1d55e8df1a0",
+    "migration_plan_id": "52458d8e-889e-4244-91ec-364641262889",
+    "version_number": 2,
+    "comment": "Added customer email anonymization transformer",
+    "created_by": "user_2wK...",
+    "created_at": "2026-09-08T10:15:00Z"
+  },
+  {
+    "id": "7e4b22b1-2e30-4d6a-8b88-a0c44d7ce09f",
+    "migration_plan_id": "52458d8e-889e-4244-91ec-364641262889",
+    "version_number": 1,
+    "comment": "Initial AI generated plan blueprint",
+    "created_by": "user_2wK...",
+    "created_at": "2026-09-08T09:30:00Z"
+  }
+]
+```
+
+---
+
+### 5.9 Get Migration Plan Version Detail
+- **HTTP Method & Path**: `GET /api/v1/plans/{plan_id}/versions/{version_number}`
+- **Purpose**: Retrieves full AST blueprint details (`plan_data`) of a specific historical version snapshot for read-only preview and side-by-side diffing against the active plan.
+- **Where Used**: Web UI Plan Version Diff / Preview modal.
+- **Auth**: User JWT.
+- **Response** (`200 OK`):
+```json
+{
+  "id": "8f5a11c0-3f41-4e7a-9a99-b1d55e8df1a0",
+  "migration_plan_id": "52458d8e-889e-4244-91ec-364641262889",
+  "version_number": 2,
+  "comment": "Added customer email anonymization transformer",
+  "created_by": "user_2wK...",
+  "created_at": "2026-09-08T10:15:00Z",
+  "plan_data": {
+    "version": "1.0",
+    "steps": [ ... ]
+  }
+}
+```
+
+---
+
+### 5.10 Restore Historical Migration Plan Version
+- **HTTP Method & Path**: `POST /api/v1/plans/{plan_id}/versions/{version_number}/restore`
+- **Purpose**: Restores active migration plan blueprint AST to the exact state captured in historical version `{version_number}`. Automatically creates a new version snapshot documenting the rollback operation.
+- **Where Used**: Web UI "Rollback to this Version" button.
+- **Auth**: User JWT.
+- **Response** (`200 OK`): Standard `PlanDetailResponse` containing restored `plan_data` and incremented `current_version`.
+
+---
+
 ## 6. ETL Execution & Task Polling API (`/api/v1/executions` & `/api/v1/plans/{id}/execute`)
 
-Handles Human-in-the-Loop plan approval, job queuing, progress reporting, and 1-click job resumption.
+Handles Human-in-the-Loop plan approval, job queuing, progress reporting, failure diagnosis, and 1-click job resumption.
 
 ---
 
@@ -524,16 +631,51 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, and 1-
 
 ### 6.3 Get Execution Job Detail
 - **HTTP Method & Path**: `GET /api/v1/executions/{execution_id}`
-- **Purpose**: Retrieves real-time job status, row counts, progress percentage, error messages, and checkpoint details.
+- **Purpose**: Retrieves real-time job status, row counts, progress percentage, error messages, checkpoint details, and AI automated failure diagnosis (`ai_diagnosis`).
 - **Where Used**: Web UI Live Execution Monitoring page (`/executions/[id]`).
 - **Auth**: User JWT.
+- **Response** (`200 OK`):
+```json
+{
+  "id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
+  "plan_id": "52458d8e-889e-4244-91ec-364641262889",
+  "status": "failed",
+  "progress": 42.5,
+  "processed_rows": 425000,
+  "successful_rows": 425000,
+  "failed_rows": 1,
+  "skipped_rows": 0,
+  "total_rows": 1000000,
+  "current_table": "orders",
+  "current_stage": "extract_transform",
+  "error_message": "Target database connection failed: password authentication failed for user 'app_user'",
+  "checkpoint_data": {
+    "step_id": "step_2_orders",
+    "last_processed_offset": 425000
+  },
+  "ai_diagnosis": {
+    "summary": "Target PostgreSQL authentication failed. Credentials in container environment variable DEST_DB_URL rejected.",
+    "root_cause_category": "auth_failure",
+    "is_user_environment_issue": true,
+    "fix_steps": [
+      "Verify target database password in your local .env or Docker run command.",
+      "Ensure host.docker.internal is reachable from the agent container.",
+      "Restart the agent container with corrected credentials."
+    ],
+    "copyable_fix_command": "docker run -d --name agent_xxx -e DEST_DB_URL=\"postgresql://app_user:corrected_pass@host.docker.internal:5432/target_db\" ... data-migration-agent:latest",
+    "raw_error_snippet": "password authentication failed for user 'app_user'..."
+  },
+  "created_at": "2026-09-08T10:00:00Z",
+  "updated_at": "2026-09-08T10:05:30Z"
+}
+```
 
 ---
 
 ### 6.4 Report Execution Progress & Errors
 - **HTTP Method & Path**: `POST /api/v1/executions/{execution_id}/progress`
-- **Purpose**: Updates job status, processed row counts, throughput metrics, and error stack traces sent by local Docker Agent. Broadcasts WebSocket progress events.
-- **Where Used**: Local Docker Agent [`ProgressReporter`](file:///c:/Neel/AI%20DATA%20MIGRATION%20PLATFORM/apps/agent/execution_engine.py#L450) after every processed chunk.
+- **Purpose**: Updates job status, processed row counts, throughput metrics, and error stack traces sent by local Docker Agent. Broadcasts WebSocket progress events and automatically triggers background AI root-cause diagnosis if status transitions to `failed`.
+- **Where Used**: Local Docker Agent [`ProgressReporter`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/progress_reporter.py) after every processed chunk.
 - **Auth**: Agent Token (`X-Agent-Token` header).
 - **Request Body**:
 ```json
@@ -616,22 +758,28 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, and 1-
 | **20**| `GET` | `/api/v1/agents/{id}/docker-command`| Web UI Modal | Regenerate Docker run command | User JWT |
 | **21**| `GET` | `/api/v1/agents/{id}` | Web UI Agent Detail | Get agent details by ID | User JWT |
 | **22**| `PUT` | `/api/v1/agents/{id}` | Web UI Agent Settings| Update agent settings | User JWT |
-| **23**| `POST` | `/api/v1/agents/heartbeat` | Local Docker Agent | Send background status heartbeat | Agent Token |
+| **23**| `POST` | `/api/v1/agents/heartbeat` | Local Docker Agent | Send background status heartbeat & receive control directives | Agent Token |
 | **24**| `WS` | `/api/v1/agents/ws/{id}` | Web UI Live Page | Live WebSocket log/status stream | Session / Token |
 | **25**| `GET` | `/api/v1/agents/tasks` | Local Docker Agent | Poll for pending execution jobs | Agent Token |
-| **26**| `DELETE`| `/api/v1/agents/{id}` | Web UI Agent Detail | Delete agent entity | User JWT |
-| **27**| `POST` | `/api/v1/metadata/sync` | Local Docker Agent | Upload zero-raw-data schema snapshot | Agent Token |
-| **28**| `GET` | `/api/v1/metadata/sources/{id}/snapshots`| Web UI Schema History| List snapshots for a source | User JWT |
-| **29**| `GET` | `/api/v1/metadata/sources/{id}/snapshots/latest`| Web UI Schema Inspector| Get latest snapshot for a source | User JWT |
-| **30**| `GET` | `/api/v1/metadata/snapshots/{id}`| Web UI Schema Modal| Get snapshot details by ID | User JWT |
-| **31**| `POST` | `/api/v1/plans/generate` | Web UI Plan Generator| Trigger Gemini AI AST generation | User JWT |
-| **32**| `GET` | `/api/v1/plans` | Web UI Plans Page | List user migration plans | User JWT |
-| **33**| `GET` | `/api/v1/plans/{id}` | Web UI / Docker Agent| Get AST blueprint payload | User JWT / Agent Token |
-| **34**| `PUT` | `/api/v1/plans/{id}` | Web UI Plan Editor | Save customized plan mappings | User JWT |
-| **35**| `POST` | `/api/v1/plans/{id}/execute`| **Web UI Dashboard**| **Human-in-the-Loop Plan Approval**| User JWT |
-| **36**| `GET` | `/api/v1/executions` | Web UI Dashboard | List user execution jobs | User JWT |
-| **37**| `GET` | `/api/v1/executions/{id}` | Web UI Execution Page| Get execution job details | User JWT |
-| **38**| `POST` | `/api/v1/executions/{id}/progress`| Local Docker Agent | Send chunk progress & errors | Agent Token |
-| **39**| `POST` | `/api/v1/executions/{id}/resume`| Web UI Error Card | One-click resume from checkpoint | User JWT |
-| **40**| `GET` | `/` | Browser / Root Check| Root welcome endpoint | Public |
-| **41**| `GET` | `/api/v1/health` | K8s / Health Check | API service health check | Public |
+| **26**| `POST` | `/api/v1/agents/fatal-error` | Local Docker Agent | Emergency notification for fatal container stopping error | Agent Token / Header |
+| **27**| `DELETE`| `/api/v1/agents/{id}` | Web UI Agent Detail | Delete agent entity | User JWT |
+| **28**| `POST` | `/api/v1/metadata/sync` | Local Docker Agent | Upload zero-raw-data schema snapshot | Agent Token |
+| **29**| `GET` | `/api/v1/metadata/sources/{id}/snapshots`| Web UI Schema History| List snapshots for a source | User JWT |
+| **30**| `GET` | `/api/v1/metadata/sources/{id}/snapshots/latest`| Web UI Schema Inspector| Get latest snapshot for a source | User JWT |
+| **31**| `GET` | `/api/v1/metadata/snapshots/{id}`| Web UI Schema Modal| Get snapshot details by ID | User JWT |
+| **32**| `POST` | `/api/v1/plans/generate` | Web UI Plan Generator| Trigger Gemini AI AST generation | User JWT |
+| **33**| `GET` | `/api/v1/plans` | Web UI Plans Page | List user migration plans | User JWT |
+| **34**| `GET` | `/api/v1/plans/{id}` | Web UI / Docker Agent| Get AST blueprint payload | User JWT / Agent Token |
+| **35**| `PUT` | `/api/v1/plans/{id}` | Web UI Plan Editor | Save customized plan mappings | User JWT |
+| **36**| `POST` | `/api/v1/plans/{id}/validate` | Web UI Plan Feasibility | Run deterministic pre-flight feasibility checks | User JWT |
+| **37**| `POST` | `/api/v1/plans/{id}/approve` | Web UI Plan Approval | Human approval gateway for plan blueprint | User JWT |
+| **38**| `GET` | `/api/v1/plans/{id}/versions` | Web UI Version History | List historical version snapshots (metadata only) | User JWT |
+| **39**| `GET` | `/api/v1/plans/{id}/versions/{v_num}` | Web UI Version Diff | Get full AST blueprint of a historical snapshot | User JWT |
+| **40**| `POST` | `/api/v1/plans/{id}/versions/{v_num}/restore` | Web UI Version History | Rollback plan blueprint to a historical version | User JWT |
+| **41**| `POST` | `/api/v1/plans/{id}/execute`| **Web UI Dashboard**| **Human-in-the-Loop Plan Approval & Execution**| User JWT |
+| **42**| `GET` | `/api/v1/executions` | Web UI Dashboard | List user execution jobs | User JWT |
+| **43**| `GET` | `/api/v1/executions/{id}` | Web UI Execution Page| Get execution job details, checkpoint & AI diagnosis | User JWT |
+| **44**| `POST` | `/api/v1/executions/{id}/progress`| Local Docker Agent | Send chunk progress, errors & trigger AI diagnosis | Agent Token |
+| **45**| `POST` | `/api/v1/executions/{id}/resume`| Web UI Error Card | One-click resume from checkpoint | User JWT |
+| **46**| `GET` | `/` | Browser / Root Check| Root welcome endpoint | Public |
+| **47**| `GET` | `/api/v1/health` | K8s / Health Check | API service health check | Public |
