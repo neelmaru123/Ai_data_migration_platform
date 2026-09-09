@@ -15,43 +15,132 @@ import {
 import toast from 'react-hot-toast';
 import agentService from '../../services/agentService';
 
+interface ConnectionDetails {
+  host: string;
+  port: string;
+  username: string;
+  database: string;
+  ssl: boolean;
+}
+
 interface DockerCommandOutputProps {
   agent: AgentDetailResponse;
   dockerCmdData?: AgentDockerCommandResponse | null;
   onReset: () => void;
+  sources?: { identifier: string }[];
+  destination?: { identifier: string } | null;
+  connectionDetailsByIdentifier?: Record<string, ConnectionDetails>;
+}
+
+// Mirrors the backend's AgentCommandGenerator._sanitize_identifier exactly
+// (apps/api/app/modules/agents/agents_command_generator.py). If this ever
+// drifts from the backend's version, placeholder substitution will silently
+// fail to match and the raw <..._HOST> style text will still be shown.
+function sanitizeIdentifier(identifier: string): string {
+  const cleaned = identifier
+    .trim()
+    .replace(/[^A-Za-z0-9_]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .toUpperCase();
+  return cleaned || 'DB';
+}
+
+// Mirrors the backend's used_prefixes collision-avoidance loop exactly, so
+// that if two identifiers sanitize to the same base string, the second one
+// gets the same "_2", "_3", ... suffix the backend would have generated.
+function resolvePrefix(baseClean: string, rolePrefix: 'SRC' | 'DEST', usedPrefixes: Set<string>): string {
+  const base = `${rolePrefix}_${baseClean}`;
+  let prefix = base;
+  let counter = 2;
+  while (usedPrefixes.has(prefix)) {
+    prefix = `${base}_${counter}`;
+    counter += 1;
+  }
+  usedPrefixes.add(prefix);
+  return prefix;
+}
+
+// Substitutes <PREFIX_HOST>, <PREFIX_PORT>, <PREFIX_USER>, <PREFIX_NAME>
+// placeholders in the raw command text with real values from the local
+// connectionDetailsByIdentifier state. Password placeholders are
+// deliberately left untouched -- the user fills those in manually.
+function substituteConnectionPlaceholders(
+  rawText: string,
+  sources: { identifier: string }[],
+  destination: { identifier: string } | null | undefined,
+  connectionDetailsByIdentifier: Record<string, ConnectionDetails>
+): string {
+  if (!rawText) return rawText;
+  let result = rawText;
+  const usedPrefixes = new Set<string>();
+
+  const applyForIdentifier = (identifier: string, rolePrefix: 'SRC' | 'DEST') => {
+    const details = connectionDetailsByIdentifier[identifier];
+    const cleanId = sanitizeIdentifier(identifier);
+    const prefix = resolvePrefix(cleanId, rolePrefix, usedPrefixes);
+    if (!details) return;
+    if (details.host) {
+      result = result.split(`<${prefix}_HOST>`).join(details.host);
+    }
+    if (details.port) {
+      result = result.split(`<${prefix}_PORT>`).join(details.port);
+    }
+    if (details.username) {
+      result = result.split(`<${prefix}_USER>`).join(details.username);
+    }
+    if (details.database) {
+      result = result.split(`<${prefix}_NAME>`).join(details.database);
+    }
+    // SSL is intentionally not substituted yet -- flagged as a fast-follow,
+    // since each DB dialect needs a different query-string fragment
+    // (?sslmode=require for Postgres, different syntax for MySQL/Mongo).
+  };
+
+  sources.forEach((s) => applyForIdentifier(s.identifier, 'SRC'));
+  if (destination) applyForIdentifier(destination.identifier, 'DEST');
+
+  return result;
 }
 
 export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
   agent,
   dockerCmdData,
   onReset,
+  sources = [],
+  destination = null,
+  connectionDetailsByIdentifier = {},
 }) => {
   const [activeTab, setActiveTab] = useState<'bash' | 'powershell' | 'oneline' | 'env'>('bash');
   const [copied, setCopied] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string>(agent.status || 'offline');
 
   // Resolved commands from props or agent detail
-  const bashCmd =
+  const rawBashCmd =
     dockerCmdData?.docker_command ||
     agent.docker_command ||
     `docker run -d --name agent_${agent.agent_identifier} -e AGENT_TOKEN="${
       agent.api_token || '<YOUR_AGENT_TOKEN>'
     }" -e BACKEND_URL="http://localhost:8000" ai-data-migration-agent:latest`;
 
-  const powershellCmd =
+  const rawPowershellCmd =
     dockerCmdData?.docker_command_powershell ||
     agent.docker_command_powershell ||
-    bashCmd;
+    rawBashCmd;
 
-  const onelineCmd =
+  const rawOnelineCmd =
     dockerCmdData?.docker_command_oneline ||
     agent.docker_command_oneline ||
-    bashCmd.replace(/\\\n\s*/g, ' ');
+    rawBashCmd.replace(/\\\n\s*/g, ' ');
 
-  const envTemplate =
+  const rawEnvTemplate =
     dockerCmdData?.env_template ||
     agent.env_template ||
     `AGENT_TOKEN=${agent.api_token || '<YOUR_AGENT_TOKEN>'}\nBACKEND_URL=http://localhost:8000`;
+
+  const bashCmd = substituteConnectionPlaceholders(rawBashCmd, sources, destination, connectionDetailsByIdentifier);
+  const powershellCmd = substituteConnectionPlaceholders(rawPowershellCmd, sources, destination, connectionDetailsByIdentifier);
+  const onelineCmd = substituteConnectionPlaceholders(rawOnelineCmd, sources, destination, connectionDetailsByIdentifier);
+  const envTemplate = substituteConnectionPlaceholders(rawEnvTemplate, sources, destination, connectionDetailsByIdentifier);
 
   // Subscribe to real-time WebSocket for live heartbeat ping
   useEffect(() => {
@@ -250,10 +339,10 @@ export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
 
         <ol className="list-decimal list-inside text-xs text-zinc-400 space-y-2 leading-relaxed font-sans">
           <li>
-            Paste the command into your local shell terminal. If running locally, replace placeholder password parameters (such as <code className="text-sky-400 font-mono">&lt;SRC_..._PASSWORD&gt;</code>) with your actual database passwords.
+            Paste the command into your local shell terminal. Replace the placeholder parameters (such as <code className="text-sky-400 font-mono">&lt;SRC_..._HOST&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._PORT&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._USER&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._PASSWORD&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._NAME&gt;</code>) with your actual database connection credentials.
           </li>
           <li>
-            The control plane <strong className="text-white">never</strong> receives or stores your database passwords.
+            The control plane <strong className="text-white">never</strong> receives or stores your database credentials or passwords.
           </li>
           <li>
             The container will automatically execute the startup handshake using the generated <code className="text-sky-400 font-mono">AGENT_TOKEN</code>.

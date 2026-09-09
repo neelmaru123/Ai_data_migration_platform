@@ -1008,8 +1008,37 @@ Refined the execution monitor and job banner action controls in [`JobExecutionBa
 ### 3. Alternatives Considered & Rejected
 - **Alternative A: Completely Hiding Buttons on Completed Jobs**: Rejected because users actively look for next steps upon job completion; offering `+ CREATE NEW MIGRATION` and explicitly disabling retry with an informative tooltip prevents confusion.
 
+---
+
+## [2026-09-09] - Generic Parameterized Placeholders for Zero-Credential Agent Commands (Phase N)
+
+### 1. Decision Summary
+Updated `AgentCommandGenerator._get_db_url_template` in [`apps/api/app/modules/agents/agents_command_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_command_generator.py) to generate fully generic parameterized placeholders across all connection components:
+- `<{prefix}_{clean_id}_HOST>`
+- `<{prefix}_{clean_id}_PORT>`
+- `<{prefix}_{clean_id}_USER>`
+- `<{prefix}_{clean_id}_PASSWORD>`
+- `<{prefix}_{clean_id}_NAME>`
+
+Implemented browser-side zero-credential parameter substitution across the Agent Creation flow:
+- [`DatabaseConfigForm.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx): collects host, port, username, database name, and SSL preference into local React state `connectionDetails` without sending credentials to the backend API.
+- [`apps/web/app/agents/create/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/agents/create/page.tsx): manages `connectionDetailsByIdentifier` in page state, isolating it from the backend creation payload, and forwards it to `DockerCommandOutput`.
+- [`DockerCommandOutput.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx): implements `substituteConnectionPlaceholders()` mirroring the backend prefix and sanitization logic to auto-populate host, port, user, and db name into the displayed Bash, PowerShell, Single-line, and `.env` commands in browser memory, leaving only the `<..._PASSWORD>` placeholder for the user to supply in the shell.
+
+Updated corresponding unit test assertions in [`test_agent_command_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_agent_command_generator.py) and [`test_agent_command_placeholders_api.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_agent_command_placeholders_api.py).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Previously, users had to manually edit 5+ placeholders in every URL string inside their terminal. By entering host, port, username, and database name into the frontend form, the browser auto-substitutes these non-secret parameters into the displayed command, while the control plane API remains 100% agnostic and receives zero credential data. Password placeholders remain manual placeholders.
+- **Chosen Solution**: Client-side-only React state pipeline (`DatabaseConfigForm` -> `page` -> `DockerCommandOutput`) with pure string substitution in browser memory.
+- **Why This Architecture**: Enforces strict Zero-Knowledge Control Plane security while delivering an effortless copy-paste developer experience.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Prompting for and Storing Host/Port/User in Backend DB**: Rejected because network topology, database hosts, and internal usernames are sensitive infrastructure information that enterprise customers prefer to keep on-premise.
+- **Alternative B: Pure Manual Shell Substitution**: Rejected because typing out long connection strings manually for multi-source migrations is error-prone.
+
 ### 4. Trade-offs & Future Considerations
-- Completed jobs cannot be re-run in-place; new runs for the same target should be initiated through new migration plan dispatches.
+- Database passwords remain manual placeholders (`<..._PASSWORD>`) that users must supply in their shell, preserving zero password exposure to the browser and backend.
+
 
 
 

@@ -19,6 +19,10 @@ interface DatabaseConfigFormProps {
     agentIdentifier: string;
     sources: InitialDataSourceCreate[];
     destination: InitialDataSourceCreate;
+    // Client-side-only connection details (host/port/username/database/ssl),
+    // keyed by identifier. NEVER sent to the backend API -- only used
+    // locally by DockerCommandOutput to fill in the displayed command.
+    connectionDetailsByIdentifier: Record<string, { host: string; port: string; username: string; database: string; ssl: boolean }>;
   }) => void;
   onBack: () => void;
   isSubmitting?: boolean;
@@ -109,6 +113,40 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
     identifier: 'dst_db_main',
   });
 
+  interface ConnectionDetails {
+    host: string;
+    port: string;
+    username: string;
+    database: string;
+    ssl: boolean;
+  }
+
+  // Local-only connection details, keyed by identifier. This state is
+  // NEVER included in the onSubmit payload sent to the backend -- it only
+  // ever gets read by DockerCommandOutput (a sibling component, wired via
+  // the parent page) to fill in the displayed docker command in the
+  // browser. Do not add these fields to InitialDataSourceCreate or to the
+  // onSubmit payload.
+  const [connectionDetails, setConnectionDetails] = useState<Record<string, ConnectionDetails>>(() => {
+    const initial: Record<string, ConnectionDetails> = {};
+    sources.forEach((s) => {
+      initial[s.identifier] = { host: '', port: '', username: '', database: '', ssl: false };
+    });
+    initial[destination.identifier] = { host: '', port: '', username: '', database: '', ssl: false };
+    return initial;
+  });
+
+  const handleConnectionDetailChange = (
+    identifier: string,
+    field: keyof ConnectionDetails,
+    value: string | boolean
+  ) => {
+    setConnectionDetails((prev) => ({
+      ...prev,
+      [identifier]: { ...(prev[identifier] || { host: '', port: '', username: '', database: '', ssl: false }), [field]: value },
+    }));
+  };
+
   const handleSourceChange = (
     index: number,
     field: keyof InitialDataSourceCreate,
@@ -126,6 +164,7 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
       agentIdentifier: agentIdentifier.trim(),
       sources,
       destination,
+      connectionDetailsByIdentifier: connectionDetails,
     });
   };
 
@@ -306,6 +345,60 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
                           className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-sky-400 font-mono text-xs focus:outline-none focus:border-sky-400 transition-colors"
                         />
                       </div>
+                    </div>
+
+                    {/* Connection Details (host/port/username/database only -- password is
+                        NEVER collected here; it stays a manual placeholder the user fills
+                        into the copied command themselves, so it never touches the browser
+                        state or this form at all). */}
+                    <div className="space-y-2 pt-2 border-t border-zinc-900">
+                      <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                        Connection Details
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.host || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'host', e.target.value)}
+                          placeholder="Host (e.g. db.example.com)"
+                          className="col-span-2 w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.port || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'port', e.target.value)}
+                          placeholder="Port"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.username || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'username', e.target.value)}
+                          placeholder="Username"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.database || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'database', e.target.value)}
+                          placeholder="Database name"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-[10px] font-mono text-zinc-400 pt-1">
+                        <input
+                          type="checkbox"
+                          checked={connectionDetails[source.identifier]?.ssl || false}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'ssl', e.target.checked)}
+                          className="accent-sky-400"
+                        />
+                        Require SSL
+                      </label>
+                      <p className="text-[9px] text-zinc-600 font-mono">
+                        Password is entered later, directly in your terminal -- never here.
+                      </p>
                     </div>
 
                     {/* Engine Selector Tiles */}
@@ -523,6 +616,60 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
                     className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-blue-400 font-mono text-xs focus:outline-none focus:border-blue-400 transition-colors"
                   />
                 </div>
+              </div>
+
+              {/* Connection Details (host/port/username/database only -- password is
+                  NEVER collected here; it stays a manual placeholder the user fills
+                  into the copied command themselves, so it never touches the browser
+                  state or this form at all). */}
+              <div className="space-y-2 pt-2 border-t border-zinc-900">
+                <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                  Connection Details
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.host || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'host', e.target.value)}
+                    placeholder="Host (e.g. db.example.com)"
+                    className="col-span-2 w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.port || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'port', e.target.value)}
+                    placeholder="Port"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.username || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'username', e.target.value)}
+                    placeholder="Username"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.database || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'database', e.target.value)}
+                    placeholder="Database name"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-[10px] font-mono text-zinc-400 pt-1">
+                  <input
+                    type="checkbox"
+                    checked={connectionDetails[destination.identifier]?.ssl || false}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'ssl', e.target.checked)}
+                    className="accent-sky-400"
+                  />
+                  Require SSL
+                </label>
+                <p className="text-[9px] text-zinc-600 font-mono">
+                  Password is entered later, directly in your terminal -- never here.
+                </p>
               </div>
 
               {/* Engine Selector Tiles for Destination */}
