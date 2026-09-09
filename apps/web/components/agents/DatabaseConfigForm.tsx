@@ -6,8 +6,6 @@ import {
   ArrowLeft,
   ArrowRight,
   Database,
-  FileSpreadsheet,
-  FileText,
   HardDrive,
   Server,
 } from 'lucide-react';
@@ -63,24 +61,6 @@ export const SUPPORTED_ENGINES: {
     color: 'bg-emerald-400/10 text-emerald-400',
     hex: '#34d399',
     border: 'border-emerald-400/30',
-  },
-  {
-    type: 'csv',
-    name: 'CSV File',
-    category: 'file',
-    icon: FileText,
-    color: 'bg-purple-400/10 text-purple-400',
-    hex: '#c084fc',
-    border: 'border-purple-400/30',
-  },
-  {
-    type: 'excel',
-    name: 'Excel Sheet',
-    category: 'file',
-    icon: FileSpreadsheet,
-    color: 'bg-teal-400/10 text-teal-400',
-    hex: '#2dd4bf',
-    border: 'border-teal-400/30',
   },
 ];
 

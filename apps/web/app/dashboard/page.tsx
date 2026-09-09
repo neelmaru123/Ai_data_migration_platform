@@ -4,7 +4,7 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { AgentDetailResponse, AgentDockerCommandResponse } from '../../types/agent';
 import agentService from '../../services/agentService';
-import { Activity, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert, Monitor, Code, FileCode, AlertTriangle, Sliders, Database, ChevronDown, ChevronUp } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert, ShieldCheck, Monitor, Code, FileCode, AlertTriangle, Sliders, Database, ChevronDown, ChevronUp } from 'lucide-react';
 import { ConnectionDetails, substituteConnectionPlaceholders } from '../../lib/dockerCommandUtils';
 import toast from 'react-hot-toast';
 
@@ -258,6 +258,18 @@ export default function DashboardPage() {
               <p className="text-zinc-400 text-xs max-w-md mx-auto leading-relaxed">
                 Register a Docker migration agent to connect your source databases and start profiling schemas.
               </p>
+
+              {/* Architecture & Privacy Explainer */}
+              <div className="max-w-xl mx-auto my-3 p-4 rounded-none bg-sky-950/20 border border-sky-500/30 text-left flex items-start gap-3">
+                <ShieldCheck className="w-5 h-5 text-sky-400 shrink-0 mt-0.5" />
+                <p className="text-zinc-300 text-xs leading-relaxed font-mono">
+                  Your data never leaves your infrastructure. Migraflow uses a local
+                  Docker Agent to inspect and migrate your databases directly on your
+                  machine or server -- the cloud application only ever receives schema
+                  metadata and migration decisions, never your data or credentials.
+                </p>
+              </div>
+
               <div className="pt-2">
                 <Link
                   href="/agents/create"
