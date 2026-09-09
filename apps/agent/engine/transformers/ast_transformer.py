@@ -26,6 +26,21 @@ import polars as pl
 logger = logging.getLogger("docker-agent-execution")
 
 
+def _deterministic_fallback_uuid(seed_prefix: str, row_index: int) -> str:
+    """
+    Generates a stable UUID for rows that have no usable natural key to
+    hash on. seed_prefix must already uniquely identify
+    (job_id, target_table, source_identifier, source_table) so that two
+    DIFFERENT source rows merging into the SAME target table never
+    collide, even if they share the same row_index. This makes retries
+    of a failed/partial migration safe against the target's
+    ON CONFLICT DO NOTHING / INSERT IGNORE dedup logic, since the same
+    source row always produces the same UUID across retries.
+    """
+    seed = f"{seed_prefix}:{row_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+
+
 # ---------------------------------------------------------------------------
 # Semantic synonym groups — each group is a set of column-name tokens that
 # represent the same business concept. Used by the dynamic fuzzy resolver.
@@ -76,6 +91,8 @@ class ASTTransformer:
         df: pl.DataFrame,
         column_mappings: List[Dict[str, Any]],
         primary_key_strategy: Optional[str] = None,
+        retry_seed_prefix: str = "default_seed",
+        row_offset: int = 0,
     ) -> Tuple[pl.DataFrame, int]:
         if df.is_empty():
             return df, 0
@@ -145,7 +162,7 @@ class ASTTransformer:
         def _unresolved_expr(target_col: str, col_spec: Dict) -> pl.Expr:
             """Return a UUID series for PK/id columns, NULL literal for everything else."""
             if col_spec.get("is_primary_key") or target_col in ("id",):
-                uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+                uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                 return pl.Series(target_col, uuid_list)
             return pl.lit(None).cast(pl.Utf8).alias(target_col)
 
@@ -201,26 +218,26 @@ class ASTTransformer:
                                 pl.col(src_name).cast(pl.Int64, strict=False) + offset_val
                             ).cast(pl.Int64)
                         elif pk_strategy == "uuid_v4_rekey":
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda _: str(uuid.uuid4()), return_dtype=pl.Utf8
-                            )
+                            pk_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(df.height)]
+                            pk_expr = pl.Series(pk_list)
                         elif pk_strategy == "prefix_id":
                             _sid = src_ident  # capture for closure
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda v, s=_sid: f"{s}_{v}" if v not in (None, "") else str(uuid.uuid4()),
-                                return_dtype=pl.Utf8,
-                            )
+                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            pk_list = [
+                                f"{_sid}_{v}" if v not in (None, "") else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
+                                for i, v in enumerate(_col_vals)
+                            ]
+                            pk_expr = pl.Series(pk_list)
                         else:
                             # Default: deterministic UUID v5
                             _sid = src_ident
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda v, s=_sid: (
-                                    str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
-                                    if v not in (None, "")
-                                    else str(uuid.uuid4())
-                                ),
-                                return_dtype=pl.Utf8,
-                            )
+                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            pk_list = [
+                                str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{_sid}_{v}")) if v not in (None, "")
+                                else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
+                                for i, v in enumerate(_col_vals)
+                            ]
+                            pk_expr = pl.Series(pk_list)
                         exprs.append(pk_expr.alias(target_col))
 
                     elif "uuid" in target_dtype:
@@ -508,7 +525,7 @@ class ASTTransformer:
 
                 # Auto-generate UUID primary key 'id' if still missing
                 if "id" in keep_columns and "id" not in transformed_df.columns:
-                    uuid_list = [str(uuid.uuid4()) for _ in range(len(transformed_df))]
+                    uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(transformed_df))]
                     transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
@@ -521,7 +538,7 @@ class ASTTransformer:
                 row_errors += 1
 
                 if "id" in keep_columns and "id" not in df.columns:
-                    uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+                    uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                     df = df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in df.columns]
@@ -529,7 +546,7 @@ class ASTTransformer:
 
         # Passthrough: ensure 'id' exists even with no expressions
         if "id" in keep_columns and "id" not in df.columns:
-            uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+            uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
             df = df.with_columns(pl.Series("id", uuid_list))
 
         available_targets = [c for c in keep_columns if c in df.columns]

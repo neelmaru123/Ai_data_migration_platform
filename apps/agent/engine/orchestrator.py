@@ -32,9 +32,13 @@ class ExecutionOrchestrator:
         source_db_urls: Dict[str, str],
         target_db_url: str,
         target_engine_type: str = "postgresql",
+        is_dry_run: bool = False,
     ):
-        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' ===")
         plan_data = plan_ast.get("plan_data", {})
+        if not is_dry_run:
+            is_dry_run = bool(plan_ast.get("is_dry_run", False) or plan_data.get("is_dry_run", False))
+
+        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}) ===")
         pre_ddl = plan_data.get("pre_migration_ddl", [])
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
@@ -83,7 +87,10 @@ class ExecutionOrchestrator:
                 backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0,
                 total_rows=total_estimated_rows, current_stage="pre_ddl"
             )
-            DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
+            if not is_dry_run:
+                DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
+            else:
+                logger.info(f"[DRY RUN] Pre-Migration DDL skipped ({len(pre_ddl)} statements).")
 
             # Step 2: Data Extraction, AST Transformation, Merge, and Target Loading
             for idx, table_spec in enumerate(table_mappings, start=1):
@@ -221,16 +228,24 @@ class ExecutionOrchestrator:
                                 break
 
                             logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
-                            df_trans, trans_errors = ASTTransformer.transform_chunk(df_raw, column_mappings)
+                            retry_seed_prefix = f"{job_id}:{target_table}:{src_ident}:{src_table}"
+                            df_trans, trans_errors = ASTTransformer.transform_chunk(
+                                df_raw, column_mappings, retry_seed_prefix=retry_seed_prefix, row_offset=offset
+                            )
                             total_failed += trans_errors
 
                             # If single source table, load directly to target (OOM-free streaming)
                             if len(source_tables) == 1:
-                                succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
-                                total_processed += (succ + fail + skip)
-                                total_successful += succ
-                                total_failed += fail
-                                total_skipped += skip
+                                if not is_dry_run:
+                                    succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
+                                    total_processed += (succ + fail + skip)
+                                    total_successful += succ
+                                    total_failed += fail
+                                    total_skipped += skip
+                                else:
+                                    succ = len(df_trans)
+                                    total_processed += (succ + trans_errors)
+                                    total_successful += succ
                             else:
                                 start_seq = TableMerger.append_to_duckdb_staging(staging_conn, staging_table_name, df_trans, start_seq)
 
@@ -240,11 +255,16 @@ class ExecutionOrchestrator:
                     # For multi-source merges, stream deduplicated results from DuckDB staging area in bounded batches
                     if len(source_tables) > 1 and staging_conn:
                         for chunk_df in TableMerger.stream_deduplicated_chunks(staging_conn, staging_table_name, conflict_res, chunk_size=50000):
-                            succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, chunk_df)
-                            total_processed += (succ + fail + skip)
-                            total_successful += succ
-                            total_failed += fail
-                            total_skipped += skip
+                            if not is_dry_run:
+                                succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, chunk_df)
+                                total_processed += (succ + fail + skip)
+                                total_successful += succ
+                                total_failed += fail
+                                total_skipped += skip
+                            else:
+                                succ = len(chunk_df)
+                                total_processed += succ
+                                total_successful += succ
 
                 finally:
                     if staging_conn:
@@ -264,7 +284,10 @@ class ExecutionOrchestrator:
                 total_processed, total_successful, total_failed, total_skipped,
                 total_rows=total_estimated_rows, current_stage="post_ddl"
             )
-            DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+            if not is_dry_run:
+                DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+            else:
+                logger.info(f"[DRY RUN] Post-Migration DDL skipped ({len(post_ddl)} statements).")
 
             # Step 4: Verify write success rate before declaring the job complete.
             # Without this check, a target database that is completely unreachable
@@ -282,13 +305,19 @@ class ExecutionOrchestrator:
                     )
 
             # Step 5: Mark Job Complete and Clean Checkpoints
-            CheckpointManager.clear_job_checkpoints(job_id)
+            if not is_dry_run:
+                CheckpointManager.clear_job_checkpoints(job_id)
+                final_status = "completed"
+            else:
+                logger.info(f"[DRY RUN] Preserving checkpoints (no-op) for dry run job '{job_id}'.")
+                final_status = "dry_run_completed"
+
             ProgressReporter.report(
-                backend_url, agent_token, job_id, "completed", 100.0,
+                backend_url, agent_token, job_id, final_status, 100.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                total_rows=total_estimated_rows, current_stage="completed"
+                total_rows=total_estimated_rows, current_stage=final_status
             )
-            logger.info(f"=== MIGRATION JOB '{job_id}' COMPLETED SUCCESSFULLY! (Processed: {total_processed}, Success: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
+            logger.info(f"=== MIGRATION JOB '{job_id}' ({final_status.upper()})! (Processed: {total_processed}, Would Write: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
 
         except Exception as exc:
             err_msg = f"Migration job '{job_id}' failed: {exc}"

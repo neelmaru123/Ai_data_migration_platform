@@ -569,9 +569,10 @@ def poll_and_execute_tasks(
             for task in tasks:
                 job_id = task.get("job_id")
                 plan_id = task.get("migration_plan_id")
+                is_dry_run = bool(task.get("is_dry_run", False))
 
                 try:
-                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' via X-Agent-Token...")
+                    logger.info(f"Fetching AST plan '{plan_id}' for job '{job_id}' (Dry Run: {is_dry_run}) via X-Agent-Token...")
 
                     # Fetch full plan AST from API using Agent token auth
                     plan_url = f"{backend_url.rstrip('/')}/api/v1/plans/{plan_id}"
@@ -599,6 +600,7 @@ def poll_and_execute_tasks(
                         source_db_urls=src_urls,
                         target_db_url=dest_url,
                         target_engine_type=target_engine_type,
+                        is_dry_run=is_dry_run,
                     )
                 except Exception as run_err:
                     logger.error(f"Execution error for job '{job_id}': {run_err}")

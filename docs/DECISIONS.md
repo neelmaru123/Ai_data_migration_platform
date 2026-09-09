@@ -889,4 +889,129 @@ Key components:
 - Re-staging a multi-source table after a crash repeats extraction for previously staged sources of that specific table, but guarantees 100% data correctness and zero row loss.
 - All 10 failure scenarios have been verified via end-to-end regression testing with genuine database-level triggers.
 
+---
+
+## [2026-09-09] - Deterministic UUID Generation for Safe Migration Retries
+
+### 1. Decision Summary
+Replaced non-deterministic `uuid.uuid4()` generation in `ASTTransformer.transform_chunk` with deterministic UUIDv5 hashes generated via `_deterministic_fallback_uuid(seed_prefix, row_index)`. Seed prefixes are derived in `ExecutionOrchestrator` using the compound migration identifier `f"{job_id}:{target_table}:{src_ident}:{src_table}"`, combined with chunk-level `row_offset + index`. This guarantees idempotent primary key generation across retry attempts of partial or failed migrations without duplicate row insertion or PK churn.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: When a migration job fails mid-stream or is retried, generating random `uuid.uuid4()` keys produces brand new identifiers for previously inserted or attempted rows. This bypasses target `ON CONFLICT DO NOTHING` / `INSERT IGNORE` deduplication, creating duplicate rows or integrity violations.
+- **Chosen Solution**: Python `uuid.uuid5(uuid.NAMESPACE_DNS, f"{seed_prefix}:{row_index}")` deterministic hashing. `transform_chunk` now accepts `retry_seed_prefix` (defaulting to `"default_seed"`) and `row_offset` (defaulting to `0`) for full backward compatibility with tests.
+- **Why This Technology**: Standard library `uuid.uuid5` provides RFC 4122 compliant SHA-1 namespace-based UUIDs with deterministic output across processes and runtimes without introducing new third-party dependencies.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying on Auto-Increment Sequence in Target**: Rejected because target tables frequently use UUID primary keys for distributed datasets or NoSQL sync, where auto-increment sequences are unavailable or disallowed.
+- **Alternative B: Pure Value-Based Hashing of Source Rows**: Rejected because source rows may lack natural keys, have duplicate values, or undergo schema transformations that make row contents unstable across plan refinements. The combination of logical source row identity `(job_id, target_table, src_ident, src_table, row_offset + index)` guarantees collision-free stability.
+
+### 4. Trade-offs & Future Considerations
+- The caller is responsible for passing the original `job_id` across retry attempts of the same logical migration job.
+- If source rows are re-ordered non-deterministically between retries (e.g. un-ordered full-table scans with concurrent writes), row index offset may point to different rows. Keyset pagination with stable primary keys or sorted staging avoids this issue.
+
+---
+
+## [2026-09-09] - Preflight Advisory for Target Tables with Existing Data
+
+### 1. Decision Summary
+Added an asynchronous preflight check `ExecutionService.check_target_tables_existing_data()` invoked during `create_execution_job()`. It queries the agent's target `DataSource`'s most recent `MetadataSnapshot` (cached offline in PostgreSQL metadata tables without opening live connections to the target DB from the API) to inspect whether any plan target tables already contain rows (`table.row_count > 0`). If detected, execution is not blocked, but advisory warnings are attached to `job.target_tables_with_existing_data` and serialized in `ExecutionJobResponse`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Running a migration into a target table that already contains existing data can cause unintended row updates, duplicate rows, or unique constraint conflicts. Users need early visibility into existing target row counts before or right as execution starts.
+- **Chosen Solution**: Offline inspection via `MetadataSnapshot.schemas.tables`. This keeps API execution triggers fast and independent of target database network availability from the cloud control plane, leveraging the Docker agent's previously introspected metadata.
+- **Why Non-Blocking**: Some workflows intentionally append data or use upserts into pre-populated tables. Blocking would break legitimate append/merge workflows; returning advisory details allows the frontend to show warning banners while preserving user autonomy.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Direct Live Target Database Query from FastAPI**: Rejected because target databases may be behind corporate firewalls, VPCs, or NATs only accessible by the local Docker Agent container, not the central API.
+- **Alternative B: Hard-Blocking Execution with HTTP 409**: Rejected because append migrations into pre-existing staging tables are a supported migration pattern.
+
+### 4. Trade-offs & Future Considerations
+- Advisory row counts are based on the latest agent metadata snapshot. If target data was inserted after the last schema profiling run, row counts will reflect the state at snapshot time until the agent introspects again.
+
+---
+
+## [2026-09-09] - Multi-Vector Migration Readiness Signals UI & Fine-Grained Confidence
+ 
+### 1. Decision Summary
+Replaced the single monolithic "AI Confidence" percentage badge with multi-level migration readiness and confidence metrics:
+1. **Plan-Level 4-Vector Readiness Dashboard**:
+   - **Schema Compatibility**: Target column alignment, direct 1:1 mappings, composite splits, and dropped column ratios.
+   - **Type Compatibility**: Data type casting safety, coercion fidelity (timestamps, numeric decimals, UUIDs).
+   - **Relationship Mapping**: Primary key resolution, foreign key constraints, and post-migration DDL integrity.
+   - **Data Conflict Risk**: Merge deduplication safety and deterministic PK conflict resolution strategies.
+   - **Rollup Composite Badge**: High-level readiness rollup (`OPTIMAL READINESS`, `HIGH READINESS`, `MODERATE READINESS`, `REVIEW ADVISED`).
+2. **Table-Level Readiness Badges**: Replaced generic table confidence in the accordion header with `<TableReadinessBadge>` reflecting table-specific column mapping distributions.
+3. **Column-Level Confidence & Fidelity Badges**: Added a dedicated "Mapping Confidence" column in the column mappings table with `<ColumnConfidenceBadge>` (e.g. 99% Direct 1:1, 98% UUID Cast, 95% Numeric Cast, 93% Timestamp Cast, 88% SQL Expr, 80% Dropped).
+4. **Target Data Pre-Population Warning Banners**: Mounted advisory warnings in `JobExecutionBanner.tsx` and toast alerts in `PlanBlueprintViewer.tsx` when `job.target_tables_with_existing_data` indicates destination tables already contain rows.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: A single percentage number (e.g. `90%`) obscures critical dimension-specific migration risks. Furthermore, developers need to know exactly which columns (e.g. dynamic SQL expressions or dropped columns) contribute to risk versus pristine 1:1 copies.
+- **Chosen Solution**: Client-side hierarchical vector computation implemented in [`PlanReadinessSignals.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanReadinessSignals.tsx) deriving metrics directly from the existing `TransformationPlanAST` data structure without adding API overhead.
+- **Why This Pattern**: Reuses existing `TableMappingSpec`, `ColumnMappingSpec`, and `ConflictResolutionSpec` contracts already returned by the FastAPI backend, providing instant visual feedback across version history selections and blueprint edits without new server roundtrips.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: New Backend Endpoint for Readiness Scoring**: Rejected because all underlying transformation metadata and AST specs are already client-resident in `PlanDetailResponse.plan_data`, avoiding unnecessary HTTP roundtrips.
+- **Alternative B: Retaining Monolithic Confidence at Table Level**: Rejected because users requested granular visibility at all levels of the plan hierarchy (plan, table, and column).
+
+### 4. Trade-offs & Future Considerations
+- Derived client-side scores dynamically adapt when users edit column mappings inline or switch plan versions, keeping all readiness signals in continuous synchronization with active blueprint changes.
+
+---
+
+## [2026-09-09] - Dry Run Migration Simulation Engine (Phase L)
+
+### 1. Decision Summary
+Added an end-to-end "Dry Run" mode to migration execution across the database schema, backend API, agent worker daemon, and frontend UI:
+1. **Alembic & ORM**: Migration `011_add_is_dry_run_to_migration_jobs.py` adds `is_dry_run` boolean column with default `false` to `migration_jobs`. Updated `MigrationJob` ORM model, `ExecutionStartRequest`, `ExecutionJobResponse`, and `AgentTaskItemResponse`.
+2. **Orchestrator Simulation Pipeline**: In `apps/agent/engine/orchestrator.py`, when `is_dry_run=True`:
+   - Pre-migration and Post-migration DDL execution (`DDLExecutor.execute_ddl_list`) is bypassed completely.
+   - Source data extraction, AST transformation (`ASTTransformer.transform_chunk`), and DuckDB staging/deduplication execute exactly as in real migrations to surface real data quality, merge collision, and transformation errors.
+   - Target database writes (`TargetWriterFactory.bulk_load`) are bypassed entirely, counting would-be successful rows (`len(df_trans)` / `len(chunk_df)`).
+   - Checkpoints are preserved without calling `CheckpointManager.clear_job_checkpoints(job_id)`.
+   - The job completes with terminal status `"dry_run_completed"` instead of `"completed"`.
+3. **Frontend UI**:
+   - `PlanBlueprintViewer.tsx`: Added a dedicated `⚡ Run Dry Run (Simulation)` button next to `Approve & Execute`.
+   - `JobExecutionBanner.tsx`: When `job.status === "dry_run_completed"` or `job.is_dry_run === true`, renders an amber simulation warning banner (`DRY RUN SIMULATION -- NO DATA WAS WRITTEN TO TARGET DB`) and provides a direct `⚡ EXECUTE FOR REAL` secondary action button.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Large-scale data migrations carry significant risk of schema misconfiguration, data type truncation, or merge key collisions. Users need a way to validate the entire transformation pipeline against live production source data without writing a single row to the destination database.
+- **Why Run Extraction & Transformation in Dry Run**: Testing only schema validation misses actual data-level transformation errors (e.g. malformed dates, invalid JSON, or merge collisions). Running full extraction and transformation guarantees that any error in the data stream will be caught before touching the target database.
+- **Why Bypass DDL and Target Writer**: Preserves destination schema and table isolation. No locks, table drops, constraints, or rows are altered in the target system.
+- **Why Preserve Checkpoints**: Dry runs must leave no residual state that could interfere with subsequent real executions or corrupt resumption offsets.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Transaction Rollback after Full Write**: Rejected because target systems may include non-transactional targets (e.g. MongoDB, S3/Parquet), and rolling back millions of inserted rows in transactional DBs creates massive write amplification and WAL bloat.
+- **Alternative B: Running Dry Run only on a Small Sample Chunk**: Rejected because data quality bugs and edge-case collisions often lurk deep in source tables (e.g. at row 50,000). A full simulation guarantees end-to-end data integrity.
+
+### 4. Trade-offs & Future Considerations
+- Full dry runs consume read bandwidth and worker compute comparable to real migrations. For multi-terabyte datasets, an optional sampled dry-run option may be added in a future phase.
+
+---
+
+## [2026-09-09] - Execution Monitor Checkpoint Resume vs Retry & Completed Guard (Phase M)
+
+### 1. Decision Summary
+Refined the execution monitor and job banner action controls in [`JobExecutionBanner.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/JobExecutionBanner.tsx) and [`page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/execution/page.tsx):
+1. **Resume vs. Retry Semantics**:
+   - When a migration job is in status `"failed"` and `processed_rows > 0`, the action button dynamically renders as `"⚡ RESUME"` (or `"⚡ RESUME DRY RUN"`), with tooltip explaining that saved checkpoints will be reused to continue streaming from the last processed record without re-inserting already-committed rows.
+   - When `status === 'failed'` and `processed_rows === 0`, it renders as `"⚡ RETRY MIGRATION JOB"` (or `"⚡ RETRY DRY RUN"`).
+2. **Completed Migration Action Guard**:
+   - When a job is in status `"completed"`, active retries are prevented. The retry button is disabled with a tooltip explaining that checkpoints were finalized upon completion.
+   - Instead of offering retries on completed migrations, the UI prominently presents a `+ CREATE NEW MIGRATION` button (linking directly to `/profiling` to initiate a fresh catalog introspection and blueprint).
+3. **Execution Page Header Action**:
+   - Added a top-level `+ Create New Migration` button in the execution monitor page header next to `Refresh Jobs`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Conflating "Retry" and "Resume" creates user confusion over whether existing checkpoints and target deduplication will be respected. Furthermore, allowing users to casually "retry" an already completed migration is an anti-pattern that risks accidental duplicate writes or confusion over cleared checkpoints.
+- **Chosen Solution**: Distinct contextual labels (`Resume` vs `Retry`), checkpoint reuse tooltips, disabled retry guard on completed migrations, and clear pathway to `+ Create New Migration`.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Completely Hiding Buttons on Completed Jobs**: Rejected because users actively look for next steps upon job completion; offering `+ CREATE NEW MIGRATION` and explicitly disabling retry with an informative tooltip prevents confusion.
+
+### 4. Trade-offs & Future Considerations
+- Completed jobs cannot be re-run in-place; new runs for the same target should be initiated through new migration plan dispatches.
+
+
+
+
 
