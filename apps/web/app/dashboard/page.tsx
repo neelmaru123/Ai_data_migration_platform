@@ -4,14 +4,34 @@ import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { AgentDetailResponse, AgentDockerCommandResponse } from '../../types/agent';
 import agentService from '../../services/agentService';
-import { Activity, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert, ShieldCheck, Monitor, Code, FileCode, AlertTriangle, Sliders, Database, ChevronDown, ChevronUp } from 'lucide-react';
+import { Activity, Plus, Terminal, Trash2, ArrowRight, Copy, Check, RefreshCw, ShieldAlert, ShieldCheck, Monitor, Code, FileCode, AlertTriangle, Sliders, Database, ChevronDown, ChevronUp, LogOut } from 'lucide-react';
 import { ConnectionDetails, substituteConnectionPlaceholders } from '../../lib/dockerCommandUtils';
 import toast from 'react-hot-toast';
+import { useAuthUser } from '../../hooks/queries/useAuthUser';
+import { useLogout } from '../../hooks/mutations/useAuthMutations';
 
 export default function DashboardPage() {
   const [agents, setAgents] = useState<AgentDetailResponse[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // User Auth & Logout
+  const { data: currentUser } = useAuthUser();
+  const logoutMutation = useLogout();
+  const [isLoggingOut, setIsLoggingOut] = useState<boolean>(false);
+
+  const handleLogout = async () => {
+    setIsLoggingOut(true);
+    try {
+      await logoutMutation.mutateAsync();
+    } catch {
+      // Cleaned up in mutation hook
+    } finally {
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
+      }
+    }
+  };
 
   // Modal State for Docker Commands
   const [selectedAgentForCmd, setSelectedAgentForCmd] = useState<AgentDetailResponse | null>(null);
@@ -165,7 +185,7 @@ export default function DashboardPage() {
 
       <main className="w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 flex-1">
         {/* Top Header & Actions */}
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-6">
+        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4 border-b border-zinc-800 pb-6">
           <div>
             <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-none text-[11px] font-mono font-bold uppercase tracking-widest bg-sky-400/10 text-sky-400 border border-sky-400/30 mb-2">
               <Activity className="w-3.5 h-3.5" />
@@ -179,11 +199,25 @@ export default function DashboardPage() {
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5 shrink-0 flex-wrap sm:flex-nowrap">
+            {currentUser && (
+              <div
+                className="hidden sm:flex items-center gap-2 py-2.5 px-3 rounded-none bg-zinc-950 border border-zinc-800 text-zinc-300 text-xs font-mono shadow-sm"
+                title={`Signed in as ${currentUser.email}`}
+              >
+                <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-zinc-500 uppercase text-[10px] tracking-wider font-semibold">USER:</span>
+                <span className="font-semibold text-zinc-200 truncate max-w-[120px]">
+                  {currentUser.name || currentUser.email.split('@')[0]}
+                </span>
+              </div>
+            )}
+
             <button
               type="button"
               onClick={() => fetchAgents()}
-              className="py-3 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-mono font-bold uppercase tracking-wider border border-zinc-800 transition-colors flex items-center gap-2"
+              className="py-2.5 px-3.5 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-mono font-bold uppercase tracking-wider border border-zinc-800 transition-colors flex items-center gap-2 whitespace-nowrap"
+              title="Refresh agent status"
             >
               <RefreshCw className="w-3.5 h-3.5" />
               Refresh
@@ -191,11 +225,22 @@ export default function DashboardPage() {
 
             <Link
               href="/agents/create"
-              className="py-3 px-6 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 flex items-center gap-2"
+              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 flex items-center gap-2 font-mono whitespace-nowrap"
             >
               <Plus className="w-4 h-4" />
               Register New Agent
             </Link>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              disabled={isLoggingOut}
+              className="py-2.5 px-3.5 rounded-none bg-zinc-900 hover:bg-rose-950/40 text-zinc-300 hover:text-rose-400 text-xs font-mono font-bold uppercase tracking-wider border border-zinc-800 hover:border-rose-500/40 transition-colors flex items-center gap-2 disabled:opacity-50 whitespace-nowrap"
+              title="Sign out of your session"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>{isLoggingOut ? 'Logging out...' : 'Logout'}</span>
+            </button>
           </div>
         </div>
 

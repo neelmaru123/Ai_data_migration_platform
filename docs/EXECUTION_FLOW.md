@@ -305,3 +305,33 @@
 5. **UI Presentation**:
    - If `count === 0`: Renders clean empty state ("No foreign-key relationships detected for this table.").
    - If `count > 0`: Renders relationship cards showing `{source_table.column} -> {target_table.column}`, relationship type badge, and confidence percentage.
+
+---
+
+# Execution Flow - Dashboard Session Logout & Identity Context
+
+## 1. Entry Point
+- **Component**: [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx)
+- **Trigger**: User clicks the **"LOGOUT"** button in the dashboard top header actions cluster.
+
+## 2. Step-by-Step Execution Sequence
+1. **User Identity Ingestion**:
+   - `useAuthUser()` issues query `GET /api/v1/users/me` on initial render.
+   - Syncs active user profile into Redux store (`setUser(data)`).
+   - Renders active user context chip: `USER: <name/email>` with pulsing status dot.
+2. **User Logout Dispatch**:
+   - User clicks **`LOGOUT`**.
+   - `DashboardPage.handleLogout()` sets `isLoggingOut = true` (disabling the button and updating button label to `'Logging out...'`).
+   - Calls `logoutMutation.mutateAsync()`.
+3. **Backend Session Termination**:
+   - `useLogout()` dispatches `POST /api/v1/auth/logout` via `authService.logout()`.
+   - Backend `logout_user()` executes `_clear_auth_cookies(response)`, expiring HTTP-only `access_token` and `refresh_token` cookies.
+4. **Client State Purge**:
+   - `useLogout()` removes client cookies `Cookies.remove('logged_in', { path: '/' })` and `Cookies.remove('active_org_id', { path: '/' })`.
+   - Dispatches `logoutAction()` to Redux `authSlice` to reset `user = null` and `isAuthenticated = false`.
+   - Clears TanStack Query cache via `queryClient.clear()`.
+   - Displays toast notification (`Logged out successfully`).
+5. **Hard Navigation**:
+   - In `finally` block of `handleLogout()`, executes `window.location.href = '/login'`.
+   - Browser reloads and navigates to `/login`.
+   - Next.js middleware detects absence of auth cookies and blocks protected route access.

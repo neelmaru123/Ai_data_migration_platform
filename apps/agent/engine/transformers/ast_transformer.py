@@ -25,6 +25,31 @@ import polars as pl
 
 logger = logging.getLogger("docker-agent-execution")
 
+_SQL_DATETIME_LITERALS = frozenset({
+    "CURRENT_TIMESTAMP",
+    "CURRENT_TIMESTAMP()",
+    "NOW()",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_DATE()",
+    "CURRENT_TIME",
+    "CURRENT_TIME()",
+    "LOCALTIMESTAMP",
+    "LOCALTIME",
+    "GETDATE()",
+    "GETDATE",
+    "SYSDATE",
+    "SYSDATETIME()",
+    "UTC_TIMESTAMP",
+    "UTC_TIMESTAMP()",
+})
+
+
+def _is_sql_datetime_expr(val: Any) -> bool:
+    if val is None:
+        return False
+    return str(val).strip().upper() in _SQL_DATETIME_LITERALS
+
 
 def _deterministic_fallback_uuid(seed_prefix: str, row_index: int) -> str:
     """
@@ -263,9 +288,12 @@ class ASTTransformer:
                         # then use map_elements to try multiple format patterns without
                         # relying on Polars-version-specific kwargs like use_earliest.
                         def _parse_dt(v):
-                            if v is None or str(v).strip() in ("", "None", "null"):
+                            if v is None or str(v).strip() in ("", "None", "null", "0000-00-00 00:00:00", "0000-00-00", "0"):
                                 return None
-                            s = str(v).strip().replace(" ", "T")
+                            s = str(v).strip()
+                            if _is_sql_datetime_expr(s):
+                                return datetime.now(timezone.utc).isoformat()
+                            s = s.replace(" ", "T")
                             for fmt in (
                                 "%Y-%m-%dT%H:%M:%S%.f%z",
                                 "%Y-%m-%dT%H:%M:%S%z",
@@ -330,20 +358,34 @@ class ASTTransformer:
             # 5. default_constant
             # ----------------------------------------------------------
             elif trans_type == "default_constant":
-                val = const_val if const_val is not None else ""
-                exprs.append(pl.lit(str(val)).alias(target_col))
+                target_dtype = col_spec.get("target_data_type", "").lower()
+                is_dt_target = (
+                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp", "datetime"))
+                    or any(k in target_col.lower() for k in ("_at", "created_at", "updated_at", "timestamp", "datetime"))
+                )
+                if _is_sql_datetime_expr(const_val) or (is_dt_target and _is_sql_datetime_expr(const_val)):
+                    exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
+                else:
+                    val = const_val if const_val is not None else ""
+                    exprs.append(pl.lit(str(val)).alias(target_col))
 
             # ----------------------------------------------------------
             # 6. new_column_added
             # ----------------------------------------------------------
             elif trans_type == "new_column_added":
                 target_dtype = col_spec.get("target_data_type", "").lower()
-                if const_val is not None and str(const_val) != "":
+                is_dt_target = (
+                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp", "datetime"))
+                    or any(k in target_col.lower() for k in ("_at", "created_at", "updated_at", "timestamp", "datetime"))
+                )
+                if _is_sql_datetime_expr(const_val) or (is_dt_target and (_is_sql_datetime_expr(const_val) or const_val is None or str(const_val).strip() == "")):
+                    exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
+                elif const_val is not None and str(const_val) != "":
                     exprs.append(pl.lit(str(const_val)).alias(target_col))
                 elif "uuid" in target_dtype or target_col.endswith("_id") or target_col == "id":
                     # NULL FK/UUID columns — let DB default or FK resolution fill them
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))
-                elif any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp")):
+                elif is_dt_target:
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
                 else:
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))

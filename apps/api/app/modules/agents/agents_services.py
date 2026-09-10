@@ -488,6 +488,15 @@ class AgentService:
                             "— issuing ENTER_IDLE_MODE."
                         )
                     # else: within 5-min grace window, no directive issued yet
+        elif agent.idle_since is None and heartbeat.status != "offline":
+            # Start tracking idle time if no jobs are currently running
+            stmt_active = select(MigrationJob).where(
+                MigrationJob.agent_id == agent.id,
+                MigrationJob.status.in_(["queued", "preparing", "running"]),
+            )
+            res_active = await session.execute(stmt_active)
+            if not res_active.scalar_one_or_none():
+                agent.idle_since = now
 
         # Broadcast real-time signal to Web App subscribers
         await manager.broadcast_to_agent(
@@ -593,54 +602,120 @@ class AgentService:
 
     @staticmethod
     async def check_stale_agents_and_jobs(
-        session: AsyncSession, stale_threshold_seconds: int = 60
+        session: AsyncSession,
+        stale_threshold_seconds: int = 60,
+        standby_threshold_seconds: int = 360,
     ) -> dict[str, int]:
         """
         Watchdog task: Checks for agents that have not reported a heartbeat within the stale threshold.
-        Marks them as 'offline', triggers WebSocket disconnections, and fails any orphaned migration jobs.
+        For active agents (idle < 300s or running jobs), uses stale_threshold_seconds (default 60s).
+        For standby agents (idle_since >= 300s, where heartbeat is 300s), uses standby_threshold_seconds (default 360s).
+        Marks truly disconnected agents as 'offline', triggers WebSocket disconnections, and fails any orphaned migration jobs.
         """
-        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
+        now = datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(seconds=stale_threshold_seconds)
+        standby_cutoff = now - timedelta(seconds=standby_threshold_seconds)
 
-        # 1. Find all active agents that exceeded the timeout threshold
-        stmt_stale = (
+        # 0. Auto-heal: Recover any standby agents that were falsely marked offline
+        # if their last_seen_at is still within the standby_threshold_seconds window
+        stmt_recover = (
+            select(Agent)
+            .where(
+                Agent.status == "offline",
+                Agent.error_category == "DISCONNECTED_UNEXPECTEDLY",
+                Agent.last_seen_at.is_not(None),
+                Agent.last_seen_at >= standby_cutoff,
+            )
+        )
+        res_recover = await session.execute(stmt_recover)
+        for agent in res_recover.scalars().all():
+            if agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now - idle_since_aware).total_seconds() >= _IDLE_MODE_THRESHOLD_SECONDS:
+                    agent.status = "online"
+                    agent.error_category = None
+                    agent.last_error = None
+                    logger.info(
+                        f"Standby agent '{agent.name}' ({agent.id}) restored to online status (last seen {agent.last_seen_at})."
+                    )
+                    await manager.broadcast_to_agent(
+                        str(agent.id),
+                        {
+                            "event": "AGENT_CONNECTED",
+                            "agent_id": str(agent.id),
+                            "status": "online",
+                            "last_seen_at": agent.last_seen_at.isoformat(),
+                        },
+                    )
+
+        # 1. Find all active agents (online, busy, degraded)
+        stmt_candidates = (
             select(Agent)
             .where(
                 Agent.status.in_(["online", "busy", "degraded"]),
-                or_(
-                    Agent.last_seen_at < cutoff_time,
-                    Agent.last_seen_at.is_(None),
-                ),
             )
             .options(selectinload(Agent.data_sources))
         )
-        res_stale = await session.execute(stmt_stale)
-    
-        stale_agents = list(res_stale.scalars().all())
+        res_candidates = await session.execute(stmt_candidates)
+        candidates = list(res_candidates.scalars().all())
+
+        stale_agents = []
+        for agent in candidates:
+            if not agent.last_seen_at:
+                stale_agents.append((agent, stale_threshold_seconds))
+                continue
+
+            last_seen = (
+                agent.last_seen_at
+                if agent.last_seen_at.tzinfo
+                else agent.last_seen_at.replace(tzinfo=timezone.utc)
+            )
+
+            # Determine whether this agent is in 5-min standby mode (Option C)
+            is_standby = False
+            if agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now - idle_since_aware).total_seconds() >= _IDLE_MODE_THRESHOLD_SECONDS:
+                    is_standby = True
+
+            effective_cutoff = standby_cutoff if is_standby else active_cutoff
+            effective_threshold = standby_threshold_seconds if is_standby else stale_threshold_seconds
+
+            if last_seen < effective_cutoff:
+                stale_agents.append((agent, effective_threshold))
 
         stale_agent_count = len(stale_agents)
         failed_jobs_count = 0
 
-        for agent in stale_agents:
+        for agent, effective_threshold in stale_agents:
             # Keep agent online if job is actively reporting progress AND agent was seen recently
             stmt_active_job = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
                 MigrationJob.status.in_(["running", "preparing"]),
-                MigrationJob.updated_at >= cutoff_time,
+                MigrationJob.updated_at >= active_cutoff,
             )
             res_active_job = await session.execute(stmt_active_job)
             active_job = res_active_job.scalar_one_or_none()
-            if active_job and agent.last_seen_at and agent.last_seen_at >= cutoff_time:
+            if active_job and agent.last_seen_at and agent.last_seen_at >= active_cutoff:
                 continue
 
             agent.status = "offline"
             agent.error_category = "DISCONNECTED_UNEXPECTEDLY"
             agent.last_error = (
-                f"Agent stopped reporting heartbeats for over {stale_threshold_seconds}s. "
+                f"Agent stopped reporting heartbeats for over {effective_threshold}s. "
                 "The Docker container may have exited, crashed, or lost network connectivity."
             )
             agent.last_error_at = datetime.now(timezone.utc)
             logger.warning(
-                f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}). Marked offline."
+                f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}, threshold: {effective_threshold}s). Marked offline."
             )
 
             # Broadcast real-time signal to Web App subscribers

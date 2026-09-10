@@ -1129,5 +1129,58 @@ Replaced hardcoded card height estimates (`cardEstimateH = 320`) in [`DatabaseCo
   - **N:1 Custom**: Supports arbitrary source counts without code modification or magic numbers.
 - **SSR/Initial Hydration Safety**: Uses a realistic 485px baseline fallback to ensure no layout shifts before the initial paint and `ResizeObserver` measurement.
 
+---
+
+## [2026-09-10] - SQL Expression Coercion & Datetime Literal Sanitization for Target DB Inserts
+
+### 1. Decision Summary
+Implemented automatic conversion of SQL datetime literals (`CURRENT_TIMESTAMP`, `NOW()`, `CURRENT_DATE`, etc.) to ISO-8601 UTC timestamps across the Docker agent execution engine in both [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py) and [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: When migrating tables with generated audit columns (such as `updated_at` or `created_at`), the AI planner frequently specifies `constant_value: "CURRENT_TIMESTAMP"` under `new_column_added` or `default_constant`. In parameterized SQL queries (`INSERT ... VALUES (%(updated_at)s)`), psycopg2 and PostgreSQL treat `"CURRENT_TIMESTAMP"` as a literal string `'CURRENT_TIMESTAMP'`, failing with `psycopg2.errors.InvalidDatetimeFormat: invalid input syntax for type timestamp with time zone: "CURRENT_TIMESTAMP"` and triggering an abort threshold exceeding 50% errors.
+- **Two-Layer Defense Architecture**:
+  1. **Transformation Layer (`ast_transformer.py`)**: When evaluating `new_column_added`, `default_constant`, or datetime `type_cast` (`_parse_dt`), any column targeting a datetime/timestamp type or containing a SQL now literal (`CURRENT_TIMESTAMP`, `NOW()`, `CURRENT_DATE`, etc.) is evaluated to `datetime.now(timezone.utc).isoformat()`.
+  2. **Writer Sanitization Safety Net (`target_writer.py`)**: `_sanitize_rows_for_target` checks all row values before SQL statement parameter binding. Any string matching `SQL_NOW_LITERALS` is coerced into an ISO UTC timestamp, and MySQL zero-dates (`0000-00-00 00:00:00`) are coerced to `None` (NULL) to prevent dialect syntax exceptions.
+- **Container Rebuild & Hot-Patching**: The updated code was hot-copied into the running Docker agent container (`agent_agent_hch1u`), verified via `docker exec`, and baked into the image (`data-migration-agent:latest`) via `docker build`.
+
+---
+
+## [2026-09-10] - Adaptive Watchdog & Execution Preflight Thresholds for Standby Agents
+
+### 1. Decision Summary
+Aligned backend watchdog polling and execution preflight timeout cutoffs with the 300-second (5-minute) idle standby mode (`ENTER_IDLE_MODE`) in [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) and [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: When an agent was idle for 5+ minutes, the backend instructed it to enter 5-minute standby heartbeat mode (`ENTER_IDLE_MODE`) to minimize network bandwidth. However, the background watchdog (`check_stale_agents_and_jobs`) and the execution service (`create_execution_job`) enforced a hardcoded 60-second heartbeat cutoff. After 60 seconds without a heartbeat, the watchdog falsely marked the running agent as `offline` with `DISCONNECTED_UNEXPECTEDLY`, and retry/dry-run requests were rejected with `HTTP 503 Service Unavailable`, misinforming users that they had to manually restart the container.
+- **Adaptive Timeout Strategy**:
+  1. **Dynamic Watchdog Thresholding**: `check_stale_agents_and_jobs` differentiates active agents (60s threshold for 20s heartbeats) from standby agents (360s threshold for 300s heartbeats).
+  2. **Automatic Self-Healing**: The watchdog detects any standby agents previously misclassified as offline whose `last_seen_at` is within the 360s window and seamlessly restores them to `online` status.
+  3. **Standby-Aware Execution Preflight**: `create_execution_job` permits execution when an agent is in standby mode and seen within 360s, automatically resetting `idle_since` and restoring `online` status so the agent's 10s task polling loop immediately picks up the migration job and snaps back to 20s active heartbeats.
+
+---
+
+## [2026-09-10] - Dashboard User Context Display & Safe Session Logout Architecture
+
+### 1. Decision Summary
+Implemented a unified session logout flow and visual user identity indicator directly in the Agent Migration Dashboard top navigation header ([`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx)), backed by an enhanced `useLogout()` mutation hook ([`apps/web/hooks/mutations/useAuthMutations.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/hooks/mutations/useAuthMutations.ts)).
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Once authenticated, users had no visual indication of their active user profile in the dashboard and lacked any mechanism to log out of their session.
+- **Visual Consistency & Hierarchy**:
+  - The `LOGOUT` button is placed alongside `Refresh` and `Register New Agent` in the header actions cluster, following the strict terminal/cyberpunk design system (`rounded-none`, `font-mono`, `text-xs uppercase tracking-wider`, `bg-zinc-900 border-zinc-800`).
+  - Added a subtle danger accent (`hover:border-rose-500/40 hover:bg-rose-950/40 hover:text-rose-400`) and the `LogOut` icon to denote a session-terminating action cleanly without visual clutter.
+  - Added an active user context chip showing the user's name or email alongside a pulsing emerald status indicator.
+- **Robust Multi-Layer Session Termination**:
+  - Invokes `POST /api/v1/auth/logout` to instruct the backend to invalidate and clear HTTP-only `access_token` and `refresh_token` cookies.
+  - Clears client-accessible cookies (`logged_in` and `active_org_id`).
+  - Dispatches Redux `logoutAction()` and purges all TanStack Query caches via `queryClient.clear()`.
+  - Performs a hard redirect via `window.location.href = '/login'`, cleanly purging in-memory timers, background agent status polling intervals (`setInterval`), and WebSocket connections while ensuring Next.js route middleware evaluates unauthenticated state.
+  - **Graceful Error Recovery**: If the backend logout endpoint errors or is unreachable (e.g. expired session or network loss), `useLogout` catches the error and still clears client cookies, Redux state, and query cache so the user is never trapped in an un-logoutable state.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Hidden Dropdown Menu**: Rejected because a direct header button matches the terminal dashboard's utility-first UX and eliminates hidden navigation clicks.
+- **Alternative B: Client-Side Routing (`router.push('/login')`)**: Rejected because soft navigation leaves active background polling intervals running and may preserve stale in-memory state. Full page redirection via `window.location.href = '/login'` ensures total teardown.
+
+
 
 

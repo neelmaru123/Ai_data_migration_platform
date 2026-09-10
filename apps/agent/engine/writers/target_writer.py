@@ -25,11 +25,30 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
     """
     import json
     import uuid
-    from datetime import datetime
+    from datetime import datetime, timezone
     from decimal import Decimal
 
     if not rows:
         return rows
+
+    SQL_NOW_LITERALS = frozenset({
+        "CURRENT_TIMESTAMP",
+        "CURRENT_TIMESTAMP()",
+        "NOW()",
+        "NOW",
+        "CURRENT_DATE",
+        "CURRENT_DATE()",
+        "CURRENT_TIME",
+        "CURRENT_TIME()",
+        "LOCALTIMESTAMP",
+        "LOCALTIME",
+        "GETDATE()",
+        "GETDATE",
+        "SYSDATE",
+        "SYSDATETIME()",
+        "UTC_TIMESTAMP",
+        "UTC_TIMESTAMP()",
+    })
 
     engine_type_clean = (engine_type or "").lower().strip()
     is_mongo = engine_type_clean in ("mongodb", "mongo")
@@ -48,6 +67,15 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
         for k, v in r.items():
             if v is None:
                 clean_row[k] = None
+            elif isinstance(v, str):
+                v_str = v.strip()
+                v_upper = v_str.upper()
+                if v_upper in SQL_NOW_LITERALS:
+                    clean_row[k] = datetime.now(timezone.utc).isoformat()
+                elif v_str in ("0000-00-00 00:00:00", "0000-00-00"):
+                    clean_row[k] = None
+                else:
+                    clean_row[k] = v
             elif isinstance(v, uuid.UUID):
                 clean_row[k] = str(v)
             elif isinstance(v, datetime):

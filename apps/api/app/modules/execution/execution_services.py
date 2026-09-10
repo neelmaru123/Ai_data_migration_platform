@@ -147,12 +147,29 @@ class ExecutionService:
             agent = res_agent.scalar_one_or_none()
 
             now_utc = datetime.now(timezone.utc)
-            cutoff_utc = now_utc - timedelta(seconds=60)
-            cutoff_naive_utc = now_utc.replace(tzinfo=None) - timedelta(seconds=60)
-            cutoff_naive_local = datetime.now() - timedelta(seconds=60)
+
+            # Adaptive cutoff based on agent power/heartbeat mode:
+            # Active mode (heartbeat every 20s): cutoff is 60s
+            # Standby mode (idle 5+ min, heartbeat every 300s): cutoff is 360s
+            is_standby = False
+            if agent and agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now_utc - idle_since_aware).total_seconds() >= 300:
+                    is_standby = True
+
+            effective_threshold_sec = 360 if is_standby else 60
+            cutoff_utc = now_utc - timedelta(seconds=effective_threshold_sec)
+            cutoff_naive_utc = now_utc.replace(tzinfo=None) - timedelta(seconds=effective_threshold_sec)
+            cutoff_naive_local = datetime.now() - timedelta(seconds=effective_threshold_sec)
 
             is_offline = False
-            if not agent or agent.status == "offline" or not agent.last_seen_at:
+            if not agent or not agent.last_seen_at:
+                is_offline = True
+            elif agent.status == "error":
                 is_offline = True
             elif agent.last_seen_at.tzinfo is not None and agent.last_seen_at < cutoff_utc:
                 is_offline = True
@@ -176,6 +193,10 @@ class ExecutionService:
             agent_for_reset = res_reset_idle.scalar_one_or_none()
             if agent_for_reset:
                 agent_for_reset.idle_since = None
+                if agent_for_reset.status == "offline":
+                    agent_for_reset.status = "online"
+                    agent_for_reset.last_error = None
+                    agent_for_reset.error_category = None
 
         # Check if target tables already contain rows (preflight check via snapshot)
         existing_data_warnings = await ExecutionService.check_target_tables_existing_data(
