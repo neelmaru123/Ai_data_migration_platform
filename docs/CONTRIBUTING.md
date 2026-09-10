@@ -37,6 +37,12 @@ Welcome to the **AI Data Migration Platform** repository. Please adhere to these
     - Run tests before submitting pull requests: `poetry run pytest`.
 13. **Linting and Formatting**:
     - Format and lint Python code using `ruff`: `poetry run ruff check .`.
+14. **Zero-Knowledge & Client-Side Credential Substitution**:
+    - Database passwords and internal network hostnames are customer private property. The browser auto-substitutes connection placeholders locally in memory via `dockerCommandUtils.ts`; database passwords must NEVER be entered in form fields or transmitted to the Control Plane API.
+15. **Phase 1 Supported Connectors Scope**:
+    - Phase 1 concentrates strictly on database engines: PostgreSQL, MySQL, and MongoDB. Do not expose file-based engines (CSV/Excel) in user creation forms.
+16. **Frontend Type Verification**:
+    - Always verify Next.js/React code with `npx tsc --noEmit` inside `apps/web` prior to submitting changes.
 
 ---
 

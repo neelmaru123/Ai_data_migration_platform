@@ -304,7 +304,30 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
 
 ---
 
-### 3.4 Get Agent Details by ID
+### 3.4 Regenerate Agent API Token
+- **HTTP Method & Path**: `POST /api/v1/agents/{agent_id}/regenerate-token`
+- **Purpose**: Rotates an agent's API authentication token. Generates a new cryptographically secure token (`ag_live_...`), updates the SHA-256 digest in `api_token_hash`, and immediately invalidates any running container using the old token (`401 Unauthorized`). Returns the new raw token once only, embedded in freshly generated Docker CLI commands and `.env` template.
+- **Where Used**: Web UI "View Docker Setup Commands" modal ("Regenerate Agent Token" action).
+- **Auth**: User JWT (verifies agent ownership).
+- **Response** (`200 OK`):
+```json
+{
+  "id": "38207dfd-7f8f-4d73-ae4a-9ffd8a06053a",
+  "name": "E-Commerce Migration Agent",
+  "agent_identifier": "agent_prod_01",
+  "api_token": "ag_live_9xQ8...new_secret_token...",
+  "docker_command": "docker run -d --name agent_prod_01 -e AGENT_TOKEN=\"ag_live_9xQ8...\" ...",
+  "docker_command_powershell": "docker run -d --name agent_prod_01 `\n  -e AGENT_TOKEN=\"ag_live_9xQ8...\" ...",
+  "docker_command_oneline": "docker run -d --name agent_prod_01 -e AGENT_TOKEN=\"ag_live_9xQ8...\" ...",
+  "env_template": "AGENT_TOKEN=ag_live_9xQ8...\nBACKEND_URL=http://localhost:8000 ...",
+  "status": "offline",
+  "token_last_regenerated_at": "2026-09-09T17:30:00Z"
+}
+```
+
+---
+
+### 3.5 Get Agent Details by ID
 - **HTTP Method & Path**: `GET /api/v1/agents/{agent_id}`
 - **Purpose**: Fetches agent details, data source list, and status.
 - **Where Used**: Web UI Agent detail page (`/agents/[id]`).
@@ -312,7 +335,7 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
 
 ---
 
-### 3.5 Update Agent Configuration
+### 3.6 Update Agent Configuration
 - **HTTP Method & Path**: `PUT /api/v1/agents/{agent_id}`
 - **Purpose**: Renames agent or updates configuration settings.
 - **Where Used**: Web UI Edit Agent settings.
@@ -320,7 +343,7 @@ Manages Agent lifecycles, CLI commands, status heartbeats, WebSocket streaming, 
 
 ---
 
-### 3.6 Agent Status Heartbeat Sync
+### 3.7 Agent Status Heartbeat Sync
 - **HTTP Method & Path**: `POST /api/v1/agents/heartbeat`
 - **Purpose**: Periodic heartbeat sent by local Docker Agent to report container online status, version, stopping errors, and database health. Returns backend control directives (`action` and `action_reason`) for dynamic heartbeat throttling (standby mode) or container shutdown.
 - **Where Used**: Local Docker Agent background loop (`main.py`) — runs every 20s in active mode, or 300s (5-min) in idle standby mode.
@@ -605,17 +628,24 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, failur
 
 ---
 
-### 6.1 Trigger / Approve Plan Execution
+### 6.1 Trigger / Approve Plan Execution (Live or Dry Run Simulation)
 - **HTTP Method & Path**: `POST /api/v1/plans/{plan_id}/execute`
-- **Purpose**: **Human-in-the-Loop Gateway**. Marks plan as approved and queues a new `MigrationJob` (`status: queued`) for local Docker Agent execution.
-- **Where Used**: Web UI "Approve & Start Migration Job" button.
+- **Purpose**: **Human-in-the-Loop Gateway**. Marks plan as approved and queues a new `MigrationJob` (`status: queued`) for local Docker Agent execution. Accepts optional query parameter `is_dry_run: bool = False` or JSON request body `{"is_dry_run": true}`. In Dry Run mode, the agent tests connectivity, extracts and transforms rows, validates schema mappings, but rolls back transactions and avoids committing data to target sinks.
+- **Where Used**: Web UI "Approve & Start Migration Job" and "⚡ Run Dry Run (Simulation)" buttons.
 - **Auth**: User JWT.
+- **Request Body** *(Optional)*:
+```json
+{
+  "is_dry_run": false
+}
+```
 - **Response** (`201 Created`):
 ```json
 {
   "job_id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
   "plan_id": "52458d8e-889e-4244-91ec-364641262889",
-  "status": "queued"
+  "status": "queued",
+  "is_dry_run": false
 }
 ```
 
@@ -631,7 +661,7 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, failur
 
 ### 6.3 Get Execution Job Detail
 - **HTTP Method & Path**: `GET /api/v1/executions/{execution_id}`
-- **Purpose**: Retrieves real-time job status, row counts, progress percentage, error messages, checkpoint details, and AI automated failure diagnosis (`ai_diagnosis`).
+- **Purpose**: Retrieves real-time job status, row counts, progress percentage, error messages, checkpoint details, simulation flags (`is_dry_run`), and AI automated failure diagnosis (`ai_diagnosis`).
 - **Where Used**: Web UI Live Execution Monitoring page (`/executions/[id]`).
 - **Auth**: User JWT.
 - **Response** (`200 OK`):
@@ -640,6 +670,7 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, failur
   "id": "5fe8eedf-0a2a-44ed-ac64-ba2c024bbb17",
   "plan_id": "52458d8e-889e-4244-91ec-364641262889",
   "status": "failed",
+  "is_dry_run": false,
   "progress": 42.5,
   "processed_rows": 425000,
   "successful_rows": 425000,
@@ -756,30 +787,31 @@ Handles Human-in-the-Loop plan approval, job queuing, progress reporting, failur
 | **18**| `POST` | `/api/v1/agents` | Web UI Wizard | Create agent & Docker commands | User JWT |
 | **19**| `GET` | `/api/v1/agents` | Web UI Dashboard | List user agents & status | User JWT |
 | **20**| `GET` | `/api/v1/agents/{id}/docker-command`| Web UI Modal | Regenerate Docker run command | User JWT |
-| **21**| `GET` | `/api/v1/agents/{id}` | Web UI Agent Detail | Get agent details by ID | User JWT |
-| **22**| `PUT` | `/api/v1/agents/{id}` | Web UI Agent Settings| Update agent settings | User JWT |
-| **23**| `POST` | `/api/v1/agents/heartbeat` | Local Docker Agent | Send background status heartbeat & receive control directives | Agent Token |
-| **24**| `WS` | `/api/v1/agents/ws/{id}` | Web UI Live Page | Live WebSocket log/status stream | Session / Token |
-| **25**| `GET` | `/api/v1/agents/tasks` | Local Docker Agent | Poll for pending execution jobs | Agent Token |
-| **26**| `POST` | `/api/v1/agents/fatal-error` | Local Docker Agent | Emergency notification for fatal container stopping error | Agent Token / Header |
-| **27**| `DELETE`| `/api/v1/agents/{id}` | Web UI Agent Detail | Delete agent entity | User JWT |
-| **28**| `POST` | `/api/v1/metadata/sync` | Local Docker Agent | Upload zero-raw-data schema snapshot | Agent Token |
-| **29**| `GET` | `/api/v1/metadata/sources/{id}/snapshots`| Web UI Schema History| List snapshots for a source | User JWT |
-| **30**| `GET` | `/api/v1/metadata/sources/{id}/snapshots/latest`| Web UI Schema Inspector| Get latest snapshot for a source | User JWT |
-| **31**| `GET` | `/api/v1/metadata/snapshots/{id}`| Web UI Schema Modal| Get snapshot details by ID | User JWT |
-| **32**| `POST` | `/api/v1/plans/generate` | Web UI Plan Generator| Trigger Gemini AI AST generation | User JWT |
-| **33**| `GET` | `/api/v1/plans` | Web UI Plans Page | List user migration plans | User JWT |
-| **34**| `GET` | `/api/v1/plans/{id}` | Web UI / Docker Agent| Get AST blueprint payload | User JWT / Agent Token |
-| **35**| `PUT` | `/api/v1/plans/{id}` | Web UI Plan Editor | Save customized plan mappings | User JWT |
-| **36**| `POST` | `/api/v1/plans/{id}/validate` | Web UI Plan Feasibility | Run deterministic pre-flight feasibility checks | User JWT |
-| **37**| `POST` | `/api/v1/plans/{id}/approve` | Web UI Plan Approval | Human approval gateway for plan blueprint | User JWT |
-| **38**| `GET` | `/api/v1/plans/{id}/versions` | Web UI Version History | List historical version snapshots (metadata only) | User JWT |
-| **39**| `GET` | `/api/v1/plans/{id}/versions/{v_num}` | Web UI Version Diff | Get full AST blueprint of a historical snapshot | User JWT |
-| **40**| `POST` | `/api/v1/plans/{id}/versions/{v_num}/restore` | Web UI Version History | Rollback plan blueprint to a historical version | User JWT |
-| **41**| `POST` | `/api/v1/plans/{id}/execute`| **Web UI Dashboard**| **Human-in-the-Loop Plan Approval & Execution**| User JWT |
-| **42**| `GET` | `/api/v1/executions` | Web UI Dashboard | List user execution jobs | User JWT |
-| **43**| `GET` | `/api/v1/executions/{id}` | Web UI Execution Page| Get execution job details, checkpoint & AI diagnosis | User JWT |
-| **44**| `POST` | `/api/v1/executions/{id}/progress`| Local Docker Agent | Send chunk progress, errors & trigger AI diagnosis | Agent Token |
-| **45**| `POST` | `/api/v1/executions/{id}/resume`| Web UI Error Card | One-click resume from checkpoint | User JWT |
-| **46**| `GET` | `/` | Browser / Root Check| Root welcome endpoint | Public |
-| **47**| `GET` | `/api/v1/health` | K8s / Health Check | API service health check | Public |
+| **21**| `POST`| `/api/v1/agents/{id}/regenerate-token`| Web UI Modal | Rotate API token & invalidate old container | User JWT |
+| **22**| `GET` | `/api/v1/agents/{id}` | Web UI Agent Detail | Get agent details by ID | User JWT |
+| **23**| `PUT` | `/api/v1/agents/{id}` | Web UI Agent Settings| Update agent settings | User JWT |
+| **24**| `POST` | `/api/v1/agents/heartbeat` | Local Docker Agent | Send background status heartbeat & receive control directives | Agent Token |
+| **25**| `WS` | `/api/v1/agents/ws/{id}` | Web UI Live Page | Live WebSocket log/status stream | Session / Token |
+| **26**| `GET` | `/api/v1/agents/tasks` | Local Docker Agent | Poll for pending execution jobs | Agent Token |
+| **27**| `POST` | `/api/v1/agents/fatal-error` | Local Docker Agent | Emergency notification for fatal container stopping error | Agent Token / Header |
+| **28**| `DELETE`| `/api/v1/agents/{id}` | Web UI Agent Detail | Delete agent entity | User JWT |
+| **29**| `POST` | `/api/v1/metadata/sync` | Local Docker Agent | Upload zero-raw-data schema snapshot | Agent Token |
+| **30**| `GET` | `/api/v1/metadata/sources/{id}/snapshots`| Web UI Schema History| List snapshots for a source | User JWT |
+| **31**| `GET` | `/api/v1/metadata/sources/{id}/snapshots/latest`| Web UI Schema Inspector| Get latest snapshot for a source | User JWT |
+| **32**| `GET` | `/api/v1/metadata/snapshots/{id}`| Web UI Schema Modal| Get snapshot details by ID | User JWT |
+| **33**| `POST` | `/api/v1/plans/generate` | Web UI Plan Generator| Trigger Gemini AI AST generation | User JWT |
+| **34**| `GET` | `/api/v1/plans` | Web UI Plans Page | List user migration plans | User JWT |
+| **35**| `GET` | `/api/v1/plans/{id}` | Web UI / Docker Agent| Get AST blueprint payload | User JWT / Agent Token |
+| **36**| `PUT` | `/api/v1/plans/{id}` | Web UI Plan Editor | Save customized plan mappings | User JWT |
+| **37**| `POST` | `/api/v1/plans/{id}/validate` | Web UI Plan Feasibility | Run deterministic pre-flight feasibility checks | User JWT |
+| **38**| `POST` | `/api/v1/plans/{id}/approve` | Web UI Plan Approval | Human approval gateway for plan blueprint | User JWT |
+| **39**| `GET` | `/api/v1/plans/{id}/versions` | Web UI Version History | List historical version snapshots (metadata only) | User JWT |
+| **40**| `GET` | `/api/v1/plans/{id}/versions/{v_num}` | Web UI Version Diff | Get full AST blueprint of a historical snapshot | User JWT |
+| **41**| `POST` | `/api/v1/plans/{id}/versions/{v_num}/restore` | Web UI Version History | Rollback plan blueprint to a historical version | User JWT |
+| **42**| `POST` | `/api/v1/plans/{id}/execute`| **Web UI Dashboard**| **Human-in-the-Loop Plan Approval & Execution (Live / Dry Run)**| User JWT |
+| **43**| `GET` | `/api/v1/executions` | Web UI Dashboard | List user execution jobs | User JWT |
+| **44**| `GET` | `/api/v1/executions/{id}` | Web UI Execution Page| Get execution job details, checkpoint & AI diagnosis | User JWT |
+| **45**| `POST` | `/api/v1/executions/{id}/progress`| Local Docker Agent | Send chunk progress, errors & trigger AI diagnosis | Agent Token |
+| **46**| `POST` | `/api/v1/executions/{id}/resume`| Web UI Error Card | One-click resume from checkpoint | User JWT |
+| **47**| `GET` | `/` | Browser / Root Check| Root welcome endpoint | Public |
+| **48**| `GET` | `/api/v1/health` | K8s / Health Check | API service health check | Public |

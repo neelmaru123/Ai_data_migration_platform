@@ -15,6 +15,7 @@ import planService from '../../services/planService';
 import executionService from '../../services/executionService';
 import PlanDiagramViewer from './PlanDiagramViewer';
 import JobExecutionBanner from './JobExecutionBanner';
+import PlanPlainLanguageSummary from './PlanPlainLanguageSummary';
 import {
   PlanReadinessSignals,
   PlanReadinessRollupBadge,
@@ -698,6 +699,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               </div>
             </div>
           )}
+          {ast && <PlanPlainLanguageSummary ast={ast} />}
 
           {/* Table Transformation Matrix */}
           <div className="space-y-4">

@@ -1073,3 +1073,61 @@ Extracted shared connection placeholder substitution logic into a dedicated modu
 - **Ephemeral Zero-Storage Connection Re-entry**: Because database host, port, username, and database name are never stored in the control plane, users viewing the command later can re-enter these fields client-side to auto-fill their command without transmitting them to the server.
 - **Confirmation Safety Guard**: Regenerating an API token is a disruptive operation that severs running agent containers. A two-step confirmation (`⚠ Regenerate Agent Token` -> warning banner + `Confirm Regenerate`) prevents accidental invalidation.
 
+---
+
+## [2026-09-09] - First-Time User Dashboard Onboarding & Architecture Privacy Explainer
+
+### 1. Decision Summary
+Added a prominent architectural and data privacy explainer card to the empty-state view of the main dashboard in [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx) directly above the `Create Migration Agent` call to action.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: New enterprise and developer users encountering an empty dashboard often hesitate to deploy a Docker agent without clear context on what the agent does, whether their raw database records are transmitted to third-party cloud servers, and why a local Docker agent is required.
+- **Copy & Guarantee**: Explicitly articulates Migraflow's core value proposition:
+  > *"Your data never leaves your infrastructure. Migraflow uses a local Docker Agent to inspect and migrate your databases directly on your machine or server -- the cloud application only ever receives schema metadata and migration decisions, never your data or credentials."*
+- **Design Alignment**: Styled with `ShieldCheck` icon, subtle dark blue border (`border-sky-500/30`), and monospace typography matching the platform's cyberpunk control plane aesthetic.
+
+---
+
+## [2026-09-09] - Phase 1 Connector Scope Focus (PostgreSQL, MySQL, MongoDB Only) & File-Engine UI Deprecation
+
+### 1. Decision Summary
+Temporarily hid file-based engines (`csv`, `excel`) from selectable engine choices in [`DatabaseConfigForm.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) and updated marketing copy in [`FeaturesGrid.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/landing/FeaturesGrid.tsx) to focus exclusively on Phase 1 core database connectors: PostgreSQL, MySQL, and MongoDB.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Phase 1 platform delivery focuses on database-to-database schema profiling, AST transformation, and bounded-memory streaming. Presenting CSV and Excel upload options in the database agent creation wizard created mismatched expectations regarding file upload UX and agent-side file path discovery.
+- **Strict Backward Compatibility**:
+  - `ValidSourceType` in [`apps/web/types/agent.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/agent.ts) and `VALID_SOURCE_TYPES` in backend schemas retain `'csv'` and `'excel'`.
+  - Existing agents with attached CSV or Excel sources continue to deserialize and render seamlessly without runtime errors.
+  - The `array_to_csv` transformation option in [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) remains untouched as an orthogonal column transformation rule.
+- **Clean Icon Tree**: Removed unused `FileSpreadsheet` and `FileText` imports from `lucide-react` in `DatabaseConfigForm.tsx`.
+
+---
+
+## [2026-09-09] - Schema Catalog Foreign-Key Relationships Tab & In-Memory Label Resolution
+
+### 1. Decision Summary
+Implemented the Relationships tab in [`apps/web/components/profiling/SchemaCatalogViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/SchemaCatalogViewer.tsx), enabling users to inspect detected foreign-key relationships for any selected table directly within the schema catalog view.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: While the backend metadata snapshot (`MetadataSnapshotDetailResponse.relationships`) already populated foreign-key relationship edges (`source_table_id`, `source_column_id`, `target_table_id`, `target_column_id`, `relationship_type`, `confidence`), the catalog UI previously only presented Columns and Constraints tabs, leaving relational topology hidden.
+- **In-Memory Zero-API Resolution**: Implemented `resolveColumnLabel(tableId, columnId)` which indexes into the already-loaded `allTables` array to translate UUID references into human-readable `{table_name}.{column_name}` labels without issuing additional network requests.
+- **Contextual Filtering**: Dynamically filters relationship records to display only foreign keys referencing or originating from the active `selectedTable`, displaying relationship type tags and confidence percentages.
+
+---
+
+## [2026-09-10] - Dynamic SVG Pipeline Wiring & Auto-Sizing for Database Configuration Form
+
+### 1. Decision Summary
+Replaced hardcoded card height estimates (`cardEstimateH = 320`) in [`DatabaseConfigForm.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) with a dynamic DOM measurement engine utilizing `useRef`, `useCallback`, and `ResizeObserver`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**: Following the addition of connection details (host, port, username, database, SSL checkbox) to the source database cards, card heights increased from ~320px to ~485px. The hardcoded 320px calculation caused SVG pipeline wires to miss lower source cards completely (e.g. in 3:1 merge topologies, Source #3 had no wire coming from it, with the third wire originating at the bottom of Source #2). Furthermore, the destination card and middle SVG stopped short, leaving awkward empty space beside lower cards.
+- **Dynamic DOM Measurement**: Uses `ResizeObserver` observing the source cards container and individual card elements to measure exact pixel midpoints (`(cardRect.top + cardRect.height / 2) - svgRect.top`) and total combined height.
+- **Universal Topology Alignment**: Works seamlessly for all topologies:
+  - **1:1**: Single horizontal straight stream connecting matching-height cards.
+  - **2:1 & 3:1**: Multi-source curves originating at the exact right midpoint of each card, converging into a central junction node at `destY`, and streaming into the vertical center of the destination card.
+  - **N:1 Custom**: Supports arbitrary source counts without code modification or magic numbers.
+- **SSR/Initial Hydration Safety**: Uses a realistic 485px baseline fallback to ensure no layout shifts before the initial paint and `ResizeObserver` measurement.
+
+
+

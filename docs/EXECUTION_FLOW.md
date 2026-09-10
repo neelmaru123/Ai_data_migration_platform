@@ -219,6 +219,13 @@
 - **[MODIFIED]**: [`apps/api/app/modules/agents/agents_command_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_command_generator.py) - Generated generic `<HOST>`, `<PORT>`, `<USER>`, `<PASSWORD>`, `<NAME>` placeholders in `_get_db_url_template`.
 - **[MODIFIED]**: [`apps/api/tests/unit/test_agent_command_generator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_agent_command_generator.py) - Updated assertions for generic connection placeholders.
 - **[MODIFIED]**: [`apps/web/components/agents/DockerCommandOutput.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DockerCommandOutput.tsx) - Updated deployment guidance for generic connection placeholders.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_routes.py) - Added `POST /{agent_id}/regenerate-token` route.
+- **[MODIFIED]**: [`apps/api/app/modules/agents/agents_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/agents/agents_services.py) - Added `AgentService.regenerate_agent_token`.
+- **[MODIFIED]**: [`apps/web/services/agentService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/agentService.ts) - Added `agentService.regenerateAgentToken`.
+- **[MODIFIED]**: [`apps/web/app/dashboard/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/dashboard/page.tsx) - Added first-time architecture/privacy explainer, redesigned command modal with live parameter re-entry and token regeneration flow.
+- **[MODIFIED]**: [`apps/web/components/agents/DatabaseConfigForm.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) - Focused Phase 1 connector choices on PostgreSQL, MySQL, and MongoDB; removed CSV and Excel options.
+- **[MODIFIED]**: [`apps/web/components/landing/FeaturesGrid.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/landing/FeaturesGrid.tsx) - Updated supported connectors copy and badge pills.
+- **[MODIFIED]**: [`apps/web/components/profiling/SchemaCatalogViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/SchemaCatalogViewer.tsx) - Added Relationships tab, in-memory table/column label resolution, and ArrowRight indicator.
 
 ---
 
@@ -266,3 +273,35 @@
 5. **Single-Exposure Response**:
    - Constructs and returns `AgentDetailResponse` containing `api_token = raw_token`.
    - Once sent, `raw_token` is garbage-collected from backend memory and cannot be recovered again.
+
+---
+
+# Execution Flow - Schema Catalog Foreign-Key Relationship Resolution
+
+## 1. Entry Point
+- **Component**: [`SchemaCatalogViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/SchemaCatalogViewer.tsx) loaded on the Schema Profiling page (`/profiling`).
+- **Trigger**: User selects a table in the left navigation sidebar and clicks the **Relationships** tab.
+
+## 2. Step-by-Step Execution Sequence
+1. **Metadata Ingestion**: The component receives `MetadataSnapshotDetailResponse` containing `snapshot.schemas` (tables and columns) and `snapshot.relationships` (foreign-key edges).
+2. **In-Memory Table Flattening**:
+   ```typescript
+   const allTables: { schemaName: string; table: TableResponse }[] = [];
+   snapshot.schemas.forEach((schema) => {
+     schema.tables.forEach((tbl) => {
+       allTables.push({ schemaName: schema.schema_name, table: tbl });
+     });
+   });
+   ```
+3. **Local Name Resolution (`resolveColumnLabel`)**:
+   - Accepts `(tableId: string, columnId: string)`.
+   - Scans `allTables` in memory to find the table with `table.id === tableId`.
+   - Looks up the column with `column.id === columnId`.
+   - Returns `${table.table_name}.${column.column_name}` (or fallback `?` / `(unknown table)`).
+   - Operates with **zero network latency and zero additional API requests**.
+4. **Contextual Relationship Filtering**:
+   - Filters `snapshot.relationships` to only include records where `r.source_table_id === selectedTable.id || r.target_table_id === selectedTable.id`.
+   - Computes badge counter: `Relationships ({count})`.
+5. **UI Presentation**:
+   - If `count === 0`: Renders clean empty state ("No foreign-key relationships detected for this table.").
+   - If `count > 0`: Renders relationship cards showing `{source_table.column} -> {target_table.column}`, relationship type badge, and confidence percentage.

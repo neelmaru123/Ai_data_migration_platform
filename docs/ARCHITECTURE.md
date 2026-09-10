@@ -70,7 +70,7 @@ The repository is organized as a multi-package architecture:
 ai-data-migration-platform/
 ├── apps/
 │   ├── api/                     # Control Plane Backend (FastAPI, LangGraph, PostgreSQL)
-│   │   ├── alembic/             # Database schema migrations (001 through 010)
+│   │   ├── alembic/             # Database schema migrations (001 through 011)
 │   │   ├── app/
 │   │   │   ├── core/            # Config, DB connections, Redis, WebSockets, Logging
 │   │   │   └── modules/
@@ -377,6 +377,30 @@ In multi-agent environments (e.g. multiple branch offices, different customer VP
 - **Strict Datetime Parsing**: In `apps/agent/engine/transformers/ast_transformer.py`, datetime parsing strictly yields `None` (SQL `NULL`) when encountering missing, empty, or unparseable date values.
 - **No Inferred Timestamps**: The engine never silently fabricates `datetime.utcnow()` or arbitrary defaults, preserving target schema nullability constraints and data truthfulness.
 
+#### 14. Client-Side Zero-Credential Parameter Substitution Pipeline
+- **Zero-Storage Connection Details**: Database connection hostnames, port numbers, usernames, and database names are entered into [`DatabaseConfigForm.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/agents/DatabaseConfigForm.tsx) and kept exclusively in client-side React memory.
+- **Shared Substitution Engine**: [`dockerCommandUtils.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/lib/dockerCommandUtils.ts) mirrors the backend's sanitization and collision-suffixing logic (`_2`, `_3`) to replace `<PREFIX_HOST>`, `<PREFIX_PORT>`, `<PREFIX_USER>`, and `<PREFIX_NAME>` directly in browser memory.
+- **Strict Password Isolation**: Database passwords are never entered in the browser or sent to the Control Plane API; they remain manual `<..._PASSWORD>` placeholders that the developer supplies in their private terminal.
+
+#### 15. Instant Agent API Token Regeneration & Revocation
+- **Cryptographic Rotation**: Calling `POST /api/v1/agents/{id}/regenerate-token` generates a high-entropy `ag_live_...` token, computes its SHA-256 digest, and overwrites `agents.api_token_hash`.
+- **Instant Revocation**: Any running container using the previous token fails authentication on its very next heartbeat or task poll with `HTTP 401 Unauthorized ("Invalid or revoked Agent API token")`.
+- **Single-Exposure Secret**: The new raw token is returned once in the API response embedded in fresh Docker commands; the backend never stores plaintext tokens.
+
+#### 16. Dry Run Simulation Mode (Zero Target Mutation)
+- **Schema & AST Stress-Testing**: Allows users to run complete end-to-end migrations in simulation mode (`is_dry_run = true`).
+- **Data Plane Behavior**: The agent extracts source chunks, runs Polars AST expression transformations, and tests type casts. However, it rolls back target transactions or skips destructive table creation, ensuring target databases remain completely untouched while verifying that data pipelines execute without errors.
+- **Status Reporting**: The agent reports final status `dry_run_completed`, preserving existing checkpoints for live execution.
+
+#### 17. Target-State Pre-Execution Safety & 5-Factor Readiness Scoring
+- **Target Table Collision Probe**: Preflight inspection detects whether target tables already exist and contain existing records (`has_existing_data`), preventing accidental data corruption.
+- **Deterministic Readiness Breakdown**: Replaces arbitrary single percentage confidence metrics with a transparent 5-vector readiness model:
+  1. *Syntax & AST Validity* (AST structure conforms to schema).
+  2. *Primary Key Coverage* (Source PKs properly mapped to target PKs).
+  3. *Type Compatibility* (Data types align without lossy truncation).
+  4. *Constraint Preservation* (Unique constraints & foreign keys preserved).
+  5. *Target State Readiness* (Target table existence & empty state verified).
+
 ---
 
 ## 6. Observability & Tracing (LangSmith)
@@ -409,6 +433,7 @@ The Control Plane database schema is versioned using Alembic in `apps/api/alembi
 - `008_add_migration_plan_versions.py`: Creates `migration_plan_versions` table and adds `current_version` integer to `migration_plans`.
 - `009_add_idle_since_to_agents.py`: Adds `idle_since` timestamp column to `agents` for dynamic heartbeat standby tracking.
 - `010_add_error_fields_to_agents.py`: Adds `last_error`, `error_category`, and `last_error_at` diagnostic columns to `agents`.
+- `011_add_is_dry_run_to_migration_jobs.py`: Adds `is_dry_run` boolean column (default `false`) to `migration_jobs` to track dry-run simulation executions.
 
 ---
 
@@ -421,3 +446,4 @@ When exploring or modifying the codebase, remember the **Golden Rules**:
 4. **Modular Agent Engine Separation**: Maintain strict separation of concerns within `apps/agent/engine/`. Connectors (`connectors/`), transformers (`transformers/`), staging (`staging/`), target writers (`writers/`), and checkpoints (`checkpoint.py`) must remain decoupled.
 5. **Connection Pool Discipline & Cleanup**: Always retrieve database engines via `_get_engine(url)` in `engine/db.py` and ensure `dispose_all_engines()` is called in `finally:` blocks to prevent connection leaks.
 6. **Zero Timestamp Fabrication**: Never substitute `datetime.utcnow()` or arbitrary fallback values for invalid or NULL source dates. Respect source data nullability.
+7. **Phase 1 Supported Connectors Scope**: Focus strictly on relational and document databases (PostgreSQL, MySQL, MongoDB). File-based sources (CSV/Excel) are deprecated from creation forms in Phase 1.
