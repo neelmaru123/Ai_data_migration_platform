@@ -20,7 +20,16 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   const [jobHistory, setJobHistory] = useState<ExecutionJobResponse[]>([]);
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
   const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
+  const [copiedJobId, setCopiedJobId] = useState<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
+
+  const handleCopyJobId = () => {
+    if (!job.id) return;
+    navigator.clipboard.writeText(job.id);
+    setCopiedJobId(true);
+    toast.success('Job ID copied to clipboard');
+    setTimeout(() => setCopiedJobId(false), 2000);
+  };
 
   // Store callback in a ref so the polling useEffect never needs it in its
   // dependency array — eliminates interval restarts caused by parent re-renders.
@@ -214,128 +223,177 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   return (
     <div
       ref={containerRef}
-      className="p-6 sm:p-8 rounded-none bg-black border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_35px_rgba(56,189,248,0.15)] font-mono animate-fadeIn"
+      className="p-5 sm:p-7 rounded-none bg-black/95 border border-sky-400/40 backdrop-blur-xl space-y-6 shadow-[0_0_35px_rgba(56,189,248,0.12)] font-mono animate-fadeIn"
     >
-      {/* Top Banner Header & Status Badges */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-zinc-800 pb-4">
-        <div>
-          <div className="flex flex-wrap items-center gap-2 mb-2">
-            <span className="text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase bg-sky-400/10 text-sky-400 border border-sky-400/30">
+      {/* Organized Top Banner Header */}
+      <div className="space-y-4 border-b border-zinc-800/80 pb-5">
+        {/* Row 1: System Daemon Chip, Status Badge, Run Switcher, and Mini-Progress Pill */}
+        <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-bold tracking-widest px-2.5 py-1 rounded-none uppercase bg-sky-400/10 text-sky-400 border border-sky-400/30 flex items-center gap-1.5 shadow-sm">
+              <span className="w-1.5 h-1.5 rounded-none bg-sky-400 animate-pulse" />
               TARGET DB INSERTION DAEMON
             </span>
+
             <span
-              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${
+              className={`text-[10px] font-bold tracking-widest px-2.5 py-1 rounded-none uppercase border flex items-center gap-1.5 shadow-sm ${
                 isDryRunCompleted
-                  ? 'bg-amber-400/20 text-amber-300 border-amber-400/50 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
+                  ? 'bg-amber-400/15 text-amber-300 border-amber-400/50 shadow-[0_0_12px_rgba(251,191,36,0.25)]'
                   : isCompleted
-                  ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
+                  ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.25)]'
                   : isFailed
-                  ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                  ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.25)]'
                   : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
               }`}
             >
+              <span
+                className={`w-1.5 h-1.5 rounded-none ${
+                  isDryRunCompleted
+                    ? 'bg-amber-400'
+                    : isCompleted
+                    ? 'bg-emerald-400'
+                    : isFailed
+                    ? 'bg-rose-500'
+                    : 'bg-sky-400 animate-ping'
+                }`}
+              />
               STATUS: {status.replace('_', ' ').toUpperCase()}
             </span>
 
             {/* Run Selector Dropdown */}
             {jobHistory.length > 1 && (
-              <select
-                value={job.id}
-                onChange={async (e) => {
-                  const selectedId = e.target.value;
-                  const selectedJob = jobHistory.find((j) => j.id === selectedId);
-                  if (selectedJob) {
-                    setJob(selectedJob);
-                    if (onJobUpdated) onJobUpdated(selectedJob);
-                  }
-                }}
-                className="px-2 py-0.5 bg-zinc-900 border border-zinc-700 text-sky-400 text-[10px] font-bold uppercase rounded-none focus:outline-none"
-              >
-                {jobHistory.map((hJob: ExecutionJobResponse, idx: number) => (
-                  <option key={hJob.id} value={hJob.id}>
-                    Run #{jobHistory.length - idx} ({hJob.status.toUpperCase()} - {Math.round(hJob.progress)}%)
-                  </option>
-                ))}
-              </select>
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-900 border border-zinc-700 text-sky-400 text-[10px] font-bold uppercase shadow-sm">
+                <span className="text-zinc-500">RUN:</span>
+                <select
+                  value={job.id}
+                  onChange={async (e) => {
+                    const selectedId = e.target.value;
+                    const selectedJob = jobHistory.find((j) => j.id === selectedId);
+                    if (selectedJob) {
+                      setJob(selectedJob);
+                      if (onJobUpdated) onJobUpdated(selectedJob);
+                    }
+                  }}
+                  className="bg-transparent text-sky-400 text-[10px] font-bold uppercase focus:outline-none cursor-pointer"
+                >
+                  {jobHistory.map((hJob: ExecutionJobResponse, idx: number) => (
+                    <option key={hJob.id} value={hJob.id} className="bg-zinc-950 text-zinc-200">
+                      Run #{jobHistory.length - idx} ({hJob.status.toUpperCase()} - {Math.round(hJob.progress)}%)
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
           </div>
-          <h3 className="text-2xl font-extrabold text-white uppercase font-sans tracking-tight">
-            {isDryRun ? 'Target Database Migration Dry Run Simulation' : 'Live Target Database Insertion Stream'}
-          </h3>
-          <p className="text-xs text-zinc-400 font-mono mt-0.5">
-            Job ID: <span className="text-sky-400">{job.id}</span> {isDryRun && <span className="text-amber-400 ml-2">[DRY RUN ACTIVE]</span>}
-          </p>
+
+          {/* Inline Progress & Throughput Pill */}
+          <div className="flex items-center gap-3 px-3 py-1 bg-zinc-950 border border-zinc-800 text-[11px] font-mono shadow-sm">
+            <span className="text-zinc-500 font-bold uppercase tracking-wider text-[10px]">
+              {isDryRun ? 'SIMULATION' : 'PROGRESS'}:
+            </span>
+            <div className="flex items-center gap-2">
+              <div className="w-16 h-2 bg-zinc-900 border border-zinc-800 overflow-hidden">
+                <div
+                  className={`h-full transition-all duration-500 ${
+                    isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400'
+                  }`}
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              <span className="font-extrabold text-sky-400">{progressPercent}%</span>
+            </div>
+            <span className="text-zinc-700">|</span>
+            <span className="text-zinc-400 text-[10px] font-mono">
+              <strong className="text-white font-bold">{succRows.toLocaleString()}</strong> rows
+            </span>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          {/* Execute For Real Secondary Button */}
-          {isDryRun && (
-            <button
-              type="button"
-              onClick={handleExecuteForReal}
-              disabled={isExecutingReal}
-              className="py-2.5 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider border border-emerald-400 shadow-md transition-all font-mono"
-            >
-              {isExecutingReal ? 'Queuing Real Migration...' : '⚡ EXECUTE FOR REAL'}
-            </button>
-          )}
-
-          {/* Completed Job: Offer "Create New Migration" */}
-          {isRealCompleted && (
-            <Link
-              href="/profiling"
-              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono inline-flex items-center gap-1.5"
-            >
-              + CREATE NEW MIGRATION
-            </Link>
-          )}
-
-          {/* Active Retry / Resume Button for Failed Jobs */}
-          {isFailed && (
-            <button
-              type="button"
-              onClick={handleRetryJob}
-              disabled={isRetrying}
-              title={
-                canResume
-                  ? `Checkpoints will be reused: resumes execution from ${procRows.toLocaleString()} processed rows.`
-                  : 'Retries migration from the beginning.'
-              }
-              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono"
-            >
-              {isRetrying
-                ? canResume ? 'Resuming...' : 'Queuing Retry...'
-                : canResume
-                ? isDryRun ? '⚡ RESUME DRY RUN' : '⚡ RESUME'
-                : isDryRun ? '⚡ RETRY DRY RUN' : '⚡ RETRY MIGRATION JOB'}
-            </button>
-          )}
-
-          {/* Completed Job: Disabled Retry with Tooltip Explaining Checkpoints Reused / Finalized */}
-          {isRealCompleted && (
-            <button
-              type="button"
-              disabled={true}
-              title="Checkpoints will be reused when the job is completed. Create a new migration instead."
-              className="py-2.5 px-4 rounded-none bg-zinc-900 text-zinc-600 text-xs font-bold uppercase tracking-wider border border-zinc-800 cursor-not-allowed font-mono opacity-60"
-            >
-              ⚡ RETRY (DISABLED)
-            </button>
-          )}
-
-          {/* Full Monitor Link */}
-          <Link
-            href={`/execution?jobId=${job.id}`}
-            className="py-2.5 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-bold uppercase tracking-wider border border-sky-400/40 transition-colors font-mono"
-          >
-            [ 🖥️ OPEN LIVE MONITOR ]
-          </Link>
-
-          <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-right font-mono">
-            <div className="text-[10px] text-zinc-500 uppercase font-bold">
-              {isDryRun ? 'SIMULATION PROGRESS' : 'INSERTION PROGRESS'}
+        {/* Row 2: Title, Job ID and Cleanly Aligned Actions */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pt-1">
+          <div className="space-y-2">
+            <h3 className="text-xl sm:text-2xl font-black text-white uppercase font-sans tracking-tight leading-tight">
+              {isDryRun ? 'Target Database Migration Dry Run Simulation' : 'Live Target Database Insertion Stream'}
+            </h3>
+            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-400 font-mono">
+              <span className="text-zinc-500 font-semibold">Job ID:</span>
+              <span className="text-sky-400 font-bold bg-sky-950/40 border border-sky-500/30 px-2 py-0.5 select-all">
+                {job.id}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyJobId}
+                className="px-2 py-0.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 hover:border-zinc-500 text-[10px] text-zinc-300 hover:text-white uppercase transition-colors"
+                title="Copy Job ID to clipboard"
+              >
+                {copiedJobId ? '✓ Copied' : '📋 Copy'}
+              </button>
+              {isDryRun && (
+                <span className="px-2 py-0.5 bg-amber-400/10 border border-amber-400/40 text-amber-300 text-[10px] font-bold uppercase">
+                  Dry Run Active
+                </span>
+              )}
             </div>
-            <div className="text-xl font-bold text-sky-400">{progressPercent}%</div>
+          </div>
+
+          {/* Action Buttons: Cleanly Grouped & Always Aligned */}
+          <div className="flex flex-wrap items-center gap-2.5 self-start lg:self-center shrink-0">
+            {/* Live Monitor Link */}
+            <Link
+              href={`/execution?jobId=${job.id}`}
+              className="h-10 px-4 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 hover:text-sky-300 text-xs font-bold uppercase tracking-wider border border-sky-400/40 hover:border-sky-400 transition-all font-mono inline-flex items-center gap-2 shadow-sm"
+            >
+              <span>🖥️</span>
+              <span>Open Live Monitor</span>
+            </Link>
+
+            {/* Execute For Real Secondary Button (Dry Run) */}
+            {isDryRun && (
+              <button
+                type="button"
+                onClick={handleExecuteForReal}
+                disabled={isExecutingReal}
+                className="h-10 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider border border-emerald-400 shadow-md hover:shadow-emerald-500/20 transition-all font-mono inline-flex items-center gap-1.5"
+              >
+                <span>⚡</span>
+                <span>{isExecutingReal ? 'Queuing Real Migration...' : 'Execute For Real'}</span>
+              </button>
+            )}
+
+            {/* Completed Job: Offer "Create New Migration" */}
+            {isRealCompleted && (
+              <Link
+                href="/profiling"
+                className="h-10 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md hover:shadow-sky-400/20 transition-all font-mono inline-flex items-center gap-1.5"
+              >
+                <span>+</span>
+                <span>Create New Migration</span>
+              </Link>
+            )}
+
+            {/* Active Retry / Resume Button for Failed Jobs */}
+            {isFailed && (
+              <button
+                type="button"
+                onClick={handleRetryJob}
+                disabled={isRetrying}
+                title={
+                  canResume
+                    ? `Checkpoints will be reused: resumes execution from ${procRows.toLocaleString()} processed rows.`
+                    : 'Retries migration from the beginning.'
+                }
+                className="h-10 px-4 rounded-none bg-rose-500 hover:bg-rose-400 text-black text-xs font-bold uppercase tracking-wider border border-rose-400 shadow-md transition-all font-mono inline-flex items-center gap-1.5"
+              >
+                <span>⚡</span>
+                <span>
+                  {isRetrying
+                    ? canResume ? 'Resuming...' : 'Queuing Retry...'
+                    : canResume
+                    ? isDryRun ? 'Resume Dry Run' : 'Resume Migration'
+                    : isDryRun ? 'Retry Dry Run' : 'Retry Migration'}
+                </span>
+              </button>
+            )}
           </div>
         </div>
       </div>

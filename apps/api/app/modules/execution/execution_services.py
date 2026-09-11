@@ -405,9 +405,12 @@ class ExecutionService:
         job.progress = update.progress
         if update.total_rows > 0:
             job.total_rows = update.total_rows
-        job.processed_rows = update.processed_rows
-        job.successful_rows = update.successful_rows
-        job.failed_rows = update.failed_rows
+        if update.processed_rows > 0 or job.processed_rows is None:
+            job.processed_rows = update.processed_rows
+        if update.successful_rows > 0 or job.successful_rows is None:
+            job.successful_rows = update.successful_rows
+        if update.failed_rows > 0 or job.failed_rows is None:
+            job.failed_rows = update.failed_rows
         if update.current_table:
             job.current_table = update.current_table
         if update.current_stage:

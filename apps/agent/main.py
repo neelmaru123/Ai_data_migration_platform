@@ -604,14 +604,6 @@ def poll_and_execute_tasks(
                     )
                 except Exception as run_err:
                     logger.error(f"Execution error for job '{job_id}': {run_err}")
-                    try:
-                        ProgressReporter.report(
-                            backend_url, clean_token, job_id,
-                            status="failed", progress=0.0,
-                            error_message=f"Agent Execution Failure: {str(run_err)}"
-                        )
-                    except Exception as rep_err:
-                        logger.error(f"Failed to report job failure to backend: {rep_err}")
     except Exception as exc:
         logger.warning(f"Task polling check exception: {exc}")
 

@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.websocket_manager import manager
 from app.modules.agents.agents_models import Agent
 from app.modules.metadata.metadata_models import MetadataSnapshot, MetadataSchema, MetadataTable
@@ -363,6 +364,7 @@ class MigrationPlanService:
             custom_instructions=custom_instructions,
         )
 
+        llm_timeout = float(getattr(settings, "LLM_TIMEOUT_SECONDS", 180.0))
         try:
             refined_ast_obj = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -371,12 +373,12 @@ class MigrationPlanService:
                     current_ast_dict=plan.plan_data,
                     user_feedback=user_feedback,
                 ),
-                timeout=60.0,
+                timeout=llm_timeout,
             )
         except asyncio.TimeoutError:
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="LLM plan refinement timed out after 60 seconds. Please try again.",
+                detail=f"LLM plan refinement timed out after {int(llm_timeout)} seconds. Please try again.",
             )
 
         refined_ast_dict = refined_ast_obj.model_dump(mode="json")

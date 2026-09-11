@@ -999,19 +999,36 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             <input
               type="text"
               required
+              disabled={isRefining}
               value={refinementPrompt}
               onChange={(e) => setRefinementPrompt(e.target.value)}
               placeholder="e.g. Map user_id to account_uuid and convert status int enum to string varchar"
-              className="flex-1 px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
+              className="flex-1 px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={isRefining}
-              className="py-3 px-6 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 disabled:opacity-50 whitespace-nowrap font-mono"
+              className="py-3 px-6 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 disabled:opacity-50 whitespace-nowrap font-mono inline-flex items-center gap-2"
             >
-              {isRefining ? 'Re-reviewing with LLM...' : 'Refine with LLM'}
+              {isRefining ? (
+                <>
+                  <span className="w-2 h-2 rounded-none bg-black animate-ping" />
+                  <span>Re-reviewing with LLM...</span>
+                </>
+              ) : (
+                'Refine with LLM'
+              )}
             </button>
           </div>
+
+          {isRefining && (
+            <div className="flex items-center gap-2 text-xs text-sky-400 font-mono animate-pulse pt-1">
+              <span className="w-2 h-2 rounded-none bg-sky-400 animate-ping" />
+              <span>
+                LLM is re-evaluating schemas and applying your refinement instructions... (May take 30–60s for complex databases)
+              </span>
+            </div>
+          )}
         </form>
       )}
 

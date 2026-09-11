@@ -276,6 +276,8 @@ class LLMPlanGeneratorService:
         model = settings.LLM_MODEL
         temperature = settings.LLM_TEMPERATURE
 
+        llm_timeout = float(getattr(settings, "LLM_TIMEOUT_SECONDS", 180.0))
+
         if provider == "gemini":
             try:
                 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -283,6 +285,7 @@ class LLMPlanGeneratorService:
                     model=model,
                     temperature=temperature,
                     google_api_key=settings.GEMINI_API_KEY,
+                    request_timeout=llm_timeout,
                 )
             except ImportError as exc:
                 raise RuntimeError("langchain-google-genai is not installed. Run: poetry add langchain-google-genai") from exc
@@ -294,6 +297,7 @@ class LLMPlanGeneratorService:
                     model=model,
                     temperature=temperature,
                     api_key=settings.OPENAI_API_KEY,
+                    request_timeout=llm_timeout,
                 )
             except ImportError as exc:
                 raise RuntimeError("langchain-openai is not installed. Run: poetry add langchain-openai") from exc
