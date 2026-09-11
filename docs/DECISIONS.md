@@ -1181,6 +1181,38 @@ Implemented a unified session logout flow and visual user identity indicator dir
 - **Alternative A: Hidden Dropdown Menu**: Rejected because a direct header button matches the terminal dashboard's utility-first UX and eliminates hidden navigation clicks.
 - **Alternative B: Client-Side Routing (`router.push('/login')`)**: Rejected because soft navigation leaves active background polling intervals running and may preserve stale in-memory state. Full page redirection via `window.location.href = '/login'` ensures total teardown.
 
+---
 
+## [2026-09-11] - Relational Integrity & Deterministic UUIDv5 Foreign Key Synchronization for MongoDB Target Migrations
 
+### 1. Decision Summary
+Addressed three critical conversion flaws when migrating relational databases (e.g. PostgreSQL) into MongoDB document stores:
+1. **Foreign Key / Relational Integrity**: Re-keyed primary keys into deterministic UUIDv5 strings while synchronizing all referencing foreign keys in child collections (`products.category_id`, `orders.customer_id`, `order_items.order_id`, `order_items.product_id`) to compute the exact identical UUIDv5 string, eliminating 100% of broken/orphaned foreign references.
+2. **Primary Key Convention**: Promoted the transformed `id` to native MongoDB `_id` and removed redundant `id` fields during serialization, ensuring each document has exactly one primary key and eliminating auto-generated `ObjectId` collisions.
+3. **Native BSON Data Types**: Stored numeric decimals as native BSON `Decimal128` and timestamps as native BSON `datetime` (`ISODate`), eliminating string degradation.
 
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - In a migration from PostgreSQL to MongoDB, primary keys (`category_id`, `customer_id`, etc.) were converted into UUIDs (e.g. `5cc524b1-...`), but foreign key columns in child tables retained their raw integer values (`100`, `1000`, etc.). As a result, cross-collection references were 100% broken ($1000/1000$ orphaned records per relation).
+  - Documents also had dual IDs: an auto-generated MongoDB `ObjectId` in `_id` and a separate `id` field containing the UUID.
+  - Decimals (`19.99`) and timestamps were stored as raw strings rather than native BSON types.
+- **Why Deterministic RFC 4122 UUIDv5**:
+  - `uuid.uuid5(uuid.NAMESPACE_DNS, f"{src_ident}_{pk_value}")` is a pure, stateless mathematical hash function.
+  - Computing the UUID for `category_id: 100` from `src_db_1` produces `5cc524b1-d434-5ce3-92d2-5ee6b343583b` in both `categories` (parent PK) and `products` (child FK).
+  - This guarantees 0% orphan rate without requiring an in-memory cross-table lookup state or expensive distributed transactions during streaming.
+- **Why Target Writer BSON Type Serialization**:
+  - MongoDB's Python driver (`pymongo`) expects `bson.Decimal128` to store IEEE 754-2008 128-bit decimal floating point values without precision loss.
+  - Datetimes passed directly as Python `datetime.datetime` objects are serialized by pymongo as native BSON dates (`ISODate`), enabling date-range querying, TTL indexes, and aggregations.
+  - By scoping these conversions to `if is_mongo:` in `_sanitize_rows_for_target`, SQL database targets (PostgreSQL, MySQL, SQLite) remain completely untouched and compatible.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Retain Raw Integers for Both PK and FK**:
+  - *Rejected by User*: User explicitly requested converting primary keys to UUIDs and having referencing foreign keys automatically converted to matching UUIDs.
+- **Alternative B: In-Memory Key Mapping Dictionary**:
+  - *Rejected*: Maintaining an in-memory dictionary of old integer $\to$ new UUID across gigabyte-scale datasets creates memory leaks, worker OOM crashes, and fails across multi-worker streaming batches. Deterministic UUIDv5 requires zero memory overhead.
+- **Alternative C: Embed Child Records as Nested Subdocuments**:
+  - *Rejected*: While idiomatic for small 1:few relations, unbounded 1:N relations (e.g., thousands of orders per customer or millions of order items) violate MongoDB's 16MB BSON document limit. Retaining normalized document references with matching UUIDs is robust and scalable.
+
+### 4. Trade-offs & Future Considerations
+- **Nullable Foreign Keys**: When a source foreign key is `NULL` or empty, the transformer evaluates to `None` rather than generating a fallback UUID to preserve relational nullability.
+- **Target Detection**: Added target database type auto-detection in both the FastAPI service (`MigrationPlanService.create_plan_for_agent`) and the Next.js UI (`GeneratePlanAction.tsx`), ensuring plans default to the agent's target data source engine (e.g., `mongodb`).

@@ -142,7 +142,7 @@ class ASTTransformer:
             # 1. Exact match from AST source_columns (current source identifier's row)
             if source_cols_list:
                 for sc in source_cols_list:
-                    c = sc.get("column_name")
+                    c = sc.get("column_name") or sc.get("column")
                     if c and c in df.columns:
                         return c
 
@@ -153,7 +153,7 @@ class ASTTransformer:
             # 3. Any AST source_columns without table prefix
             if source_cols_list:
                 for sc in source_cols_list:
-                    c = sc.get("column_name", "")
+                    c = sc.get("column_name") or sc.get("column") or ""
                     bare = c.split(".")[-1] if "." in c else c
                     if bare and bare in df.columns:
                         return bare
@@ -195,7 +195,7 @@ class ASTTransformer:
         # Process each column mapping
         # ---------------------------------------------------------------
         for col_spec in column_mappings:
-            target_col = col_spec.get("target_column_name")
+            target_col = col_spec.get("target_column_name") or col_spec.get("target_column")
             trans_type = col_spec.get("transformation_type", "direct_copy")
             source_cols = col_spec.get("source_columns", [])
             expr_tmpl = col_spec.get("expression_template")
@@ -211,7 +211,20 @@ class ASTTransformer:
             # 1. direct_copy
             # ----------------------------------------------------------
             if trans_type == "direct_copy":
-                if src_name:
+                target_dtype = str(col_spec.get("target_data_type", "")).lower()
+                if "uuid" in target_dtype and src_name:
+                    src_ident = source_cols[0].get("identifier", "source") if source_cols else "source"
+                    _sid = src_ident
+                    uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
+                        lambda v, s=_sid: (
+                            str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
+                            if v not in (None, "") and not (len(str(v)) == 36 and "-" in str(v))
+                            else (str(v) if (v not in (None, "") and len(str(v)) == 36 and "-" in str(v)) else None)
+                        ),
+                        return_dtype=pl.Utf8,
+                    )
+                    exprs.append(uuid_expr.alias(target_col))
+                elif src_name:
                     exprs.append(pl.col(src_name).alias(target_col))
                 else:
                     exprs.append(_unresolved_expr(target_col, col_spec))
@@ -265,13 +278,13 @@ class ASTTransformer:
                             pk_expr = pl.Series(pk_list)
                         exprs.append(pk_expr.alias(target_col))
 
-                    elif "uuid" in target_dtype:
+                    elif "uuid" in target_dtype or col_spec.get("is_foreign_key_to_uuid"):
                         _sid = src_ident
                         uuid_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
                             lambda v, s=_sid: (
                                 str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
                                 if v not in (None, "") and not (len(str(v)) == 36 and "-" in str(v))
-                                else str(v or "")
+                                else (str(v) if (v not in (None, "") and len(str(v)) == 36 and "-" in str(v)) else None)
                             ),
                             return_dtype=pl.Utf8,
                         )
@@ -524,9 +537,9 @@ class ASTTransformer:
         # ---------------------------------------------------------------
         mapped_src_cols: set = set()
         for col_spec in column_mappings:
-            if col_spec.get("target_column_name") and col_spec.get("transformation_type") != "drop_column":
+            if (col_spec.get("target_column_name") or col_spec.get("target_column")) and col_spec.get("transformation_type") != "drop_column":
                 for sc in col_spec.get("source_columns", []):
-                    c_name = sc.get("column_name", "")
+                    c_name = sc.get("column_name") or sc.get("column") or ""
                     mapped_src_cols.add(c_name)
                     if "." in c_name:
                         mapped_src_cols.add(c_name.split(".")[0])

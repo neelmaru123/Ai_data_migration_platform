@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import planService from '../../services/planService';
 import executionService from '../../services/executionService';
+import { agentService } from '../../services/agentService';
 import { PlanResponse } from '../../types/migrationPlan';
 import { ExecutionJobResponse } from '../../types/execution';
 import { CheckCircle2, Lock, ArrowRight, Activity, ShieldCheck } from 'lucide-react';
@@ -34,12 +35,19 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
 
     const checkAgentExecutionState = async () => {
       try {
-        const [plansList, executionsList] = await Promise.all([
+        const [plansList, executionsList, agentData] = await Promise.all([
           planService.listPlans(),
           executionService.listUserExecutions(),
+          agentService.getAgent(agentId).catch(() => null),
         ]);
 
         if (!isMounted) return;
+
+        // Auto-detect target database type from agent data source
+        const targetDs = agentData?.data_sources?.find((ds) => ds.role === 'target' || ds.role === 'both');
+        if (targetDs?.type) {
+          setTargetType(targetDs.type.toLowerCase());
+        }
 
         // Find plans linked to this agent
         const matchedPlans = plansList.filter((p) => p.agent_id === agentId);
@@ -280,17 +288,33 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
             </div>
           )}
 
-          <div className="space-y-2">
-            <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
-              Custom AI Guidance / Tuning Instructions (Optional)
-            </label>
-            <input
-              type="text"
-              value={customInstructions}
-              onChange={(e) => setCustomInstructions(e.target.value)}
-              placeholder="e.g. Prefer UUID primary keys, map created_on to created_at, convert enum ints to text"
-              className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
-            />
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="space-y-2">
+              <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
+                Target Database Engine
+              </label>
+              <select
+                value={targetType}
+                onChange={(e) => setTargetType(e.target.value)}
+                className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs focus:outline-none focus:border-sky-400 font-mono transition-colors"
+              >
+                <option value="mongodb">MongoDB (NoSQL Document)</option>
+                <option value="postgresql">PostgreSQL (Relational)</option>
+                <option value="mysql">MySQL (Relational)</option>
+              </select>
+            </div>
+            <div className="space-y-2 sm:col-span-2">
+              <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
+                Custom AI Guidance / Tuning Instructions (Optional)
+              </label>
+              <input
+                type="text"
+                value={customInstructions}
+                onChange={(e) => setCustomInstructions(e.target.value)}
+                placeholder="e.g. Prefer UUID primary keys, map created_on to created_at, convert enum ints to text"
+                className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
+              />
+            </div>
           </div>
 
           {isGenerating && (

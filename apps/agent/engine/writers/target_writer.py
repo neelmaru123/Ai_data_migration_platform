@@ -24,6 +24,7 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
     - MongoDB: dicts/lists → native Python objects (pymongo handles them)
     """
     import json
+    import re
     import uuid
     from datetime import datetime, timezone
     from decimal import Decimal
@@ -71,17 +72,38 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
                 v_str = v.strip()
                 v_upper = v_str.upper()
                 if v_upper in SQL_NOW_LITERALS:
-                    clean_row[k] = datetime.now(timezone.utc).isoformat()
+                    clean_row[k] = datetime.now(timezone.utc) if is_mongo else datetime.now(timezone.utc).isoformat()
                 elif v_str in ("0000-00-00 00:00:00", "0000-00-00"):
                     clean_row[k] = None
+                elif is_mongo and re.match(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}", v_str):
+                    try:
+                        clean_row[k] = datetime.fromisoformat(v_str.replace("Z", "+00:00"))
+                    except Exception:
+                        clean_row[k] = v
+                elif is_mongo and re.match(r"^-?\d+\.\d+$", v_str):
+                    try:
+                        from bson import Decimal128
+                        clean_row[k] = Decimal128(v_str)
+                    except Exception:
+                        clean_row[k] = float(v_str)
                 else:
                     clean_row[k] = v
             elif isinstance(v, uuid.UUID):
                 clean_row[k] = str(v)
             elif isinstance(v, datetime):
-                clean_row[k] = v.isoformat()
+                if is_mongo:
+                    clean_row[k] = v
+                else:
+                    clean_row[k] = v.isoformat()
             elif isinstance(v, Decimal):
-                clean_row[k] = str(v)
+                if is_mongo:
+                    try:
+                        from bson import Decimal128
+                        clean_row[k] = Decimal128(str(v))
+                    except Exception:
+                        clean_row[k] = float(v)
+                else:
+                    clean_row[k] = str(v)
             elif isinstance(v, bytes):
                 clean_row[k] = v.hex()
             elif isinstance(v, (set, frozenset)):
@@ -106,6 +128,11 @@ def _sanitize_rows_for_target(rows: list, engine_type: str) -> list:
                     clean_row[k] = json.dumps(v, ensure_ascii=False, default=str)
             else:
                 clean_row[k] = v
+
+        # For MongoDB targets: promote 'id' to '_id' so documents only have one _id primary key
+        if is_mongo and "id" in clean_row and "_id" not in clean_row:
+            clean_row["_id"] = clean_row.pop("id")
+
         sanitized.append(clean_row)
     return sanitized
 

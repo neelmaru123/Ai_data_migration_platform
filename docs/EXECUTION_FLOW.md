@@ -335,3 +335,73 @@
    - In `finally` block of `handleLogout()`, executes `window.location.href = '/login'`.
    - Browser reloads and navigates to `/login`.
    - Next.js middleware detects absence of auth cookies and blocks protected route access.
+
+---
+
+# Execution Flow - Relational to MongoDB Migration with Synchronized UUIDv5 Foreign Keys & BSON Types
+
+## 1. Entry Point
+- **UI Trigger**: User configures and triggers migration plan from [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) with target engine `mongodb`.
+- **API Endpoint**: `POST /api/v1/plans/generate` in [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py).
+- **Execution Endpoint**: `POST /api/v1/plans/{plan_id}/execute` in [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py).
+- **Agent Consumer**: Docker Agent task polling daemon (`poll_and_execute_tasks()`) in [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py).
+
+## 2. Step-by-Step Execution Sequence
+
+### Phase 1: Target Engine Auto-Detection & Prompt Formulation
+1. **Frontend Auto-Detection**:
+   - `GeneratePlanAction` fetches agent details via `agentService.getAgent(agentId)`.
+   - Finds attached data source where `role in ('target', 'both')`. If type is `mongodb`, sets `targetType = 'mongodb'`.
+2. **Backend Service Normalization**:
+   - `MigrationPlanService.create_plan_for_agent()` in [`migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py) verifies target engine. If unset or default `postgresql`, auto-detects from agent's target data source (`mongodb`).
+   - Ignores target-only data sources when collecting source metadata snapshots to eliminate false warning noise.
+3. **LLM Blueprint Generation**:
+   - `llm_plan_generator.generate()` invokes Gemini with MongoDB-specific guidance (Rule 18: schemaless collections, empty DDL, target primary key `_id` or `id`).
+   - Rule 6: Whenever a parent primary key is re-keyed to `uuid`, referencing foreign keys must also be defined with `target_data_type: 'uuid'` and `transformation_type: 'type_cast'`.
+
+### Phase 2: Deterministic FK Type Synchronization & Plan Validation
+1. **Plan Validation Entry**:
+   - `validate_feasibility_node()` in [`migration_plans_graph.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_graph.py) calls `MigrationPlanValidator.validate()`.
+2. **Primary Key Indexing**:
+   - `MigrationPlanValidator` inspects all table mappings and indexes primary key types (`pk_type_by_table[table_name] = type`).
+3. **Foreign Key Alignment**:
+   - For every column ending in `_id` referencing a parent entity, if the parent's PK is `uuid`, the validator auto-synchronizes the foreign key column to:
+     - `target_data_type: 'uuid'`
+     - `transformation_type: 'type_cast'`
+     - `ui_badge_type: 'type_cast'`
+   - Updates `plan_ast_data` dictionary in-place so all persisted plans reflect this synchronized schema.
+
+### Phase 3: Docker Agent Streaming Execution
+1. **Data Extraction**:
+   - `SourceConnectorFactory.read_source_chunk()` reads PostgreSQL rows in cursor batches (e.g. 1,000 rows).
+2. **In-Memory Transformation ([`ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py))**:
+   - For parent table (`categories`): Transforms `category_id: 100` $\to$ `id: uuid5(NAMESPACE_DNS, "src_db_1_100")` (`5cc524b1-...`).
+   - For child tables (`products`, `orders`, `order_items`): Transforms `category_id: 100` $\to$ `category_id: uuid5(NAMESPACE_DNS, "src_db_1_100")` (`5cc524b1-...`).
+   - Nullable foreign keys: Evaluates `None` as `None` (preserving relational nullability).
+3. **BSON Type Sanitization & Promotion ([`target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py))**:
+   - `_sanitize_rows_for_target(rows, engine_type='mongodb')`:
+     - Promotes `clean_row["_id"] = clean_row.pop("id")` so each document has only ONE `_id` primary key and no separate `id` field.
+     - Decimal values $\to$ `bson.Decimal128(str(val))`.
+     - Datetime / ISO strings $\to$ native `datetime.datetime` (`ISODate`).
+4. **Target Sink**:
+   - `MongoTargetWriter.bulk_load()` executes `collection.bulk_write([InsertOne(doc) for doc in chunk])` into MongoDB.
+
+## 3. Impact & Delta Analysis (AI Modifications)
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
+  - Added deterministic UUIDv5 transformation for columns with `target_data_type == 'uuid'` or `is_foreign_key_to_uuid` in both `direct_copy` and `type_cast`.
+  - Added null preservation for nullable foreign keys.
+- **[MODIFIED]**: [`apps/agent/engine/writers/target_writer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/writers/target_writer.py)
+  - Promotes `id` to `_id` and drops `id` for MongoDB targets.
+  - Converts Decimals to `bson.Decimal128`.
+  - Preserves datetimes and converts ISO strings to native `datetime` (BSON ISODate).
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_validator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_engine/migration_plans_validator.py)
+  - Added PK indexing and automatic FK $\to$ UUID type synchronization.
+  - Syncs AST mutations back into caller dictionary.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py)
+  - Auto-detects target engine from agent data sources when default `postgresql`.
+  - Skips `role == 'target'` when introspecting source databases.
+- **[MODIFIED]**: [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx)
+  - Auto-detects target engine from agent data sources on load.
+  - Added Target Database Engine dropdown selector.
+- **[NEW]**: [`apps/api/tests/unit/test_mongo_relational_uuid_fk_and_types.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_mongo_relational_uuid_fk_and_types.py)
+  - Unit tests verifying UUID matching across PK/FK, BSON serialization (`Decimal128`, `ISODate`, `_id`), and validator synchronization.

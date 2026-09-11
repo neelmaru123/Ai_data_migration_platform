@@ -46,9 +46,11 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
 5. CANONICAL NAMING & CASING STANDARD:
    - ALL target table names and column names MUST be in clean, lowercase snake_case (e.g. user_accounts, created_at).
 6. PRIMARY KEYS & AUDIT COLUMNS STANDARD:
-   - Every target table MUST have a primary key column named 'id' (VARCHAR(36) for MySQL, UUID/BIGINT for PostgreSQL).
+   - Every target table MUST have a primary key column named 'id' (or '_id' when target is MongoDB). (VARCHAR(36) for MySQL, UUID/BIGINT for PostgreSQL, UUID/VARCHAR(36) for MongoDB).
    - Every target table MUST include enterprise audit timestamp columns 'created_at' and 'updated_at' (DATETIME for MySQL, TIMESTAMPTZ for PostgreSQL) using transformation_type 'new_column_added'.
    - Merged tables MUST include a '_source_origin' column (VARCHAR) to track data lineage per row.
+   - FOREIGN KEY & PRIMARY KEY TYPE SYNCHRONIZATION:
+     Whenever a target table's primary key is mapped to 'uuid' (or converted to UUID from an integer source PK), ALL foreign key columns in other tables that reference this entity (e.g. 'category_id', 'customer_id', 'order_id', 'product_id') MUST ALSO use target_data_type 'uuid' with transformation_type 'type_cast'. A foreign key column MUST NEVER be left as 'bigint' or 'integer' if its referenced parent primary key is 'uuid'!
 7. TWO-PHASE DDL HYGIENE & DIALECT COMPLIANCE:
    - pre_migration_ddl: include CREATE TABLE DDL for target tables (and CREATE EXTENSION only if target is PostgreSQL). MUST NOT contain ANY inline or table-level FOREIGN KEY constraints.
    - For MySQL targets: DO NOT use 'gen_random_uuid()' or 'UUID' data types in DDL. Use 'VARCHAR(36) PRIMARY KEY' or 'BIGINT AUTO_INCREMENT PRIMARY KEY'.
@@ -106,6 +108,13 @@ RULES & INDUSTRY DATABASE ARCHITECTURE STANDARDS:
     - phone / mobile / telephone / phone_number / contact_number → same concept
     - created_at / created_time / creation_date / registration_date → same concept
     - customer_id / account_id / user_id / client_id (when referencing same entity) → same concept
+
+18. TARGET DATABASE MONGODB RULES:
+    When target_database_type is "mongodb":
+    - Target entities are collections, not relational tables.
+    - Every collection's primary key column MUST be named '_id' (with target_data_type 'uuid' or 'varchar(36)').
+    - pre_migration_ddl MUST be an empty list []. Do NOT generate SQL CREATE TABLE DDL statements for MongoDB!
+    - post_migration_ddl should contain db.<collection>.createIndex(...) commands or be an empty list [].
 
 ALLOWED transformation_type TAXONOMY (column level):
   direct_copy         → Copy column value as-is from source to target

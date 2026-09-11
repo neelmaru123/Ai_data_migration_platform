@@ -61,6 +61,8 @@ class MigrationPlanService:
 
         source_count = 0
         for ds in data_sources:
+            if ds.role == "target":
+                continue
             # Build logical alias: src_db_1, src_db_2, etc.
             source_count += 1
             alias = ds.identifier if ds.identifier else f"source_db_{source_count}"
@@ -129,6 +131,15 @@ class MigrationPlanService:
         )
 
         target_db_type = target_config.database_type
+        # Auto-detect target database type from agent's target data source if default or unset
+        target_ds = next(
+            (ds for ds in (agent.data_sources or []) if ds.role in ("target", "both") and ds.type),
+            None,
+        )
+        if target_ds and (not target_db_type or target_db_type.lower() == "postgresql"):
+            target_db_type = target_ds.type.lower()
+            target_config.database_type = target_db_type
+
         custom_instructions = target_config.custom_instructions
 
         initial_state = {
