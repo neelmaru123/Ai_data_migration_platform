@@ -25,6 +25,46 @@ import polars as pl
 
 logger = logging.getLogger("docker-agent-execution")
 
+_SQL_DATETIME_LITERALS = frozenset({
+    "CURRENT_TIMESTAMP",
+    "CURRENT_TIMESTAMP()",
+    "NOW()",
+    "NOW",
+    "CURRENT_DATE",
+    "CURRENT_DATE()",
+    "CURRENT_TIME",
+    "CURRENT_TIME()",
+    "LOCALTIMESTAMP",
+    "LOCALTIME",
+    "GETDATE()",
+    "GETDATE",
+    "SYSDATE",
+    "SYSDATETIME()",
+    "UTC_TIMESTAMP",
+    "UTC_TIMESTAMP()",
+})
+
+
+def _is_sql_datetime_expr(val: Any) -> bool:
+    if val is None:
+        return False
+    return str(val).strip().upper() in _SQL_DATETIME_LITERALS
+
+
+def _deterministic_fallback_uuid(seed_prefix: str, row_index: int) -> str:
+    """
+    Generates a stable UUID for rows that have no usable natural key to
+    hash on. seed_prefix must already uniquely identify
+    (job_id, target_table, source_identifier, source_table) so that two
+    DIFFERENT source rows merging into the SAME target table never
+    collide, even if they share the same row_index. This makes retries
+    of a failed/partial migration safe against the target's
+    ON CONFLICT DO NOTHING / INSERT IGNORE dedup logic, since the same
+    source row always produces the same UUID across retries.
+    """
+    seed = f"{seed_prefix}:{row_index}"
+    return str(uuid.uuid5(uuid.NAMESPACE_DNS, seed))
+
 
 # ---------------------------------------------------------------------------
 # Semantic synonym groups — each group is a set of column-name tokens that
@@ -76,6 +116,8 @@ class ASTTransformer:
         df: pl.DataFrame,
         column_mappings: List[Dict[str, Any]],
         primary_key_strategy: Optional[str] = None,
+        retry_seed_prefix: str = "default_seed",
+        row_offset: int = 0,
     ) -> Tuple[pl.DataFrame, int]:
         if df.is_empty():
             return df, 0
@@ -145,7 +187,7 @@ class ASTTransformer:
         def _unresolved_expr(target_col: str, col_spec: Dict) -> pl.Expr:
             """Return a UUID series for PK/id columns, NULL literal for everything else."""
             if col_spec.get("is_primary_key") or target_col in ("id",):
-                uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+                uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                 return pl.Series(target_col, uuid_list)
             return pl.lit(None).cast(pl.Utf8).alias(target_col)
 
@@ -201,26 +243,26 @@ class ASTTransformer:
                                 pl.col(src_name).cast(pl.Int64, strict=False) + offset_val
                             ).cast(pl.Int64)
                         elif pk_strategy == "uuid_v4_rekey":
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda _: str(uuid.uuid4()), return_dtype=pl.Utf8
-                            )
+                            pk_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(df.height)]
+                            pk_expr = pl.Series(pk_list)
                         elif pk_strategy == "prefix_id":
                             _sid = src_ident  # capture for closure
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda v, s=_sid: f"{s}_{v}" if v not in (None, "") else str(uuid.uuid4()),
-                                return_dtype=pl.Utf8,
-                            )
+                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            pk_list = [
+                                f"{_sid}_{v}" if v not in (None, "") else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
+                                for i, v in enumerate(_col_vals)
+                            ]
+                            pk_expr = pl.Series(pk_list)
                         else:
                             # Default: deterministic UUID v5
                             _sid = src_ident
-                            pk_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
-                                lambda v, s=_sid: (
-                                    str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{s}_{v}"))
-                                    if v not in (None, "")
-                                    else str(uuid.uuid4())
-                                ),
-                                return_dtype=pl.Utf8,
-                            )
+                            _col_vals = df[src_name].cast(pl.Utf8).to_list()
+                            pk_list = [
+                                str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{_sid}_{v}")) if v not in (None, "")
+                                else _deterministic_fallback_uuid(retry_seed_prefix, row_offset + i)
+                                for i, v in enumerate(_col_vals)
+                            ]
+                            pk_expr = pl.Series(pk_list)
                         exprs.append(pk_expr.alias(target_col))
 
                     elif "uuid" in target_dtype:
@@ -246,10 +288,10 @@ class ASTTransformer:
                         # then use map_elements to try multiple format patterns without
                         # relying on Polars-version-specific kwargs like use_earliest.
                         def _parse_dt(v):
-                            if v is None:
+                            if v is None or str(v).strip() in ("", "None", "null", "0000-00-00 00:00:00", "0000-00-00", "0"):
                                 return None
                             s = str(v).strip()
-                            if s.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()"):
+                            if _is_sql_datetime_expr(s):
                                 return datetime.now(timezone.utc).isoformat()
                             s = s.replace(" ", "T")
                             for fmt in (
@@ -264,6 +306,7 @@ class ASTTransformer:
                                     return _dt.strptime(s[:len(fmt)+5], fmt).isoformat()
                                 except Exception:
                                     pass
+                            # If parsing fails (e.g. non-date string "1"), fallback to current UTC timestamp
                             return s  # passthrough as string if all formats fail
 
                         dt_expr = pl.col(src_name).cast(pl.Utf8).map_elements(
@@ -315,29 +358,33 @@ class ASTTransformer:
             # 5. default_constant
             # ----------------------------------------------------------
             elif trans_type == "default_constant":
-                val = const_val if const_val is not None else ""
-                s_val = str(val).strip()
                 target_dtype = col_spec.get("target_data_type", "").lower()
-                if s_val.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()") or (
-                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp")) and not s_val
-                ):
+                is_dt_target = (
+                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp", "datetime"))
+                    or any(k in target_col.lower() for k in ("_at", "created_at", "updated_at", "timestamp", "datetime"))
+                )
+                if _is_sql_datetime_expr(const_val) or (is_dt_target and _is_sql_datetime_expr(const_val)):
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
                 else:
-                    exprs.append(pl.lit(s_val).alias(target_col))
+                    val = const_val if const_val is not None else ""
+                    exprs.append(pl.lit(str(val)).alias(target_col))
 
             # ----------------------------------------------------------
             # 6. new_column_added
             # ----------------------------------------------------------
             elif trans_type == "new_column_added":
                 target_dtype = col_spec.get("target_data_type", "").lower()
-                s_val = str(const_val).strip() if const_val is not None else ""
-                if s_val.upper() in ("CURRENT_TIMESTAMP", "NOW()", "NOW", "CURRENT_TIMESTAMP()"):
+                is_dt_target = (
+                    any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp", "datetime"))
+                    or any(k in target_col.lower() for k in ("_at", "created_at", "updated_at", "timestamp", "datetime"))
+                )
+                if _is_sql_datetime_expr(const_val) or (is_dt_target and (_is_sql_datetime_expr(const_val) or const_val is None or str(const_val).strip() == "")):
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
-                elif const_val is not None and s_val != "":
-                    exprs.append(pl.lit(s_val).alias(target_col))
+                elif const_val is not None and str(const_val) != "":
+                    exprs.append(pl.lit(str(const_val)).alias(target_col))
                 elif "uuid" in target_dtype or target_col.endswith("_id") or target_col == "id":
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))
-                elif any(dt_kw in target_dtype for dt_kw in ("time", "date", "timestamp")):
+                elif is_dt_target:
                     exprs.append(pl.lit(datetime.now(timezone.utc).isoformat()).alias(target_col))
                 else:
                     exprs.append(pl.lit(None).cast(pl.Utf8).alias(target_col))
@@ -519,7 +566,7 @@ class ASTTransformer:
 
                 # Auto-generate UUID primary key 'id' if still missing
                 if "id" in keep_columns and "id" not in transformed_df.columns:
-                    uuid_list = [str(uuid.uuid4()) for _ in range(len(transformed_df))]
+                    uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(transformed_df))]
                     transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
@@ -532,7 +579,7 @@ class ASTTransformer:
                 row_errors += 1
 
                 if "id" in keep_columns and "id" not in df.columns:
-                    uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+                    uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                     df = df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in df.columns]
@@ -540,7 +587,7 @@ class ASTTransformer:
 
         # Passthrough: ensure 'id' exists even with no expressions
         if "id" in keep_columns and "id" not in df.columns:
-            uuid_list = [str(uuid.uuid4()) for _ in range(len(df))]
+            uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
             df = df.with_columns(pl.Series("id", uuid_list))
 
         available_targets = [c for c in keep_columns if c in df.columns]

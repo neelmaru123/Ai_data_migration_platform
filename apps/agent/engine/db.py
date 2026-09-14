@@ -3,6 +3,7 @@ Database connection pooling and identifier quoting utilities for agent execution
 """
 
 import logging
+import threading
 from sqlalchemy import create_engine
 
 logger = logging.getLogger("docker-agent-execution")
@@ -21,25 +22,48 @@ def _clean_url_for_engine(db_url: str) -> str:
     return cleaned
 
 
+_ENGINE_CACHE = {}
+_ENGINE_CACHE_LOCK = threading.Lock()
+
+
 def _get_engine(db_url: str):
-    """Creates a SQLAlchemy engine with connection pooling, recycle limits, and active TCP keepalives."""
+    """Creates (or reuses a cached) SQLAlchemy engine with connection pooling, recycle limits, and active TCP keepalives."""
     clean_url = _clean_url_for_engine(db_url)
-    connect_args = {}
-    if "postgres" in clean_url:
-        connect_args = {
-            "keepalives": 1,
-            "keepalives_idle": 30,
-            "keepalives_interval": 10,
-            "keepalives_count": 5,
+
+    with _ENGINE_CACHE_LOCK:
+        if clean_url in _ENGINE_CACHE:
+            return _ENGINE_CACHE[clean_url]
+
+        connect_args = {}
+        if "postgres" in clean_url:
+            connect_args = {
+                "keepalives": 1,
+                "keepalives_idle": 30,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            }
+        kwargs = {
+            "pool_pre_ping": True,
+            "pool_recycle": 300,
+            "connect_args": connect_args,
         }
-    kwargs = {
-        "pool_pre_ping": True,
-        "pool_recycle": 300,
-        "connect_args": connect_args,
-    }
-    if "sqlite" not in clean_url:
-        kwargs["pool_timeout"] = 30
-    return create_engine(clean_url, **kwargs)
+        if "sqlite" not in clean_url:
+            kwargs["pool_timeout"] = 30
+
+        engine = create_engine(clean_url, **kwargs)
+        _ENGINE_CACHE[clean_url] = engine
+        return engine
+
+
+def dispose_all_engines():
+    """Disposes and clears all cached engines. Call this once at the end of a job (success or failure)."""
+    with _ENGINE_CACHE_LOCK:
+        for engine in _ENGINE_CACHE.values():
+            try:
+                engine.dispose()
+            except Exception:
+                pass
+        _ENGINE_CACHE.clear()
 
 
 def _quote_identifier(name: str, engine_type: str = "postgresql") -> str:

@@ -26,8 +26,15 @@ from app.modules.agents.agents_schemas import (
     AgentUpdate,
 )
 from app.modules.execution.execution_models import MigrationJob
+from sqlalchemy import and_
 from app.modules.sources.sources_models import DataSource
 from app.modules.sources.sources_schemas import DataSourceResponse
+
+# ---------------------------------------------------------------------------
+# Option C — Adaptive Idle Heartbeat thresholds
+# ---------------------------------------------------------------------------
+_IDLE_MODE_THRESHOLD_SECONDS = 300   # 5 minutes: switch to 5-min standby heartbeat
+# ---------------------------------------------------------------------------
 
 
 class AgentService:
@@ -150,6 +157,53 @@ class AgentService:
         return AgentDetailResponse.model_validate(response_dict)
 
     @staticmethod
+    async def regenerate_agent_token(
+        session: AsyncSession, agent: Agent
+    ) -> AgentDetailResponse:
+        """
+        Regenerates a Docker Agent's API token. The previous token's hash is
+        immediately invalidated -- any running agent container still using
+        the old token will fail authentication on its next request
+        (heartbeat, task poll, progress report) and must be redeployed with
+        the new token. Returns the new raw token ONCE, along with freshly
+        generated Docker commands pre-filled with it. The raw token is
+        never stored in plaintext and cannot be retrieved again after this
+        response, exactly like the initial creation flow.
+        """
+        raw_token = f"ag_live_{secrets.token_urlsafe(32)}"
+        token_hash = hash_agent_token(raw_token)
+        agent.api_token_hash = token_hash
+        session.add(agent)
+        await session.commit()
+
+        fetched_agent = await AgentService.get_agent_by_id(session, agent.id)
+        if fetched_agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to retrieve agent after token regeneration.",
+            )
+
+        cmd_payload = AgentCommandGenerator.generate_command_payload(
+            agent=fetched_agent,
+            data_sources=fetched_agent.data_sources,
+            raw_token=raw_token,
+        )
+
+        base_dict = AgentResponse.model_validate(fetched_agent).model_dump()
+        response_dict = {
+            **base_dict,
+            "data_sources": [
+                DataSourceResponse.model_validate(ds) for ds in (fetched_agent.data_sources or [])
+            ],
+            "api_token": raw_token,
+            "docker_command": cmd_payload["docker_command"],
+            "docker_command_powershell": cmd_payload["docker_command_powershell"],
+            "docker_command_oneline": cmd_payload["docker_command_oneline"],
+            "env_template": cmd_payload["env_template"],
+        }
+        return AgentDetailResponse.model_validate(response_dict)
+
+    @staticmethod
     async def get_agent_by_id(
         session: AsyncSession, agent_id: uuid.UUID
     ) -> Optional[Agent]:
@@ -214,11 +268,12 @@ class AgentService:
     @staticmethod
     async def process_agent_heartbeat(
         session: AsyncSession, agent: Agent, heartbeat: AgentHeartbeat
-    ) -> Agent:
+    ) -> AgentResponse:
         """
         Process periodic heartbeat ping from authenticated agent.
         Updates agent status, version, last_seen_at, and data sources health diagnostics.
         Emits AGENT_CONNECTED on transition to online, AGENT_DISCONNECTED on offline, or AGENT_HEARTBEAT on recurring pings.
+        Returns AgentResponse with optional action directive (ENTER_IDLE_MODE, RESUME_ACTIVE_MODE, SHUTDOWN).
         """
         now = datetime.now(timezone.utc)
 
@@ -234,6 +289,17 @@ class AgentService:
         if heartbeat.version:
             agent.version = heartbeat.version.strip()
 
+        # Update fatal stopping error if reported
+        if heartbeat.error_message or heartbeat.status == "error":
+            agent.last_error = heartbeat.error_message
+            agent.error_category = heartbeat.error_category or "FATAL_ERROR"
+            agent.last_error_at = now
+            agent.status = "error"
+        elif heartbeat.status == "online":
+            # Agent recovered and is healthy online — clear active fatal stopping error
+            agent.last_error = None
+            agent.error_category = None
+
         # Update attached Data Sources health diagnostics if provided in heartbeat
         data_sources_summary = []
         if heartbeat.data_sources and agent.data_sources:
@@ -242,13 +308,40 @@ class AgentService:
             for ds in agent.data_sources:
                 ident_lower = ds.identifier.lower().strip()
                 source_map[ident_lower] = ds
-                if ident_lower.startswith("src_"):
-                    source_map[ident_lower[4:]] = ds
-                elif ident_lower.startswith("dest_"):
-                    source_map[ident_lower[5:]] = ds
-                else:
-                    source_map[f"src_{ident_lower}"] = ds
-                    source_map[f"dest_{ident_lower}"] = ds
+
+                clean_id = ident_lower
+                if clean_id.startswith("src_"):
+                    clean_id = clean_id[4:]
+                elif clean_id.startswith("dest_"):
+                    clean_id = clean_id[5:]
+                elif clean_id.startswith("dst_"):
+                    clean_id = clean_id[4:]
+
+                source_map[clean_id] = ds
+                source_map[f"src_{clean_id}"] = ds
+                source_map[f"dest_{clean_id}"] = ds
+                source_map[f"dst_{clean_id}"] = ds
+
+            # Fallback for single source or single destination data sources
+            sources_by_role = {"source": [], "destination": []}
+            for ds in agent.data_sources:
+                role = (ds.role or "").lower()
+                if "src" in role or "source" in role:
+                    sources_by_role["source"].append(ds)
+                elif "dest" in role or "dst" in role or "target" in role:
+                    sources_by_role["destination"].append(ds)
+
+            if len(sources_by_role["destination"]) == 1:
+                single_dest = sources_by_role["destination"][0]
+                for generic_key in ("db", "dest", "dest_db", "dst", "dst_db", "target"):
+                    if generic_key not in source_map:
+                        source_map[generic_key] = single_dest
+
+            if len(sources_by_role["source"]) == 1:
+                single_src = sources_by_role["source"][0]
+                for generic_key in ("source", "source_db", "src", "src_db"):
+                    if generic_key not in source_map:
+                        source_map[generic_key] = single_src
 
             updated_data_sources = set()
             for report in heartbeat.data_sources:
@@ -276,7 +369,7 @@ class AgentService:
                         "last_checked_at": ds.last_checked_at.isoformat(),
                     })
                 else:
-                    logger.warning(
+                    logger.debug(
                         f"Unmatched health report identifier '{report.identifier}' for agent '{agent.id}'"
                     )
 
@@ -292,6 +385,119 @@ class AgentService:
         else:
             event_name = "AGENT_HEARTBEAT"
 
+        # ---------------------------------------------------------------
+        # Option A + C: Determine backend control directive
+        # Priority order:
+        #   1. Active job → RESUME_ACTIVE_MODE (fast heartbeat)
+        #   2. Most recent job completed successfully → SHUTDOWN (container exits)
+        #   3. Idle 5+ min with no successful job → ENTER_IDLE_MODE (standby)
+        # ---------------------------------------------------------------
+        action: Optional[str] = None
+        action_reason: Optional[str] = None
+
+        if agent.idle_since is not None and heartbeat.status != "offline":
+            # Priority 1: Check for any currently active/queued job
+            stmt_active = select(MigrationJob).where(
+                MigrationJob.agent_id == agent.id,
+                MigrationJob.status.in_(["queued", "preparing", "running"]),
+            )
+            res_active = await session.execute(stmt_active)
+            active_job = res_active.scalar_one_or_none()
+
+            if active_job:
+                # Job is running — clear idle marker, restore fast heartbeat
+                agent.idle_since = None
+                await session.commit()
+                action = "RESUME_ACTIVE_MODE"
+                action_reason = (
+                    f"Active migration job '{active_job.id}' detected. "
+                    "Restoring 20-second heartbeat frequency."
+                )
+                logger.info(
+                    f"Agent '{agent.name}' ({agent.id}): active job detected — issuing RESUME_ACTIVE_MODE."
+                )
+            else:
+                # Priority 2: Check if the most recent job completed successfully
+                # If so, the migration is done — shut down the container (Option A auto-trigger).
+                stmt_latest_job = (
+                    select(MigrationJob)
+                    .where(MigrationJob.agent_id == agent.id)
+                    .order_by(MigrationJob.completed_at.desc().nullslast())
+                    .limit(1)
+                )
+                res_latest = await session.execute(stmt_latest_job)
+                latest_job = res_latest.scalar_one_or_none()
+
+                if latest_job and latest_job.status == "completed":
+                    # Check if the job completed recently (within 120s).
+                    # If completed long ago, the container was restarted by the user to perform new tasks.
+                    is_recent_completion = False
+                    if latest_job.completed_at:
+                        comp_time = (
+                            latest_job.completed_at
+                            if latest_job.completed_at.tzinfo
+                            else latest_job.completed_at.replace(tzinfo=timezone.utc)
+                        )
+                        if (now - comp_time).total_seconds() <= 120:
+                            is_recent_completion = True
+
+                    if is_recent_completion:
+                        # Option A: Migration finished recently — issue SHUTDOWN directive
+                        action = "SHUTDOWN"
+                        action_reason = (
+                            f"Migration job '{latest_job.id}' completed successfully. "
+                            "Initiating graceful container shutdown."
+                        )
+                        logger.info(
+                            f"Agent '{agent.name}' ({agent.id}): job '{latest_job.id}' completed recently — "
+                            "issuing SHUTDOWN directive."
+                        )
+                    else:
+                        # Job completed in a prior run; agent was restarted by user for new work.
+                        # Apply Option C standby rules instead of auto-shutdown.
+                        idle_since_aware = (
+                            agent.idle_since
+                            if agent.idle_since.tzinfo
+                            else agent.idle_since.replace(tzinfo=timezone.utc)
+                        )
+                        idle_seconds = (now - idle_since_aware).total_seconds()
+                        if idle_seconds >= 300:
+                            action = "ENTER_IDLE_MODE"
+                            action_reason = f"Agent idle for {int(idle_seconds)}s — entering low-power standby mode."
+                        else:
+                            action = "RESUME_ACTIVE_MODE"
+                else:
+                    # Priority 3: No completed job (never ran, or last job failed / was queued)
+                    # Apply Option C: slow down heartbeat after 5-min idle grace window.
+                    idle_since_aware = (
+                        agent.idle_since
+                        if agent.idle_since.tzinfo
+                        else agent.idle_since.replace(tzinfo=timezone.utc)
+                    )
+                    idle_seconds = (now - idle_since_aware).total_seconds()
+
+                    if idle_seconds >= _IDLE_MODE_THRESHOLD_SECONDS:
+                        # Option C: 5+ minutes idle — slow heartbeat, container stays alive
+                        action = "ENTER_IDLE_MODE"
+                        action_reason = (
+                            f"No active migration tasks for {int(idle_seconds // 60)} minutes. "
+                            "Switching to 5-minute standby heartbeat. Container remains active and ready."
+                        ) 
+                        logger.info(
+                            f"Agent '{agent.name}' ({agent.id}): idle for {int(idle_seconds // 60)}m "
+                            "— issuing ENTER_IDLE_MODE."
+                        )
+                    # else: within 5-min grace window, no directive issued yet
+        elif agent.idle_since is None and heartbeat.status != "offline":
+            # Start tracking idle time if no jobs are currently running
+            stmt_active = select(MigrationJob).where(
+                MigrationJob.agent_id == agent.id,
+                MigrationJob.status.in_(["queued", "preparing", "running"]),
+            )
+            res_active = await session.execute(stmt_active)
+            if not res_active.scalar_one_or_none():
+                agent.idle_since = now
+
         # Broadcast real-time signal to Web App subscribers
         await manager.broadcast_to_agent(
             str(agent.id),
@@ -301,6 +507,10 @@ class AgentService:
                 "status": agent.status,
                 "version": agent.version,
                 "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
+                "last_error": agent.last_error,
+                "error_category": agent.error_category,
+                "last_error_at": agent.last_error_at.isoformat() if agent.last_error_at else None,
+                "action": action,
                 "data_sources": data_sources_summary if data_sources_summary else [
                     {
                         "id": str(ds.id),
@@ -316,52 +526,196 @@ class AgentService:
             },
         )
 
-        return agent
+        # Build and return AgentResponse with embedded control directive
+        return AgentResponse(
+            id=agent.id,
+            user_id=agent.user_id,
+            name=agent.name,
+            agent_identifier=agent.agent_identifier,
+            status=agent.status,
+            version=agent.version,
+            api_token=None,  # Never expose raw token in responses
+            last_seen_at=agent.last_seen_at,
+            last_error=agent.last_error,
+            error_category=agent.error_category,
+            last_error_at=agent.last_error_at,
+            created_at=agent.created_at,
+            updated_at=agent.updated_at,
+            action=action,
+            action_reason=action_reason,
+        )
+
+    @staticmethod
+    async def record_fatal_error(
+        session: AsyncSession,
+        agent_id: uuid.UUID,
+        error_message: str,
+        error_category: str = "FATAL_ERROR",
+    ) -> AgentResponse:
+        """
+        Records an emergency fatal error reported by an agent (e.g. startup crash, token failure)
+        and broadcasts real-time alert to UI subscribers.
+        """
+        stmt = select(Agent).where(Agent.id == agent_id).options(selectinload(Agent.data_sources))
+        res = await session.execute(stmt)
+        agent = res.scalar_one_or_none()
+        if not agent:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+
+        now = datetime.now(timezone.utc)
+        agent.status = "error"
+        agent.last_error = error_message
+        agent.error_category = error_category
+        agent.last_error_at = now
+        await session.commit()
+        await session.refresh(agent)
+
+        await manager.broadcast_to_agent(
+            str(agent.id),
+            {
+                "event": "AGENT_STATUS_CHANGED",
+                "agent_id": str(agent.id),
+                "status": "error",
+                "last_error": agent.last_error,
+                "error_category": agent.error_category,
+                "last_error_at": agent.last_error_at.isoformat(),
+            },
+        )
+
+        return AgentResponse(
+            id=agent.id,
+            user_id=agent.user_id,
+            name=agent.name,
+            agent_identifier=agent.agent_identifier,
+            status=agent.status,
+            version=agent.version,
+            api_token=None,
+            last_seen_at=agent.last_seen_at,
+            last_error=agent.last_error,
+            error_category=agent.error_category,
+            last_error_at=agent.last_error_at,
+            created_at=agent.created_at,
+            updated_at=agent.updated_at,
+            action=None,
+            action_reason=None,
+        )
 
     @staticmethod
     async def check_stale_agents_and_jobs(
-        session: AsyncSession, stale_threshold_seconds: int = 60
+        session: AsyncSession,
+        stale_threshold_seconds: int = 60,
+        standby_threshold_seconds: int = 360,
     ) -> dict[str, int]:
         """
         Watchdog task: Checks for agents that have not reported a heartbeat within the stale threshold.
-        Marks them as 'offline', triggers WebSocket disconnections, and fails any orphaned migration jobs.
+        For active agents (idle < 300s or running jobs), uses stale_threshold_seconds (default 60s).
+        For standby agents (idle_since >= 300s, where heartbeat is 300s), uses standby_threshold_seconds (default 360s).
+        Marks truly disconnected agents as 'offline', triggers WebSocket disconnections, and fails any orphaned migration jobs.
         """
-        cutoff_time = datetime.now(timezone.utc) - timedelta(seconds=stale_threshold_seconds)
+        now = datetime.now(timezone.utc)
+        active_cutoff = now - timedelta(seconds=stale_threshold_seconds)
+        standby_cutoff = now - timedelta(seconds=standby_threshold_seconds)
 
-        # 1. Find all active agents that exceeded the timeout threshold
-        stmt_stale = (
+        # 0. Auto-heal: Recover any standby agents that were falsely marked offline
+        # if their last_seen_at is still within the standby_threshold_seconds window
+        stmt_recover = (
+            select(Agent)
+            .where(
+                Agent.status == "offline",
+                Agent.error_category == "DISCONNECTED_UNEXPECTEDLY",
+                Agent.last_seen_at.is_not(None),
+                Agent.last_seen_at >= standby_cutoff,
+            )
+        )
+        res_recover = await session.execute(stmt_recover)
+        for agent in res_recover.scalars().all():
+            if agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now - idle_since_aware).total_seconds() >= _IDLE_MODE_THRESHOLD_SECONDS:
+                    agent.status = "online"
+                    agent.error_category = None
+                    agent.last_error = None
+                    logger.info(
+                        f"Standby agent '{agent.name}' ({agent.id}) restored to online status (last seen {agent.last_seen_at})."
+                    )
+                    await manager.broadcast_to_agent(
+                        str(agent.id),
+                        {
+                            "event": "AGENT_CONNECTED",
+                            "agent_id": str(agent.id),
+                            "status": "online",
+                            "last_seen_at": agent.last_seen_at.isoformat(),
+                        },
+                    )
+
+        # 1. Find all active agents (online, busy, degraded)
+        stmt_candidates = (
             select(Agent)
             .where(
                 Agent.status.in_(["online", "busy", "degraded"]),
-                or_(
-                    Agent.last_seen_at < cutoff_time,
-                    Agent.last_seen_at.is_(None),
-                ),
             )
             .options(selectinload(Agent.data_sources))
         )
-        res_stale = await session.execute(stmt_stale)
-    
-        stale_agents = list(res_stale.scalars().all())
+        res_candidates = await session.execute(stmt_candidates)
+        candidates = list(res_candidates.scalars().all())
+
+        stale_agents = []
+        for agent in candidates:
+            if not agent.last_seen_at:
+                stale_agents.append((agent, stale_threshold_seconds))
+                continue
+
+            last_seen = (
+                agent.last_seen_at
+                if agent.last_seen_at.tzinfo
+                else agent.last_seen_at.replace(tzinfo=timezone.utc)
+            )
+
+            # Determine whether this agent is in 5-min standby mode (Option C)
+            is_standby = False
+            if agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now - idle_since_aware).total_seconds() >= _IDLE_MODE_THRESHOLD_SECONDS:
+                    is_standby = True
+
+            effective_cutoff = standby_cutoff if is_standby else active_cutoff
+            effective_threshold = standby_threshold_seconds if is_standby else stale_threshold_seconds
+
+            if last_seen < effective_cutoff:
+                stale_agents.append((agent, effective_threshold))
 
         stale_agent_count = len(stale_agents)
         failed_jobs_count = 0
 
-        for agent in stale_agents:
+        for agent, effective_threshold in stale_agents:
             # Keep agent online if job is actively reporting progress AND agent was seen recently
             stmt_active_job = select(MigrationJob).where(
                 MigrationJob.agent_id == agent.id,
                 MigrationJob.status.in_(["running", "preparing"]),
-                MigrationJob.updated_at >= cutoff_time,
+                MigrationJob.updated_at >= active_cutoff,
             )
             res_active_job = await session.execute(stmt_active_job)
             active_job = res_active_job.scalar_one_or_none()
-            if active_job and agent.last_seen_at and agent.last_seen_at >= cutoff_time:
+            if active_job and agent.last_seen_at and agent.last_seen_at >= active_cutoff:
                 continue
 
             agent.status = "offline"
+            agent.error_category = "DISCONNECTED_UNEXPECTEDLY"
+            agent.last_error = (
+                f"Agent stopped reporting heartbeats for over {effective_threshold}s. "
+                "The Docker container may have exited, crashed, or lost network connectivity."
+            )
+            agent.last_error_at = datetime.now(timezone.utc)
             logger.warning(
-                f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}). Marked offline."
+                f"Agent '{agent.name}' ({agent.id}) timed out (last seen: {agent.last_seen_at}, threshold: {effective_threshold}s). Marked offline."
             )
 
             # Broadcast real-time signal to Web App subscribers
@@ -372,6 +726,9 @@ class AgentService:
                     "agent_id": str(agent.id),
                     "status": "offline",
                     "reason": "heartbeat_timeout",
+                    "last_error": agent.last_error,
+                    "error_category": agent.error_category,
+                    "last_error_at": agent.last_error_at.isoformat(),
                     "last_seen_at": agent.last_seen_at.isoformat() if agent.last_seen_at else None,
                 },
             )

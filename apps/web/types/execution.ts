@@ -18,6 +18,7 @@ export interface ExecutionJobResponse {
   migration_plan_id: string;
   agent_id?: string | null;
   status: ExecutionStatus;
+  is_dry_run?: boolean;
   progress: number;
   total_rows: number;
   processed_rows: number;
@@ -32,6 +33,7 @@ export interface ExecutionJobResponse {
   ai_diagnosis?: AIDiagnosisPayload | null;
   created_at: string;
   updated_at: string;
+  target_tables_with_existing_data?: Array<{ table_name: string; existing_row_count: number }>;
 }
 
 export interface ExecutionProgressUpdate {

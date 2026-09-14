@@ -18,17 +18,25 @@ export const AgentStatusBanner: React.FC<AgentStatusBannerProps> = ({
   const [status, setStatus] = useState<string>(agent.status || 'offline');
   const [lastSeen, setLastSeen] = useState<string | null>(agent.last_seen_at || null);
   const [dataSources, setDataSources] = useState<DataSourceResponse[]>(agent.data_sources || []);
+  const [lastError, setLastError] = useState<string | null>(agent.last_error || null);
+  const [errorCategory, setErrorCategory] = useState<string | null>(agent.error_category || null);
+  const [lastErrorAt, setLastErrorAt] = useState<string | null>(agent.last_error_at || null);
 
   const stLower = status.toLowerCase();
   const isOnline = stLower === 'online';
   const isDegraded = stLower === 'degraded';
+  const isError = stLower === 'error';
   const isOffline = stLower === 'offline';
+  const hasFatalError = Boolean(lastError && (isError || isOffline));
 
   useEffect(() => {
     setStatus(agent.status || 'offline');
     setLastSeen(agent.last_seen_at || null);
     setDataSources(agent.data_sources || []);
-  }, [agent.status, agent.last_seen_at, agent.data_sources]);
+    setLastError(agent.last_error || null);
+    setErrorCategory(agent.error_category || null);
+    setLastErrorAt(agent.last_error_at || null);
+  }, [agent.status, agent.last_seen_at, agent.data_sources, agent.last_error, agent.error_category, agent.last_error_at]);
 
   // Subscribe to real-time WebSocket for live heartbeat ping & METADATA_PROFILED events
   useEffect(() => {
@@ -51,6 +59,15 @@ export const AgentStatusBanner: React.FC<AgentStatusBannerProps> = ({
             }
             if (eventData.data_sources && Array.isArray(eventData.data_sources)) {
               setDataSources(eventData.data_sources);
+            }
+            if (eventData.last_error !== undefined) {
+              setLastError(eventData.last_error);
+            }
+            if (eventData.error_category !== undefined) {
+              setErrorCategory(eventData.error_category);
+            }
+            if (eventData.last_error_at !== undefined) {
+              setLastErrorAt(eventData.last_error_at);
             }
             const isMetadataProfiled =
               eventData.event === 'METADATA_PROFILED' ||
@@ -79,6 +96,15 @@ export const AgentStatusBanner: React.FC<AgentStatusBannerProps> = ({
           }
           if (updated.data_sources) {
             setDataSources(updated.data_sources);
+          }
+          if (updated.last_error !== undefined) {
+            setLastError(updated.last_error);
+          }
+          if (updated.error_category !== undefined) {
+            setErrorCategory(updated.error_category);
+          }
+          if (updated.last_error_at !== undefined) {
+            setLastErrorAt(updated.last_error_at);
           }
         }
       } catch {
@@ -129,10 +155,12 @@ export const AgentStatusBanner: React.FC<AgentStatusBannerProps> = ({
                     ? 'bg-sky-400/15 text-sky-400 border-sky-400/40'
                     : isDegraded
                     ? 'bg-amber-400/15 text-amber-400 border-amber-500/40 animate-pulse'
+                    : isError || hasFatalError
+                    ? 'bg-rose-500/20 text-rose-400 border-rose-500/50 animate-pulse'
                     : 'bg-zinc-800 text-zinc-400 border-zinc-700'
                 }`}
               >
-                STATUS: {status.toUpperCase()}
+                STATUS: {(isError || hasFatalError ? 'ERROR' : status).toUpperCase()}
               </span>
             </div>
             <p className="text-xs text-zinc-400 font-mono mt-1">
@@ -157,6 +185,51 @@ export const AgentStatusBanner: React.FC<AgentStatusBannerProps> = ({
           )}
         </div>
       </div>
+
+      {/* Fatal Stopping Error Callout Box */}
+      {hasFatalError && (
+        <div className="p-5 rounded-none bg-rose-950/30 border border-rose-500/50 space-y-3 font-mono text-xs shadow-[0_0_25px_rgba(244,63,94,0.12)]">
+          <div className="flex items-center justify-between border-b border-rose-500/20 pb-2">
+            <div className="flex items-center gap-2 font-bold text-rose-300 uppercase tracking-wider text-sm">
+              <span className="w-2.5 h-2.5 bg-rose-500 animate-ping rounded-none" />
+              <span>🚨 DOCKER AGENT STOPPING ERROR DETECTED</span>
+            </div>
+            {errorCategory && (
+              <span className="px-2.5 py-0.5 text-[10px] font-mono font-bold uppercase bg-rose-500/20 text-rose-300 border border-rose-500/40">
+                {errorCategory.replace(/_/g, ' ')}
+              </span>
+            )}
+          </div>
+
+          <p className="text-zinc-200 text-xs leading-relaxed">
+            The Docker container process stopped running or disconnected due to the following fatal error:
+          </p>
+
+          <div className="p-3 bg-black/80 border border-rose-500/30 text-rose-300 text-xs font-mono whitespace-pre-wrap">
+            {lastError}
+          </div>
+
+          {lastErrorAt && (
+            <div className="text-[10px] text-zinc-400">
+              Recorded at: <span className="text-zinc-200">{new Date(lastErrorAt).toLocaleString()}</span>
+            </div>
+          )}
+
+          {/* Actionable Remediation Hint */}
+          <div className="p-3 bg-zinc-950 border border-zinc-800 text-[11px] text-rose-300/90 font-mono space-y-1">
+            <span className="font-bold text-white uppercase block">💡 How to Fix & Restart:</span>
+            <p className="text-zinc-300">
+              {errorCategory === 'AUTH_ERROR' || (lastError || '').toLowerCase().includes('token')
+                ? 'Your agent token was rejected or expired. Please verify that the AGENT_TOKEN in your docker run command matches your registered agent token, or re-run with the updated command from the dashboard.'
+                : errorCategory === 'CONFIG_ERROR' || (lastError || '').toLowerCase().includes('destination')
+                ? 'No valid destination database was found. Ensure your docker run command includes the required -e DEST_DB_URL=... parameter.'
+                : errorCategory === 'DISCONNECTED_UNEXPECTEDLY'
+                ? 'The container stopped reporting heartbeats. It may have exited cleanly, crashed, or been stopped by Docker. Run "docker start <container_name>" to restart it.'
+                : 'Check the error message above, resolve the issue, and restart your Docker container using the command provided in the dashboard.'}
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Warning Callout Box for DEGRADED Status or Unfilled Credential Placeholders */}
       {(isDegraded || failingSources.length > 0) && (

@@ -88,14 +88,22 @@ export default function ExecutionPage() {
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => fetchExecutions()}
-            className="py-3 px-6 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/30 transition-colors shadow-lg flex items-center gap-2"
-          >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span>Refresh Jobs</span>
-          </button>
+          <div className="flex items-center gap-3">
+            <Link
+              href="/profiling"
+              className="py-3 px-5 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-mono font-bold uppercase tracking-wider transition-colors shadow-lg flex items-center gap-2"
+            >
+              <span>+ Create New Migration</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => fetchExecutions()}
+              className="py-3 px-5 rounded-none bg-zinc-900 hover:bg-zinc-800 text-sky-400 text-xs font-mono font-bold uppercase tracking-wider border border-sky-400/30 transition-colors shadow-lg flex items-center gap-2"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>Refresh Jobs</span>
+            </button>
+          </div>
         </div>
 
         {/* Global Execution Metrics Overview */}

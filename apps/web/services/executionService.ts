@@ -3,10 +3,16 @@ import { ExecutionJobResponse } from '../types/execution';
 
 export const executionService = {
   /**
-   * Trigger execution of an approved migration plan on the assigned Docker agent
+   * Trigger execution of an approved migration plan on the assigned Docker agent (supports dry run)
    */
-  async startPlanExecution(planId: string): Promise<ExecutionJobResponse> {
-    const response = await apiClient.post<ExecutionJobResponse>(`/plans/${planId}/execute`);
+  async startPlanExecution(
+    planId: string,
+    options?: { chunk_size?: number; is_dry_run?: boolean }
+  ): Promise<ExecutionJobResponse> {
+    const response = await apiClient.post<ExecutionJobResponse>(
+      `/plans/${planId}/execute`,
+      options || {}
+    );
     return response.data;
   },
 

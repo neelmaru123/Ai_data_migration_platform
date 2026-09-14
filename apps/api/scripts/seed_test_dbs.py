@@ -11,8 +11,34 @@ from datetime import datetime, timezone, timedelta
 from sqlalchemy import create_engine, text
 
 
-ECOMMERCE_DB_URL = os.getenv("ECOMMERCE_DB_URL", "postgresql://postgres:postgres_password@localhost:5435/ecommerce_db")
-CRM_DB_URL = os.getenv("CRM_DB_URL", "postgresql://postgres:postgres_password@localhost:5436/crm_db")
+ECOMMERCE_DB_URL = "postgresql://postgres:postgres_password@127.0.0.1:5435/ecommerce_db"
+CRM_DB_URL = "postgresql://postgres:postgres_password@127.0.0.1:5436/crm_db"
+MYSQL_DB_URL = "mysql+pymysql://root:mysql_password@127.0.0.1:3307/inventory_db"
+MONGO_DB_URL = "mongodb://127.0.0.1:27017"
+
+
+def ensure_postgres_db_exists(port: int, db_name: str):
+    admin_url = f"postgresql://postgres:postgres_password@127.0.0.1:{port}/postgres"
+    try:
+        engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3})
+        with engine.connect() as conn:
+            res = conn.execute(text(f"SELECT 1 FROM pg_database WHERE datname='{db_name}'"))
+            if not res.scalar():
+                conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+                print(f" [OK] Created PostgreSQL database '{db_name}' on port {port}.")
+    except Exception as e:
+        print(f" [Notice] PostgreSQL admin check on port {port}: {e}")
+
+
+def ensure_mysql_db_exists(db_name: str):
+    admin_url = "mysql+pymysql://root:mysql_password@127.0.0.1:3307/"
+    try:
+        engine = create_engine(admin_url, isolation_level="AUTOCOMMIT", connect_args={"connect_timeout": 3})
+        with engine.connect() as conn:
+            conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
+            print(f" [OK] Created/verified MySQL database '{db_name}' on port 3307.")
+    except Exception as e:
+        print(f" [Notice] MySQL admin check: {e}")
 
 
 def wait_for_db(db_url: str, db_name: str, max_retries: int = 15):
@@ -387,6 +413,10 @@ def main():
     print("     MySQL 1:      inventory_db (Port 3307) - 2 Tables, 100 Rows")
     print("     MongoDB 1:    analytics_db (Port 27017)- 2 Collections, 100 Docs")
     print("================================================================================")
+
+    ensure_postgres_db_exists(5435, "ecommerce_db")
+    ensure_postgres_db_exists(5436, "crm_db")
+    ensure_mysql_db_exists("inventory_db")
 
     eng_ecommerce = wait_for_db(ECOMMERCE_DB_URL, "ecommerce_db (Port 5435)")
     setup_ecommerce_db(eng_ecommerce)

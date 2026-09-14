@@ -162,7 +162,9 @@ class MigrationPlanState(TypedDict):
 - **Functionality**: When a user's proposed plan or edit is technically impossible and cannot be auto-corrected after 3 attempts, this node constructs a human-readable diagnostic explanation detailing **why the database cannot be migrated with those settings**.
 
 #### **Node 9: `finalize_and_persist_node`**
-- **Role**: Saves the verified, human-approved `MigrationPlan` ORM entity to PostgreSQL DB, sets `status = 'completed'` or `'approved'`, and broadcasts WebSocket event `PLAN_GENERATED`.
+- **Role**: **Final Plan Persistence & Version Snapshotting**.
+- **Functionality**: Saves the verified, human-approved `MigrationPlan` ORM entity to PostgreSQL DB, sets `status = 'completed'` (or `'approved'`), initializes `plan.current_version = 1`, and automatically persists the initial immutable `MigrationPlanVersion(version_number=1, comment="Initial AI generated plan blueprint", plan_data=...)` snapshot. Emits WebSocket event `PLAN_GENERATED`.
+- **Iterative Refinements & Rollbacks**: Subsequent user refinements (via Node 6) or approved manual edits (via Node 7) automatically increment `version_number` and archive new version snapshots, enabling full audit history and zero-downtime rollbacks via `POST /api/v1/plans/{id}/versions/{version_number}/restore`.
 
 ---
 
@@ -173,3 +175,4 @@ class MigrationPlanState(TypedDict):
 3. **No Code Sprawling**: Complex loop logic, retries, and human pause points are declared cleanly using LangGraph's `add_node()`, `add_edge()`, and `add_conditional_edges()`.
 4. **Stateful Persistence**: LangGraph's checkpointer persists state across separate HTTP API calls, enabling seamless Human-in-the-Loop workflows.
 5. **Row-Level Concurrency Locks**: Concurrent plan refinements are protected by PostgreSQL `with_for_update()` row-level locks on `MigrationPlan` entities in `migration_plans_services.py` to prevent race conditions during iterative state transitions.
+6. **Immutable Plan Version Snapshots**: State transitions that alter the plan AST are persisted not only in the ephemeral LangGraph runtime checkpointer, but also as durable, relational `MigrationPlanVersion` rows (`migration_plan_versions` table). This provides users with auditability, read-only preview of previous plan versions, and the ability to roll back the active blueprint at any time.

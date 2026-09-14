@@ -20,6 +20,8 @@ from app.modules.execution.execution_schemas import (
     ExecutionStartRequest,
 )
 from app.modules.migration_plans.migration_plans_models import MigrationPlan
+from app.modules.sources.sources_models import DataSource
+from app.modules.metadata.metadata_services import MetadataService
 from app.core.logging import logger
 from app.core.websocket_manager import manager
 
@@ -28,8 +30,79 @@ class ExecutionService:
     """Business logic for Migration Execution Jobs lifecycle."""
 
     @staticmethod
+    async def check_target_tables_existing_data(
+        session: AsyncSession, plan: MigrationPlan
+    ) -> list[dict]:
+        """
+        Preflight check querying the target data source via the agent's most recent
+        metadata snapshot (without live DB connection from the API) to check if any of
+        the plan's target tables already contain rows.
+        """
+        if not plan.agent_id or not plan.plan_data:
+            return []
+
+        target_table_names: list[str] = []
+        if isinstance(plan.plan_data, dict):
+            for tm in plan.plan_data.get("table_mappings", []):
+                tbl = tm.get("target_table_name")
+                if tbl and tbl not in target_table_names:
+                    target_table_names.append(tbl)
+
+        if not target_table_names:
+            return []
+
+        # Find target DataSource(s) for the agent
+        target_config = plan.target_config if isinstance(plan.target_config, dict) else {}
+        target_identifier = target_config.get("identifier")
+
+        stmt_ds = select(DataSource).where(
+            DataSource.agent_id == plan.agent_id,
+            or_(
+                DataSource.role.in_(["target", "both"]),
+                DataSource.identifier == target_identifier if target_identifier else False,
+            ),
+        )
+        res_ds = await session.execute(stmt_ds)
+        target_data_sources = list(res_ds.scalars().all())
+
+        # If none marked target/both, fallback to matching target_db_type or checking all agent data sources
+        if not target_data_sources:
+            target_db_type = (target_config.get("database_type") or "").lower()
+            stmt_all = select(DataSource).where(DataSource.agent_id == plan.agent_id)
+            res_all = await session.execute(stmt_all)
+            all_ds = list(res_all.scalars().all())
+            for ds in all_ds:
+                if target_db_type and ds.type.lower() == target_db_type:
+                    target_data_sources.append(ds)
+
+        target_tables_with_existing_data: list[dict] = []
+        seen_tables = set()
+        target_tables_norm = {t.lower(): t for t in target_table_names}
+
+        for ds in target_data_sources:
+            snapshot = await MetadataService.get_latest_snapshot_for_source(session, ds.id)
+            if not snapshot or not snapshot.schemas:
+                continue
+            for schema in snapshot.schemas:
+                for table in (schema.tables or []):
+                    table_norm = table.table_name.lower()
+                    if table_norm in target_tables_norm and table.row_count > 0:
+                        original_name = target_tables_norm[table_norm]
+                        if original_name not in seen_tables:
+                            seen_tables.add(original_name)
+                            target_tables_with_existing_data.append({
+                                "table_name": original_name,
+                                "existing_row_count": table.row_count,
+                            })
+
+        return target_tables_with_existing_data
+
+    @staticmethod
     async def create_execution_job(
-        session: AsyncSession, user_id: uuid.UUID, plan_id: uuid.UUID
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        plan_id: uuid.UUID,
+        is_dry_run: bool = False,
     ) -> MigrationJob:
         # Check plan existence and ownership
         stmt_plan = select(MigrationPlan).where(
@@ -73,16 +146,34 @@ class ExecutionService:
             res_agent = await session.execute(stmt_agent)
             agent = res_agent.scalar_one_or_none()
 
-            now = datetime.now(timezone.utc)
-            cutoff_utc = now - timedelta(seconds=60)
-            cutoff_naive = datetime.now() - timedelta(seconds=60)
+            now_utc = datetime.now(timezone.utc)
+
+            # Adaptive cutoff based on agent power/heartbeat mode:
+            # Active mode (heartbeat every 20s): cutoff is 60s
+            # Standby mode (idle 5+ min, heartbeat every 300s): cutoff is 360s
+            is_standby = False
+            if agent and agent.idle_since is not None:
+                idle_since_aware = (
+                    agent.idle_since
+                    if agent.idle_since.tzinfo
+                    else agent.idle_since.replace(tzinfo=timezone.utc)
+                )
+                if (now_utc - idle_since_aware).total_seconds() >= 300:
+                    is_standby = True
+
+            effective_threshold_sec = 360 if is_standby else 60
+            cutoff_utc = now_utc - timedelta(seconds=effective_threshold_sec)
+            cutoff_naive_utc = now_utc.replace(tzinfo=None) - timedelta(seconds=effective_threshold_sec)
+            cutoff_naive_local = datetime.now() - timedelta(seconds=effective_threshold_sec)
 
             is_offline = False
-            if not agent or agent.status == "offline" or not agent.last_seen_at:
+            if not agent or not agent.last_seen_at:
+                is_offline = True
+            elif agent.status == "error":
                 is_offline = True
             elif agent.last_seen_at.tzinfo is not None and agent.last_seen_at < cutoff_utc:
                 is_offline = True
-            elif agent.last_seen_at.tzinfo is None and agent.last_seen_at < cutoff_naive:
+            elif agent.last_seen_at.tzinfo is None and agent.last_seen_at < cutoff_naive_utc and agent.last_seen_at < cutoff_naive_local:
                 is_offline = True
 
             if is_offline:
@@ -95,10 +186,32 @@ class ExecutionService:
                     ),
                 )
 
+        # Reset idle_since: agent is now active with a new job
+        if plan.agent_id:
+            stmt_reset_idle = select(Agent).where(Agent.id == plan.agent_id)
+            res_reset_idle = await session.execute(stmt_reset_idle)
+            agent_for_reset = res_reset_idle.scalar_one_or_none()
+            if agent_for_reset:
+                agent_for_reset.idle_since = None
+                if agent_for_reset.status == "offline":
+                    agent_for_reset.status = "online"
+                    agent_for_reset.last_error = None
+                    agent_for_reset.error_category = None
+
+        # Check if target tables already contain rows (preflight check via snapshot)
+        existing_data_warnings = await ExecutionService.check_target_tables_existing_data(
+            session=session, plan=plan
+        )
+        if existing_data_warnings:
+            logger.warning(
+                f"Preflight alert for plan '{plan_id}': Target tables already contain rows: {existing_data_warnings}"
+            )
+
         job = MigrationJob(
             migration_plan_id=plan_id,
             agent_id=plan.agent_id,
             status="queued",
+            is_dry_run=is_dry_run,
             total_rows=0,
             processed_rows=0,
             successful_rows=0,
@@ -109,6 +222,9 @@ class ExecutionService:
         session.add(job)
         await session.commit()
         await session.refresh(job)
+
+        # Attach preflight warnings for response serialization
+        setattr(job, "target_tables_with_existing_data", existing_data_warnings)
 
         logger.info(
             f"Created execution job '{job.id}' for plan '{plan_id}' (Agent ID: {plan.agent_id})."
@@ -285,7 +401,7 @@ class ExecutionService:
         now = datetime.now(timezone.utc)
         if update.status == "running" and job.started_at is None:
             job.started_at = now
-        elif update.status in ["completed", "failed"]:
+        elif update.status in ["completed", "failed", "dry_run_completed"]:
             job.completed_at = now
 
         job.status = update.status
@@ -302,7 +418,7 @@ class ExecutionService:
         if update.error_message:
             job.error_message = update.error_message
 
-        # Refresh agent last_seen_at and status to prevent heartbeat starvation during ETL execution
+        # Refresh agent last_seen_at, status, and idle_since to prevent heartbeat starvation during ETL execution
         if job.agent_id:
             stmt_agent = select(Agent).where(Agent.id == job.agent_id)
             res_agent = await session.execute(stmt_agent)
@@ -311,8 +427,16 @@ class ExecutionService:
                 agent_obj.last_seen_at = now
                 if update.status == "running":
                     agent_obj.status = "busy"
-                elif update.status in ["completed", "failed"]:
+                    agent_obj.idle_since = None   # Actively running — clear idle marker
+                elif update.status in ["completed", "dry_run_completed"]:
                     agent_obj.status = "online"
+                    agent_obj.idle_since = now    # Job done — start idle tracking for Option C/A
+                elif update.status == "failed":
+                    agent_obj.status = "error"
+                    agent_obj.last_error = f"Migration job '{job.id}' failed: {update.error_message or 'Fatal execution failure.'}"
+                    agent_obj.error_category = "JOB_EXECUTION_FAILURE"
+                    agent_obj.last_error_at = now
+                    agent_obj.idle_since = now
 
         await session.commit()
         await session.refresh(job)

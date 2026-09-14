@@ -11,11 +11,12 @@ from pydantic import BaseModel, ConfigDict, Field
 class ExecutionStartRequest(BaseModel):
     """Request payload to initiate execution for an approved MigrationPlan."""
     chunk_size: Optional[int] = Field(default=50000, ge=1000, le=500000, description="Rows per ETL chunk batch")
+    is_dry_run: bool = Field(default=False, description="Simulate migration without executing DDL or writing to target DB")
 
 
 class ExecutionProgressUpdate(BaseModel):
     """Progress metrics payload sent periodically by Docker Agent."""
-    status: str = Field(..., examples=["running", "completed", "failed", "ddl_executing"])
+    status: str = Field(..., examples=["running", "completed", "failed", "ddl_executing", "dry_run_completed"])
     progress: float = Field(default=0.0, ge=0.0, le=100.0)
     total_rows: int = Field(default=0, ge=0)
     processed_rows: int = Field(default=0, ge=0)
@@ -35,6 +36,7 @@ class ExecutionJobResponse(BaseModel):
     migration_plan_id: UUID
     agent_id: Optional[UUID] = None
     status: str
+    is_dry_run: bool = False
     progress: float
     total_rows: int
     processed_rows: int
@@ -48,6 +50,7 @@ class ExecutionJobResponse(BaseModel):
     ai_diagnosis: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
+    target_tables_with_existing_data: list[dict] = Field(default_factory=list)
 
 
 class AgentTaskItemResponse(BaseModel):
@@ -55,4 +58,5 @@ class AgentTaskItemResponse(BaseModel):
     job_id: UUID
     migration_plan_id: UUID
     status: str
+    is_dry_run: bool = False
     created_at: datetime

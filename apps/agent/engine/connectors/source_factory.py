@@ -12,6 +12,10 @@ from ..db import _get_engine, _quote_identifier
 logger = logging.getLogger("docker-agent-execution")
 
 
+class SourceReadError(Exception):
+    """Raised when a source chunk genuinely cannot be read."""
+
+
 class SourceConnectorFactory:
     """Factory creating chunked stream readers for PostgreSQL, MySQL, MongoDB, CSV, and Excel with Keyset Pagination support."""
 
@@ -84,7 +88,7 @@ class SourceConnectorFactory:
                 return df, has_more, next_pk
             except Exception as exc:
                 logger.error(f"Error reading SQL source chunk for table '{table_or_file_name}' (Offset: {offset}): {exc}")
-                return pl.DataFrame(), False, last_pk_val
+                raise SourceReadError(f"Failed reading SQL source table '{table_or_file_name}' at offset {offset}: {exc}") from exc
 
         # 2. MongoDB Collection
         elif engine_type == "mongodb":
@@ -141,7 +145,7 @@ class SourceConnectorFactory:
                 return df, has_more, next_pk
             except Exception as exc:
                 logger.error(f"Error reading MongoDB collection '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False, last_pk_val
+                raise SourceReadError(f"Failed reading MongoDB collection '{table_or_file_name}': {exc}") from exc
 
         # 3. CSV File
         elif engine_type == "csv" or table_or_file_name.endswith(".csv"):
@@ -153,7 +157,7 @@ class SourceConnectorFactory:
                 return pl.DataFrame(), False, None
             except Exception as exc:
                 logger.error(f"Error reading CSV file '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False, None
+                raise SourceReadError(f"Failed reading CSV file '{table_or_file_name}': {exc}") from exc
 
         # 4. Excel File
         elif engine_type in ["excel", "xlsx"] or table_or_file_name.endswith(".xlsx"):
@@ -166,7 +170,7 @@ class SourceConnectorFactory:
                 return pl.DataFrame(), False, None
             except Exception as exc:
                 logger.error(f"Error reading Excel file '{table_or_file_name}': {exc}")
-                return pl.DataFrame(), False, None
+                raise SourceReadError(f"Failed reading Excel file '{table_or_file_name}': {exc}") from exc
 
         else:
             logger.warning(f"Unsupported engine type '{engine_type}'. Returning empty DataFrame.")

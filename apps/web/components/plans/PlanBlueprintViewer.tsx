@@ -15,6 +15,13 @@ import planService from '../../services/planService';
 import executionService from '../../services/executionService';
 import PlanDiagramViewer from './PlanDiagramViewer';
 import JobExecutionBanner from './JobExecutionBanner';
+import PlanPlainLanguageSummary from './PlanPlainLanguageSummary';
+import {
+  PlanReadinessSignals,
+  PlanReadinessRollupBadge,
+  TableReadinessBadge,
+  ColumnConfidenceBadge,
+} from './PlanReadinessSignals';
 import toast from 'react-hot-toast';
 
 interface PlanBlueprintViewerProps {
@@ -96,6 +103,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   // Agent Execution State
   const [activeJob, setActiveJob] = useState<ExecutionJobResponse | null>(null);
   const [isApproving, setIsApproving] = useState<boolean>(false);
+  const [isDryRunning, setIsDryRunning] = useState<boolean>(false);
 
   // Refinement Prompt State
   const [refinementPrompt, setRefinementPrompt] = useState<string>('');
@@ -273,6 +281,16 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       const job = await executionService.startPlanExecution(plan.id);
       setActiveJob(job);
 
+      if (job.target_tables_with_existing_data && job.target_tables_with_existing_data.length > 0) {
+        const tableList = job.target_tables_with_existing_data
+          .map((t) => `${t.table_name} (${t.existing_row_count} rows)`)
+          .join(', ');
+        toast(`Notice: Destination table(s) contain existing data: ${tableList}. New rows will be appended.`, {
+          icon: '⚠️',
+          duration: 7000,
+        });
+      }
+
       toast.success('Plan approved! Data migration job queued on Docker Agent.');
       if (onPlanUpdated) onPlanUpdated(approved);
     } catch (err: any) {
@@ -296,6 +314,55 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       }
     } finally {
       setIsApproving(false);
+    }
+  };
+
+  // Handle Dry Run Simulation Dispatch
+  const handleDryRun = async () => {
+    if (isDryRunning || isApproving) return;
+
+    if (!plan.is_valid) {
+      toast.error('Cannot run dry run simulation on invalid plan! Fix schema feasibility errors first.');
+      scrollToDiagnostics();
+      return;
+    }
+
+    setIsDryRunning(true);
+    try {
+      // 1. Approve Plan if not approved yet
+      let currentPlan = plan;
+      if (plan.status !== 'approved' && plan.status !== 'completed') {
+        currentPlan = await planService.approvePlan(plan.id);
+        setPlan(currentPlan);
+      }
+
+      // 2. Trigger Dry Run Execution Job on Docker Agent
+      const job = await executionService.startPlanExecution(plan.id, { is_dry_run: true });
+      setActiveJob(job);
+
+      toast.success('Dry run simulation queued! No data will be written to target database.');
+      if (onPlanUpdated) onPlanUpdated(currentPlan);
+    } catch (err: any) {
+      const msg = err.response?.data?.detail || err.message || 'Failed to execute dry run.';
+      if (err.response?.status === 409) {
+        toast.error(`Job In Progress: ${msg}`);
+        executionService
+          .listUserExecutions()
+          .then((jobs) => {
+            const match = jobs.find(
+              (j) => j.migration_plan_id === plan.id && ['queued', 'preparing', 'running'].includes(j.status)
+            );
+            if (match) setActiveJob(match);
+          })
+          .catch(() => {});
+      } else if (err.response?.status === 503) {
+        toast.error(`Agent Offline Warning: ${msg}`, { duration: 8000 });
+      } else {
+        toast.error(`Dry Run Error: ${msg}`);
+        scrollToDiagnostics();
+      }
+    } finally {
+      setIsDryRunning(false);
     }
   };
 
@@ -330,10 +397,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           </div>
 
           <div className="flex items-center gap-3">
-            <div className="p-3 rounded-none bg-zinc-950 border border-sky-400/30 text-center font-mono">
-              <div className="text-[10px] text-zinc-500 uppercase font-bold">AI CONFIDENCE</div>
-              <div className="text-lg font-bold text-sky-400">{confidencePercentage}%</div>
-            </div>
+            <PlanReadinessRollupBadge ast={ast} planConfidenceScore={plan.confidence_score} />
             <button
               type="button"
               onClick={() => setShowJsonModal(true)}
@@ -342,6 +406,11 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               View JSON AST
             </button>
           </div>
+        </div>
+
+        {/* 4 Separate Readiness Signals (Schema, Type, Relationship, Data Conflict Risk) */}
+        <div className="pt-2 pb-2 border-b border-zinc-900">
+          <PlanReadinessSignals ast={ast} planConfidenceScore={plan.confidence_score} />
         </div>
 
         {/* Controls Bar: View Mode Switcher + Version Selector + Edit Toggle */}
@@ -630,6 +699,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               </div>
             </div>
           )}
+          {ast && <PlanPlainLanguageSummary ast={ast} />}
 
           {/* Table Transformation Matrix */}
           <div className="space-y-4">
@@ -705,7 +775,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                     </div>
 
                     <div className="flex items-center gap-4 text-xs text-zinc-400 w-full sm:w-auto justify-between sm:justify-end" onClick={() => setExpandedTable(isExpanded ? null : tm.target_table_name)}>
-                      <span>Confidence: <strong className="text-sky-400">{Math.round(tm.confidence_score * 100)}%</strong></span>
+                      <TableReadinessBadge tm={tm} />
                       <span className="text-sm font-bold text-white">{isExpanded ? '▲' : '▼'}</span>
                     </div>
                   </div>
@@ -788,6 +858,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                               <th className="p-3">Target Column</th>
                               <th className="p-3">Target Data Type</th>
                               <th className="p-3">Transformation Type</th>
+                              <th className="p-3">Mapping Confidence</th>
                               <th className="p-3">Source Column Ref (Read-Only)</th>
                               <th className="p-3">Explanation & Formula</th>
                             </tr>
@@ -856,6 +927,11 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
                                       {cm.transformation_type}
                                     </span>
                                   )}
+                                </td>
+
+                                {/* Mapping Confidence */}
+                                <td className="p-3">
+                                  <ColumnConfidenceBadge col={cm} />
                                 </td>
 
                                 {/* Source Columns (Read Only) */}
@@ -950,18 +1026,31 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           </p>
         </div>
 
-        <button
-          type="button"
-          onClick={handleApproveAndExecute}
-          disabled={isApproving || isApproved}
-          className={`py-3.5 px-10 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
-            isApproved
-              ? 'bg-emerald-500 text-black cursor-default'
-              : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
-          } disabled:opacity-50`}
-        >
-          {isApproved ? 'PLAN APPROVED ✓' : isApproving ? 'Executing on Agent...' : 'APPROVE & EXECUTE MIGRATION'}
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Dry Run Button */}
+          <button
+            type="button"
+            onClick={handleDryRun}
+            disabled={isDryRunning || isApproving}
+            className="py-3.5 px-6 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all border border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 shadow-lg disabled:opacity-50"
+          >
+            {isDryRunning ? 'Simulating Dry Run...' : '⚡ Run Dry Run (Simulation)'}
+          </button>
+
+          {/* Real Approve & Execute Button */}
+          <button
+            type="button"
+            onClick={handleApproveAndExecute}
+            disabled={isApproving || isApproved || isDryRunning}
+            className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
+              isApproved
+                ? 'bg-emerald-500 text-black cursor-default'
+                : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
+            } disabled:opacity-50`}
+          >
+            {isApproved ? 'PLAN APPROVED ✓' : isApproving ? 'Executing on Agent...' : 'APPROVE & EXECUTE MIGRATION'}
+          </button>
+        </div>
       </div>
 
       {/* JSON AST Modal */}

@@ -24,6 +24,11 @@ export default function AgentCreatePage() {
   // Results from Step 2 API submission
   const [createdAgent, setCreatedAgent] = useState<AgentDetailResponse | null>(null);
   const [dockerCmdData, setDockerCmdData] = useState<AgentDockerCommandResponse | null>(null);
+  const [submittedSources, setSubmittedSources] = useState<InitialDataSourceCreate[]>([]);
+  const [submittedDestination, setSubmittedDestination] = useState<InitialDataSourceCreate | null>(null);
+  const [connectionDetailsByIdentifier, setConnectionDetailsByIdentifier] = useState<
+    Record<string, { host: string; port: string; username: string; database: string; ssl: boolean }>
+  >({});
 
   // Compute number of source databases needed
   const getSourceCount = (): number => {
@@ -38,21 +43,27 @@ export default function AgentCreatePage() {
     agentIdentifier: string;
     sources: InitialDataSourceCreate[];
     destination: InitialDataSourceCreate;
+    connectionDetailsByIdentifier: Record<string, { host: string; port: string; username: string; database: string; ssl: boolean }>;
   }) => {
     setIsSubmitting(true);
     try {
       // 1. Prepare payload with data sources array
+      // NOTE: connectionDetailsByIdentifier is deliberately NOT included in this
+      // payload -- it is stored in local component state below and only ever
+      // used in the browser to build the displayed docker command. It is never
+      // sent to the backend API.
       const allDataSources: InitialDataSourceCreate[] = [
         ...formData.sources.map((src) => ({ ...src, role: 'source' as const })),
         { ...formData.destination, role: 'target' as const },
       ];
-
       const payload = {
         name: formData.agentName,
         agent_identifier: formData.agentIdentifier,
         data_sources: allDataSources,
       };
-
+      setSubmittedSources(formData.sources);
+      setSubmittedDestination(formData.destination);
+      setConnectionDetailsByIdentifier(formData.connectionDetailsByIdentifier);
       // 2. Call agent creation API endpoint (returns agent detail + docker_command)
       const agentRes = await agentService.createAgent(payload);
       setCreatedAgent(agentRes);
@@ -177,6 +188,9 @@ export default function AgentCreatePage() {
             agent={createdAgent}
             dockerCmdData={dockerCmdData}
             onReset={handleReset}
+            sources={submittedSources}
+            destination={submittedDestination}
+            connectionDetailsByIdentifier={connectionDetailsByIdentifier}
           />
         )}
       </main>
