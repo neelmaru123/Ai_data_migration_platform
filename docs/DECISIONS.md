@@ -1244,3 +1244,31 @@ Implemented an end-to-end transparent feedback architecture for natural language
 ### 4. Trade-offs & Future Considerations
 - **Historical Version Backward Compatibility**: In `PlanBlueprintViewer.tsx`, added a fallback synthesizer so that plans generated prior to this schema update also display meaningful explanation cards when users inspect older version snapshots.
 
+---
+
+## [2026-09-14] - Multi-Source Lineage Tracking & Auto-Population of `_source_origin`
+
+### 1. Decision Summary
+Implemented automatic data lineage stamping in the Docker Agent execution engine (`ASTTransformer` and `orchestrator.py`). When the AI plan merges multiple source tables into a single destination table with a `_source_origin` tracking column, the transformer automatically injects the canonical source origin identifier (`f"{src_ident}.{src_table}"`, e.g., `'src_db_1.customers'` and `'src_db_2.legacy_customers'`), preventing `psycopg2.errors.NotNullViolation` during bulk loads.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - The AI planning engine instructions require merged tables to declare a `_source_origin VARCHAR(50) NOT NULL` column for auditability and lineage tracking.
+  - However, `ASTTransformer.transform_chunk()` lacked context on the active source origin and defaulted unmapped or `new_column_added` columns without constant values to `None` (`SQL NULL`).
+  - Target relational databases (PostgreSQL) strictly rejected every row (`null value in column "_source_origin" violates not-null constraint`), immediately triggering the pipeline's >50% error abort safety mechanism.
+- **Chosen Solution**:
+  1. **Source Origin Context Propagation**: In `orchestrator.py`, extracted `src_origin_tag = f"{src_ident}.{src_table}" if src_ident else str(src_table)` and passed it to `ASTTransformer.transform_chunk(..., source_origin=src_origin_tag)`.
+  2. **Dedicated Transformer Column Handler**: In `ASTTransformer`, added explicit handling for `_source_origin` across all transformation types and fallback expressions, ensuring `val = source_origin or const_val or "unknown"` is populated as a non-null literal.
+  3. **DuckDB Staging & Streaming Preservation**: Multi-source tables staged in DuckDB carry this lineage tag through deduplication and batch chunking without loss.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relaxing Database DDL to Nullable (`DROP NOT NULL`)**:
+  - *Rejected*: Making `_source_origin` nullable in DDL bypasses the error but defeats the entire purpose of data lineage tracking, leaving destination rows without traceable source attribution.
+- **Alternative B: Relying on LLM to Hardcode Constant Values in Column Mappings**:
+  - *Rejected*: The LLM generates one column mapping list for the target table, but a merged target table ingests rows from *multiple* different sources dynamically at runtime. Only the execution orchestrator knows which source is currently being streamed.
+
+### 4. Trade-offs & Future Considerations
+- **Lineage Granularity**: `src_ident.table_name` provides clear, portable lineage without exposing raw database connection strings or credentials.
+- **Resilience**: Even if a user's custom plan uses non-standard transformation types for `_source_origin`, the transformer intercepts the target column name and guarantees a valid string literal.
+
+

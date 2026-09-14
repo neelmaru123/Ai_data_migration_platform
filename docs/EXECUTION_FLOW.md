@@ -414,3 +414,36 @@
   - Added Target Database Engine dropdown selector.
 - **[NEW]**: [`apps/api/tests/unit/test_mongo_relational_uuid_fk_and_types.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_mongo_relational_uuid_fk_and_types.py)
   - Unit tests verifying UUID matching across PK/FK, BSON serialization (`Decimal128`, `ISODate`, `_id`), and validator synchronization.
+
+---
+
+# Execution Flow — Multi-Source Lineage Stamping & DuckDB Deduplication
+
+## 1. Entry Point
+- **File**: [`apps/agent/engine/orchestrator.py:L230`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py#L230)
+- **Trigger**: Execution loop processing a multi-source target table (e.g., `customers` merged from `src_db_1.customers` and `src_db_2.legacy_customers`).
+
+## 2. Step-by-Step Execution Sequence
+1. **Source Identification**:
+   - `orchestrator.py` extracts raw chunks from each configured source table.
+   - Formats lineage identifier: `src_origin_tag = f"{src_ident}.{src_table}" if src_ident else str(src_table)`.
+2. **In-Memory Transformation & Lineage Stamping**:
+   - Calls `ASTTransformer.transform_chunk(df_raw, column_mappings, ..., source_origin=src_origin_tag)`.
+   - `ASTTransformer` intercepts `target_col == "_source_origin"` and immediately assigns `val = source_origin or const_val or "unknown"` as a non-null literal.
+3. **DuckDB Staging & Cross-Source Deduplication**:
+   - `TableMerger.append_to_duckdb_staging()` writes `df_trans` with `_source_origin` into DuckDB temp table.
+   - Preserves source origin per row across heterogeneous schemas and schemas variations.
+   - `TableMerger.stream_deduplicated_chunks()` runs SQL window functions (`ROW_NUMBER() OVER (PARTITION BY email ORDER BY _seq_id ASC)`) and streams bounded batches (50k rows).
+4. **Relational Database Bulk Sink**:
+   - `TargetWriterFactory.bulk_load()` executes `INSERT INTO ... ON CONFLICT DO NOTHING`.
+   - Since `_source_origin` contains canonical strings (`'src_db_1.customers'`, `'src_db_2.legacy_customers'`), PostgreSQL's `NOT NULL` constraint is satisfied cleanly.
+
+## 3. Impact & Delta Analysis (AI Modifications)
+- **[MODIFIED]**: [`apps/agent/engine/transformers/ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/transformers/ast_transformer.py)
+  - Added `source_origin: Optional[str] = None` parameter to `transform_chunk()`.
+  - Added interceptor for `target_col == "_source_origin"` in `transform_chunk` and `_unresolved_expr`.
+- **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py)
+  - Passes `source_origin=src_origin_tag` to `ASTTransformer.transform_chunk()`.
+- **[NEW]**: [`apps/agent/tests/test_ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_ast_transformer.py)
+  - Unit tests verifying `_source_origin` population and fallback values.
+

@@ -118,6 +118,7 @@ class ASTTransformer:
         primary_key_strategy: Optional[str] = None,
         retry_seed_prefix: str = "default_seed",
         row_offset: int = 0,
+        source_origin: Optional[str] = None,
     ) -> Tuple[pl.DataFrame, int]:
         if df.is_empty():
             return df, 0
@@ -139,41 +140,38 @@ class ASTTransformer:
             source_cols_list: List[Dict],
             target_name: str,
         ) -> Optional[str]:
-            # 1. Exact match from AST source_columns (current source identifier's row)
-            if source_cols_list:
-                for sc in source_cols_list:
-                    c = sc.get("column_name") or sc.get("column")
-                    if c and c in df.columns:
-                        return c
+            # Priority 1: First configured source column actually present in df
+            for sc in source_cols_list:
+                cname = sc.get("column_name")
+                if cname and cname in df.columns:
+                    return cname
 
-            # 2. Target name exists directly in df
+            # Priority 2: Direct target column name match in df
             if target_name in df.columns:
                 return target_name
 
-            # 3. Any AST source_columns without table prefix
-            if source_cols_list:
-                for sc in source_cols_list:
-                    c = sc.get("column_name") or sc.get("column") or ""
-                    bare = c.split(".")[-1] if "." in c else c
-                    if bare and bare in df.columns:
-                        return bare
+            # Priority 3: Strip table prefix from configured column names
+            for sc in source_cols_list:
+                cname = sc.get("column_name", "")
+                stripped = cname.split(".")[-1]
+                if stripped in df.columns:
+                    return stripped
 
-            # 4. Synonym-group fuzzy match
-            group = _synonym_group_for(target_name)
-            if group:
+            # Priority 4: Synonym fuzzy match
+            synonyms = _synonym_group_for(target_name)
+            if synonyms:
                 for candidate in df.columns:
-                    cand_norm = _normalize_col(candidate)
-                    if any(_normalize_col(g) == cand_norm for g in group):
+                    if _normalize_col(candidate) in synonyms:
                         logger.info(
                             f"[ASTTransformer] Fuzzy resolved target='{target_name}' "
-                            f"→ source='{candidate}' via semantic synonym group."
+                            f"to df column '{candidate}' via semantic synonym group."
                         )
                         return candidate
 
-            # 5. Normalized substring match (last resort)
-            target_norm = _normalize_col(target_name)
+            # Priority 5: Normalized target match
+            norm_target = _normalize_col(target_name)
             for candidate in df.columns:
-                if _normalize_col(candidate) == target_norm:
+                if _normalize_col(candidate) == norm_target:
                     logger.info(
                         f"[ASTTransformer] Normalized match target='{target_name}' → source='{candidate}'."
                     )
@@ -185,7 +183,10 @@ class ASTTransformer:
         # Helper: safe fallback expression when column cannot be resolved
         # ---------------------------------------------------------------
         def _unresolved_expr(target_col: str, col_spec: Dict) -> pl.Expr:
-            """Return a UUID series for PK/id columns, NULL literal for everything else."""
+            """Return lineage for _source_origin, UUID series for PK/id columns, NULL literal for everything else."""
+            if target_col == "_source_origin":
+                val = source_origin or col_spec.get("constant_value") or "unknown"
+                return pl.lit(str(val)).alias(target_col)
             if col_spec.get("is_primary_key") or target_col in ("id",):
                 uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(df))]
                 return pl.Series(target_col, uuid_list)
@@ -205,6 +206,13 @@ class ASTTransformer:
                 continue
 
             keep_columns.append(target_col)
+
+            # Special handling for platform data lineage column _source_origin
+            if target_col == "_source_origin":
+                val = source_origin or const_val or "unknown"
+                exprs.append(pl.lit(str(val)).alias(target_col))
+                continue
+
             src_name = _resolve_src_col(source_cols, target_col)
 
             # ----------------------------------------------------------

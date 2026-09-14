@@ -229,8 +229,13 @@ class ExecutionOrchestrator:
 
                             logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
                             retry_seed_prefix = f"{job_id}:{target_table}:{src_ident}:{src_table}"
+                            src_origin_tag = f"{src_ident}.{src_table}" if src_ident else str(src_table)
                             df_trans, trans_errors = ASTTransformer.transform_chunk(
-                                df_raw, column_mappings, retry_seed_prefix=retry_seed_prefix, row_offset=offset
+                                df_raw,
+                                column_mappings,
+                                retry_seed_prefix=retry_seed_prefix,
+                                row_offset=offset,
+                                source_origin=src_origin_tag,
                             )
                             total_failed += trans_errors
 
