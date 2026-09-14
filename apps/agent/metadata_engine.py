@@ -84,12 +84,20 @@ class AgentMetadataEngine:
                             ORDER BY t.table_schema, t.table_name;
                         """))
                     else:
-                        res_tbl = conn.execute(text("""
-                            SELECT table_schema, table_name, table_type, COALESCE(table_rows, 0) AS estimated_rows
-                            FROM information_schema.tables
-                            WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
-                            ORDER BY table_schema, table_name;
-                        """))
+                        if db_name and db_name != "database":
+                            res_tbl = conn.execute(text("""
+                                SELECT table_schema, table_name, table_type, COALESCE(table_rows, 0) AS estimated_rows
+                                FROM information_schema.tables
+                                WHERE table_schema = :db_name
+                                ORDER BY table_schema, table_name;
+                            """), {"db_name": db_name})
+                        else:
+                            res_tbl = conn.execute(text("""
+                                SELECT table_schema, table_name, table_type, COALESCE(table_rows, 0) AS estimated_rows
+                                FROM information_schema.tables
+                                WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                                ORDER BY table_schema, table_name;
+                            """))
                     tables_raw = res_tbl.fetchall()
                     if len(tables_raw) > 500:
                         logger.info(
@@ -113,14 +121,24 @@ class AgentMetadataEngine:
                             ORDER BY table_schema, table_name, ordinal_position;
                         """))
                     else:
-                        res_col = conn.execute(text("""
-                            SELECT table_schema, table_name, column_name, ordinal_position,
-                                   data_type, data_type AS udt_name, is_nullable, character_maximum_length,
-                                   numeric_precision, numeric_scale, column_default
-                            FROM information_schema.columns
-                            WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
-                            ORDER BY table_schema, table_name, ordinal_position;
-                        """))
+                        if db_name and db_name != "database":
+                            res_col = conn.execute(text("""
+                                SELECT table_schema, table_name, column_name, ordinal_position,
+                                       data_type, data_type AS udt_name, is_nullable, character_maximum_length,
+                                       numeric_precision, numeric_scale, column_default
+                                FROM information_schema.columns
+                                WHERE table_schema = :db_name
+                                ORDER BY table_schema, table_name, ordinal_position;
+                            """), {"db_name": db_name})
+                        else:
+                            res_col = conn.execute(text("""
+                                SELECT table_schema, table_name, column_name, ordinal_position,
+                                       data_type, data_type AS udt_name, is_nullable, character_maximum_length,
+                                       numeric_precision, numeric_scale, column_default
+                                FROM information_schema.columns
+                                WHERE table_schema NOT IN ('information_schema', 'performance_schema', 'mysql', 'sys')
+                                ORDER BY table_schema, table_name, ordinal_position;
+                            """))
                     columns_raw = res_col.fetchall()
                 except Exception as col_err:
                     logger.warning(f"Could not query information_schema.columns for '{identifier}': {col_err}")

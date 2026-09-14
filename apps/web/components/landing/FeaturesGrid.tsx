@@ -44,13 +44,12 @@ export default function FeaturesGrid() {
           <div className="p-8 rounded-none bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 transition-colors">
             <h3 className="text-lg font-bold text-white mb-2 tracking-tight">Supported Connectors</h3>
             <p className="text-zinc-400 text-sm leading-relaxed mb-4">
-              Native high-speed drivers for PostgreSQL, MySQL, MongoDB, and bulk CSV/Excel files.
+              Native high-speed drivers for PostgreSQL, MySQL, and MongoDB.
             </p>
             <div className="flex flex-wrap gap-2">
               <span className="px-2.5 py-1 rounded-none bg-black border border-zinc-800 text-zinc-300 text-xs font-mono">PostgreSQL</span>
               <span className="px-2.5 py-1 rounded-none bg-black border border-zinc-800 text-zinc-300 text-xs font-mono">MySQL</span>
               <span className="px-2.5 py-1 rounded-none bg-black border border-zinc-800 text-zinc-300 text-xs font-mono">MongoDB</span>
-              <span className="px-2.5 py-1 rounded-none bg-black border border-zinc-800 text-zinc-300 text-xs font-mono">CSV</span>
             </div>
           </div>
 

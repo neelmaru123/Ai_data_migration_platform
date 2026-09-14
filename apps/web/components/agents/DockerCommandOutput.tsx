@@ -14,44 +14,56 @@ import {
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import agentService from '../../services/agentService';
+import { ConnectionDetails, substituteConnectionPlaceholders } from '../../lib/dockerCommandUtils';
 
 interface DockerCommandOutputProps {
   agent: AgentDetailResponse;
   dockerCmdData?: AgentDockerCommandResponse | null;
   onReset: () => void;
+  sources?: { identifier: string }[];
+  destination?: { identifier: string } | null;
+  connectionDetailsByIdentifier?: Record<string, ConnectionDetails>;
 }
 
 export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
   agent,
   dockerCmdData,
   onReset,
+  sources = [],
+  destination = null,
+  connectionDetailsByIdentifier = {},
 }) => {
   const [activeTab, setActiveTab] = useState<'bash' | 'powershell' | 'oneline' | 'env'>('bash');
   const [copied, setCopied] = useState(false);
   const [agentStatus, setAgentStatus] = useState<string>(agent.status || 'offline');
 
   // Resolved commands from props or agent detail
-  const bashCmd =
+  const rawBashCmd =
     dockerCmdData?.docker_command ||
     agent.docker_command ||
     `docker run -d --name agent_${agent.agent_identifier} -e AGENT_TOKEN="${
       agent.api_token || '<YOUR_AGENT_TOKEN>'
     }" -e BACKEND_URL="http://localhost:8000" ai-data-migration-agent:latest`;
 
-  const powershellCmd =
+  const rawPowershellCmd =
     dockerCmdData?.docker_command_powershell ||
     agent.docker_command_powershell ||
-    bashCmd;
+    rawBashCmd;
 
-  const onelineCmd =
+  const rawOnelineCmd =
     dockerCmdData?.docker_command_oneline ||
     agent.docker_command_oneline ||
-    bashCmd.replace(/\\\n\s*/g, ' ');
+    rawBashCmd.replace(/\\\n\s*/g, ' ');
 
-  const envTemplate =
+  const rawEnvTemplate =
     dockerCmdData?.env_template ||
     agent.env_template ||
     `AGENT_TOKEN=${agent.api_token || '<YOUR_AGENT_TOKEN>'}\nBACKEND_URL=http://localhost:8000`;
+
+  const bashCmd = substituteConnectionPlaceholders(rawBashCmd, sources, destination, connectionDetailsByIdentifier);
+  const powershellCmd = substituteConnectionPlaceholders(rawPowershellCmd, sources, destination, connectionDetailsByIdentifier);
+  const onelineCmd = substituteConnectionPlaceholders(rawOnelineCmd, sources, destination, connectionDetailsByIdentifier);
+  const envTemplate = substituteConnectionPlaceholders(rawEnvTemplate, sources, destination, connectionDetailsByIdentifier);
 
   // Subscribe to real-time WebSocket for live heartbeat ping
   useEffect(() => {
@@ -250,10 +262,10 @@ export const DockerCommandOutput: React.FC<DockerCommandOutputProps> = ({
 
         <ol className="list-decimal list-inside text-xs text-zinc-400 space-y-2 leading-relaxed font-sans">
           <li>
-            Paste the command into your local shell terminal. If running locally, replace placeholder password parameters (such as <code className="text-sky-400 font-mono">&lt;SRC_..._PASSWORD&gt;</code>) with your actual database passwords.
+            Paste the command into your local shell terminal. Replace the placeholder parameters (such as <code className="text-sky-400 font-mono">&lt;SRC_..._HOST&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._PORT&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._USER&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._PASSWORD&gt;</code>, <code className="text-sky-400 font-mono">&lt;SRC_..._NAME&gt;</code>) with your actual database connection credentials.
           </li>
           <li>
-            The control plane <strong className="text-white">never</strong> receives or stores your database passwords.
+            The control plane <strong className="text-white">never</strong> receives or stores your database credentials or passwords.
           </li>
           <li>
             The container will automatically execute the startup handshake using the generated <code className="text-sky-400 font-mono">AGENT_TOKEN</code>.

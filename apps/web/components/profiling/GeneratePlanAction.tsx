@@ -216,10 +216,15 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
               </p>
             </div>
 
-            <div className="p-3 rounded-none bg-zinc-950 border border-sky-400/30 text-right font-mono">
-              <div className="text-[10px] text-zinc-500 uppercase font-bold">CONFIDENCE</div>
-              <div className="text-xl font-bold text-sky-400">
-                {Math.round((existingPlan.confidence_score || 0.9) * 100)}%
+            <div className="p-3 rounded-none bg-zinc-950 border border-sky-400/30 text-right font-mono min-w-[130px]">
+              <div className="text-[10px] text-zinc-500 uppercase font-bold">AI READINESS</div>
+              <div className="flex items-center justify-end gap-2 mt-0.5">
+                <span className="text-xl font-bold text-sky-400">
+                  {Math.round((existingPlan.confidence_score || 0.9) * 100)}%
+                </span>
+                <span className="text-[9px] font-bold px-1.5 py-0.5 uppercase border bg-sky-400/10 text-sky-400 border-sky-400/30">
+                  READY
+                </span>
               </div>
             </div>
           </div>

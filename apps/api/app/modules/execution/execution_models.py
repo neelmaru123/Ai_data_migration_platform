@@ -5,7 +5,7 @@ Execution Domain Database Models (Jobs and Diagnostic Errors)
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String, JSON
+from sqlalchemy import BigInteger, Boolean, DateTime, Float, ForeignKey, Integer, String, JSON
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.db import Base
@@ -37,7 +37,8 @@ class MigrationJob(Base):
     )
     status: Mapped[str] = mapped_column(
         String(50), default="queued", index=True, nullable=False
-    )  # queued, preparing, running, paused, completed, failed, cancelled
+    )  # queued, preparing, running, paused, completed, failed, cancelled, dry_run_completed
+    is_dry_run: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     progress: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     total_rows: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     processed_rows: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

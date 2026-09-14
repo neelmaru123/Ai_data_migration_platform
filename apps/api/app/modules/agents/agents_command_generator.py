@@ -30,50 +30,37 @@ class AgentCommandGenerator:
         return val.replace("`", "``").replace('"', '`"').replace("$", "`$")
 
     @classmethod
-    def _get_db_url_template(cls, db_type: str, prefix: str, clean_id: str) -> str:
+    def _get_db_url_template(cls, db_type: str, prefix: str, clean_id: str = "") -> str:
         """
-        Returns connection URL template string for a given database dialect with parameterized placeholders.
+        Returns connection URL template string for a given database dialect.
+        EVERY connection detail (host, port, username, password, database name)
+        is a generic placeholder here -- this backend never knows or stores a
+        user's actual connection info. The frontend fills these in locally,
+        in the browser only, using values the user typed into the connection
+        form. Only the password placeholder is left for the user to fill in
+        manually after copying the command (host/port/username/database are
+        auto-substituted by the frontend before the command is ever shown).
         """
         db_type_lower = db_type.lower()
-        host = "host.docker.internal"
+        tag_prefix = f"{prefix}_{clean_id}" if clean_id else prefix
+        host_placeholder = f"<{tag_prefix}_HOST>"
+        port_placeholder = f"<{tag_prefix}_PORT>"
+        user_placeholder = f"<{tag_prefix}_USER>"
+        pwd_placeholder = f"<{tag_prefix}_PASSWORD>"
+        db_placeholder = f"<{tag_prefix}_NAME>"
 
         if db_type_lower in ("postgresql", "postgres"):
-            port = "5432"
-            user = "postgres"
-            pwd_placeholder = f"<{prefix}_{clean_id}_PASSWORD>"
-            db_placeholder = f"<{prefix}_{clean_id}_NAME>"
-            return f"postgresql://{user}:{pwd_placeholder}@{host}:{port}/{db_placeholder}"
-
+            return f"postgresql://{user_placeholder}:{pwd_placeholder}@{host_placeholder}:{port_placeholder}/{db_placeholder}"
         elif db_type_lower in ("mysql", "mariadb"):
-            port = "3306"
-            user = "root"
-            pwd_placeholder = f"<{prefix}_{clean_id}_PASSWORD>"
-            db_placeholder = f"<{prefix}_{clean_id}_NAME>"
-            return f"mysql+pymysql://{user}:{pwd_placeholder}@{host}:{port}/{db_placeholder}"
-
+            return f"mysql+pymysql://{user_placeholder}:{pwd_placeholder}@{host_placeholder}:{port_placeholder}/{db_placeholder}"
         elif db_type_lower in ("mongodb", "mongo"):
-            port = "27017"
-            user = "admin"
-            pwd_placeholder = f"<{prefix}_{clean_id}_PASSWORD>"
-            db_placeholder = f"<{prefix}_{clean_id}_NAME>"
-            return f"mongodb://{user}:{pwd_placeholder}@{host}:{port}/{db_placeholder}?authSource=admin"
-
+            return f"mongodb://{user_placeholder}:{pwd_placeholder}@{host_placeholder}:{port_placeholder}/{db_placeholder}?authSource=admin"
         elif db_type_lower in ("mssql", "sqlserver"):
-            port = "1433"
-            user = "sa"
-            pwd_placeholder = f"<{prefix}_{clean_id}_PASSWORD>"
-            db_placeholder = f"<{prefix}_{clean_id}_NAME>"
-            return f"mssql+pyodbc://{user}:{pwd_placeholder}@{host}:{port}/{db_placeholder}?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
-
+            return f"mssql+pyodbc://{user_placeholder}:{pwd_placeholder}@{host_placeholder}:{port_placeholder}/{db_placeholder}?driver=ODBC+Driver+18+for+SQL+Server&TrustServerCertificate=yes"
         elif db_type_lower in ("csv", "excel", "parquet"):
-            return f"</path/to/{prefix.lower()}_{clean_id.lower()}_files>"
-
+            return f"</path/to/{tag_prefix.lower()}_files>"
         else:
-            port = "5432"
-            user = "user"
-            pwd_placeholder = f"<{prefix}_{clean_id}_PASSWORD>"
-            db_placeholder = f"<{prefix}_{clean_id}_NAME>"
-            return f"{db_type_lower}://{user}:{pwd_placeholder}@{host}:{port}/{db_placeholder}"
+            return f"{db_type_lower}://{user_placeholder}:{pwd_placeholder}@{host_placeholder}:{port_placeholder}/{db_placeholder}"
 
     @classmethod
     def generate_command_payload(
@@ -130,7 +117,7 @@ class AgentCommandGenerator:
                     counter += 1
                 used_prefixes.add(prefix)
 
-                url_template = cls._get_db_url_template(ds_type, "SRC", clean_id)
+                url_template = cls._get_db_url_template(ds_type, prefix)
                 env_vars[f"{prefix}_TYPE"] = ds_type
                 env_vars[f"{prefix}_URL"] = url_template
 
@@ -149,7 +136,7 @@ class AgentCommandGenerator:
                     counter += 1
                 used_prefixes.add(prefix)
 
-                url_template = cls._get_db_url_template(ds_type, "DEST", clean_id)
+                url_template = cls._get_db_url_template(ds_type, prefix)
                 env_vars[f"{prefix}_TYPE"] = ds_type
                 env_vars[f"{prefix}_URL"] = url_template
 
@@ -169,7 +156,7 @@ class AgentCommandGenerator:
         bash_lines = [
             "docker run -d \\",
             f"  --name {container_name} \\",
-            "  --restart unless-stopped \\",
+            "  --restart on-failure \\",
             "  --add-host=host.docker.internal:host-gateway \\",
         ]
         for k, v in env_vars.items():
@@ -181,7 +168,7 @@ class AgentCommandGenerator:
         ps_lines = [
             "docker run -d `",
             f"  --name {container_name} `",
-            "  --restart unless-stopped `",
+            "  --restart on-failure `",
             "  --add-host=host.docker.internal:host-gateway `",
         ]
         for k, v in env_vars.items():
@@ -192,7 +179,7 @@ class AgentCommandGenerator:
         # 3. Build Single-line command
         env_flags = " ".join([f'-e {k}="{cls._escape_bash(v)}"' for k, v in env_vars.items()])
         docker_command_oneline = (
-            f"docker run -d --name {container_name} --restart unless-stopped "
+            f"docker run -d --name {container_name} --restart on-failure "
             f"--add-host=host.docker.internal:host-gateway {env_flags} {resolved_image}"
         )
 

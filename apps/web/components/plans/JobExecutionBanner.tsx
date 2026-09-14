@@ -30,9 +30,19 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   });
 
   const status = (job.status || 'queued').toLowerCase();
-  const isRunning = status === 'running' || status === 'pending' || status === 'ddl_executing' || status === 'preparing' || status === 'queued';
-  const isCompleted = status === 'completed';
+  const isDryRunCompleted = status === 'dry_run_completed';
+  const isRunning =
+    status === 'running' ||
+    status === 'pending' ||
+    status === 'ddl_executing' ||
+    status === 'preparing' ||
+    status === 'queued';
+  const isRealCompleted = status === 'completed';
+  const isCompleted = isRealCompleted || isDryRunCompleted;
   const isFailed = status === 'failed';
+  const isDryRun = Boolean(job.is_dry_run || isDryRunCompleted);
+  const canResume = isFailed && (job.processed_rows || 0) > 0;
+  const [isExecutingReal, setIsExecutingReal] = useState<boolean>(false);
 
   // Fetch job history for plan
   useEffect(() => {
@@ -79,7 +89,12 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
 
         // STOP POLLING IMMEDIATELY WHEN JOB COMPLETES OR FAILS
         const updatedStatus = (updated.status || '').toLowerCase();
-        if (updatedStatus === 'completed' || updatedStatus === 'failed' || updatedStatus === 'cancelled') {
+        if (
+          updatedStatus === 'completed' ||
+          updatedStatus === 'dry_run_completed' ||
+          updatedStatus === 'failed' ||
+          updatedStatus === 'cancelled'
+        ) {
           if (intervalId) clearInterval(intervalId);
         }
 
@@ -106,22 +121,47 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   // the interval from restarting when the parent passes a new function reference.
   }, [job.id, job.status]);
 
-  // Handle Retry Execution Job
+  // Handle Execute For Real after Dry Run Simulation
+  const handleExecuteForReal = async () => {
+    if (isExecutingReal || !job.migration_plan_id) return;
+    setIsExecutingReal(true);
+    try {
+      const newJob = await executionService.startPlanExecution(job.migration_plan_id, { is_dry_run: false });
+      setJob(newJob);
+      setLogs([`[${new Date().toLocaleTimeString()}] Real migration dispatched to Docker Agent: ${newJob.id}`]);
+      toast.success('Real migration job queued on Docker Agent! Data will be written to target DB.');
+      if (onJobUpdated) onJobUpdated(newJob);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to start real migration.';
+      toast.error(`Execution Error: ${detail}`);
+    } finally {
+      setIsExecutingReal(false);
+    }
+  };
+
+  // Handle Retry or Resume Execution Job
   const handleRetryJob = async () => {
     if (isRetrying || !job.migration_plan_id) return;
     setIsRetrying(true);
     try {
-      const newJob = await executionService.startPlanExecution(job.migration_plan_id);
+      const newJob = await executionService.startPlanExecution(job.migration_plan_id, {
+        is_dry_run: Boolean(job.is_dry_run),
+      });
       setJob(newJob);
-      setLogs([`[${new Date().toLocaleTimeString()}] Re-triggered migration job run: ${newJob.id}`]);
-      toast.success('Migration job retried! New run queued for Docker Agent.');
+      const actionName = canResume ? 'Resumed' : 'Re-triggered';
+      setLogs([`[${new Date().toLocaleTimeString()}] ${actionName} migration job run: ${newJob.id}`]);
+      toast.success(
+        canResume
+          ? 'Migration resumed! Checkpoints reused from last processed record.'
+          : 'Migration job retried! New run queued for Docker Agent.'
+      );
       if (onJobUpdated) onJobUpdated(newJob);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to retry job.';
+      const detail = err?.response?.data?.detail || err?.message || (canResume ? 'Failed to resume job.' : 'Failed to retry job.');
       if (err?.response?.status === 503) {
         toast.error(`Agent Offline Warning: ${detail}`, { duration: 8000 });
       } else {
-        toast.error(`Retry Error: ${detail}`);
+        toast.error(`${canResume ? 'Resume' : 'Retry'} Error: ${detail}`);
       }
     } finally {
       setIsRetrying(false);
@@ -184,14 +224,17 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               TARGET DB INSERTION DAEMON
             </span>
             <span
-              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${isCompleted
+              className={`text-[10px] font-bold tracking-widest px-2.5 py-0.5 rounded-none uppercase border ${
+                isDryRunCompleted
+                  ? 'bg-amber-400/20 text-amber-300 border-amber-400/50 shadow-[0_0_12px_rgba(251,191,36,0.3)]'
+                  : isCompleted
                   ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.3)]'
                   : isFailed
-                    ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
-                    : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
-                }`}
+                  ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.3)]'
+                  : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
+              }`}
             >
-              STATUS: {status.toUpperCase()}
+              STATUS: {status.replace('_', ' ').toUpperCase()}
             </span>
 
             {/* Run Selector Dropdown */}
@@ -217,23 +260,66 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
             )}
           </div>
           <h3 className="text-2xl font-extrabold text-white uppercase font-sans tracking-tight">
-            Live Target Database Insertion Stream
+            {isDryRun ? 'Target Database Migration Dry Run Simulation' : 'Live Target Database Insertion Stream'}
           </h3>
           <p className="text-xs text-zinc-400 font-mono mt-0.5">
-            Job ID: <span className="text-sky-400">{job.id}</span>
+            Job ID: <span className="text-sky-400">{job.id}</span> {isDryRun && <span className="text-amber-400 ml-2">[DRY RUN ACTIVE]</span>}
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
-          {/* Retry Button */}
-          {(isFailed || isCompleted) && (
+          {/* Execute For Real Secondary Button */}
+          {isDryRun && (
+            <button
+              type="button"
+              onClick={handleExecuteForReal}
+              disabled={isExecutingReal}
+              className="py-2.5 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider border border-emerald-400 shadow-md transition-all font-mono"
+            >
+              {isExecutingReal ? 'Queuing Real Migration...' : '⚡ EXECUTE FOR REAL'}
+            </button>
+          )}
+
+          {/* Completed Job: Offer "Create New Migration" */}
+          {isRealCompleted && (
+            <Link
+              href="/profiling"
+              className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono inline-flex items-center gap-1.5"
+            >
+              + CREATE NEW MIGRATION
+            </Link>
+          )}
+
+          {/* Active Retry / Resume Button for Failed Jobs */}
+          {isFailed && (
             <button
               type="button"
               onClick={handleRetryJob}
               disabled={isRetrying}
+              title={
+                canResume
+                  ? `Checkpoints will be reused: resumes execution from ${procRows.toLocaleString()} processed rows.`
+                  : 'Retries migration from the beginning.'
+              }
               className="py-2.5 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono"
             >
-              {isRetrying ? 'Queuing Retry...' : '⚡ RETRY MIGRATION JOB'}
+              {isRetrying
+                ? canResume ? 'Resuming...' : 'Queuing Retry...'
+                : canResume
+                ? isDryRun ? '⚡ RESUME DRY RUN' : '⚡ RESUME'
+                : isDryRun ? '⚡ RETRY DRY RUN' : '⚡ RETRY MIGRATION JOB'}
+            </button>
+          )}
+
+          {/* Completed Job: Disabled Retry with Tooltip Explaining Checkpoints Reused / Finalized */}
+          {isRealCompleted && (
+            <button
+              type="button"
+              disabled={true}
+              title="Checkpoints will be reused when the job is completed. Create a new migration instead."
+              className="py-2.5 px-4 rounded-none bg-zinc-900 text-zinc-600 text-xs font-bold uppercase tracking-wider border border-zinc-800 cursor-not-allowed font-mono opacity-60"
+            >
+              ⚡ RETRY (DISABLED)
             </button>
           )}
 
@@ -246,11 +332,74 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           </Link>
 
           <div className="p-3 rounded-none bg-zinc-950 border border-zinc-800 text-right font-mono">
-            <div className="text-[10px] text-zinc-500 uppercase font-bold">INSERTION PROGRESS</div>
+            <div className="text-[10px] text-zinc-500 uppercase font-bold">
+              {isDryRun ? 'SIMULATION PROGRESS' : 'INSERTION PROGRESS'}
+            </div>
             <div className="text-xl font-bold text-sky-400">{progressPercent}%</div>
           </div>
         </div>
       </div>
+
+      {/* DRY RUN -- NO DATA WAS WRITTEN BANNER */}
+      {isDryRun && (
+        <div className="p-5 bg-amber-950/40 border border-amber-500/70 text-amber-300 font-mono text-xs space-y-3 shadow-[0_0_20px_rgba(251,191,36,0.15)] animate-fadeIn">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 font-bold">
+            <span className="flex items-center gap-2 text-amber-400 uppercase text-xs tracking-wider">
+              <span className="w-2.5 h-2.5 bg-amber-400 rounded-none animate-pulse" />
+              DRY RUN SIMULATION -- NO DATA WAS WRITTEN TO TARGET DB
+            </span>
+            {isDryRunCompleted && (
+              <span className="text-[9px] px-2 py-0.5 bg-amber-400 text-black uppercase font-bold tracking-wider">
+                SIMULATION VERIFIED ✓
+              </span>
+            )}
+          </div>
+          <p className="text-[11px] text-zinc-300 font-sans leading-relaxed">
+            All source data extractions, AST column mappings, type coercions, and multi-source merge deduplications were executed on real source chunks. Destination DDL schema modifications and database write operations were safely bypassed.
+          </p>
+          <div className="pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-t border-amber-500/30">
+            <span className="text-[11px] text-amber-200/90 font-mono">
+              Ready to persist rows into the destination target database?
+            </span>
+            <button
+              type="button"
+              onClick={handleExecuteForReal}
+              disabled={isExecutingReal}
+              className="py-2 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider font-mono shadow-md whitespace-nowrap"
+            >
+              {isExecutingReal ? 'Starting Real Run...' : '⚡ Execute For Real'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Target Tables With Existing Data Advisory Warning Banner */}
+      {job.target_tables_with_existing_data && job.target_tables_with_existing_data.length > 0 && (
+        <div className="p-4 bg-amber-950/40 border border-amber-500/50 text-amber-300 font-mono text-xs space-y-2 animate-fadeIn">
+          <div className="flex items-center justify-between font-bold uppercase">
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 bg-amber-400 animate-pulse rounded-none" />
+              ⚠️ Notice: Target Tables Contain Existing Data
+            </span>
+            <span className="text-[10px] text-amber-400/80">
+              {job.target_tables_with_existing_data.length} Affected Table(s)
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-300 font-sans leading-relaxed">
+            The target database metadata snapshot indicates destination tables already contain data. Incoming rows will be appended according to your plan's primary key conflict resolution policy.
+          </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            {job.target_tables_with_existing_data.map((tbl, idx) => (
+              <span
+                key={idx}
+                className="px-2.5 py-1 bg-black/60 border border-amber-500/40 text-amber-300 text-[10px] font-mono"
+              >
+                <strong className="text-white">{tbl.table_name}</strong>: {tbl.existing_row_count.toLocaleString()} existing rows
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Main Animated Progress Bar */}
       <div className="space-y-2">
@@ -260,11 +409,13 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               className={`w-2 h-2 rounded-none ${isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400 animate-ping'
                 }`}
             />
-            {isCompleted
+            {isDryRunCompleted
+              ? '✓ Dry Run Simulation Completed (No Data Was Written)'
+              : isCompleted
               ? '✓ Target Database Insertion Completed'
               : isFailed
-                ? '🚨 Target Insertion Failed'
-                : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
+              ? '🚨 Target Insertion Failed'
+              : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
           </span>
           <span className="text-sky-400 font-extrabold">{progressPercent}%</span>
         </div>
@@ -285,9 +436,13 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
       {/* Real-time Target DB Insertion Metrics Cards */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">
-          <span className="text-[10px] font-bold text-zinc-500 uppercase block">SUCCESSFUL INSERTIONS</span>
+          <span className="text-[10px] font-bold text-zinc-500 uppercase block">
+            {isDryRun ? 'SIMULATED / VALID ROWS' : 'SUCCESSFUL INSERTIONS'}
+          </span>
           <span className="text-lg sm:text-xl font-extrabold text-emerald-400">{succRows.toLocaleString()}</span>
-          <span className="text-[10px] text-zinc-400 block font-mono">Target DB committed</span>
+          <span className="text-[10px] text-zinc-400 block font-mono">
+            {isDryRun ? 'No rows written to DB' : 'Target DB committed'}
+          </span>
         </div>
 
         <div className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 space-y-1">

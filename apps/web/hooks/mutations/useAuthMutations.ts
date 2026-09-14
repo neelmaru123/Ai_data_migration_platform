@@ -92,13 +92,18 @@ export function useLogout() {
     mutationFn: () => authService.logout(),
     onSuccess: (data) => {
       Cookies.remove('logged_in', { path: '/' });
+      Cookies.remove('active_org_id', { path: '/' });
       dispatch(logoutAction());
       queryClient.clear();
       toast.success(data.message || 'Logged out successfully');
     },
     onError: (error) => {
-      const message = error?.response?.data?.detail || error?.message || 'Logout failed';
-      toast.error(message);
+      Cookies.remove('logged_in', { path: '/' });
+      Cookies.remove('active_org_id', { path: '/' });
+      dispatch(logoutAction());
+      queryClient.clear();
+      const message = error?.response?.data?.detail || error?.message || 'Logged out';
+      toast.success(message);
     },
   });
 }

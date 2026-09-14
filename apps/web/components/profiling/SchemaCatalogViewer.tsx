@@ -8,6 +8,7 @@ import {
   ColumnResponse,
 } from '../../types/metadata';
 import metadataService from '../../services/metadataService';
+import { ArrowRight } from 'lucide-react';
 
 interface SchemaCatalogViewerProps {
   dataSources: DataSourceResponse[];
@@ -98,6 +99,19 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
       });
     });
   }
+
+  // Resolves a table_id/column_id pair from a RelationshipResponse into
+  // human-readable "table.column" text, using data already loaded in
+  // allTables -- no new API call needed.
+  const resolveColumnLabel = (tableId: string, columnId: string): string => {
+    for (const { table } of allTables) {
+      if (table.id === tableId) {
+        const col = table.columns.find((c) => c.id === columnId);
+        return `${table.table_name}.${col ? col.column_name : '?'}`;
+      }
+    }
+    return '(unknown table)';
+  };
 
   const filteredTables = allTables.filter((item) =>
     item.table.table_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -331,6 +345,17 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
                   >
                     Constraints ({selectedTable.constraints.length})
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('relationships')}
+                    className={`px-4 py-2 text-xs font-mono font-bold uppercase tracking-wider border-b-2 transition-all ${
+                      activeTab === 'relationships'
+                        ? 'border-sky-400 text-sky-400 bg-sky-400/5'
+                        : 'border-transparent text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    Relationships ({(snapshot?.relationships || []).filter((r) => r.source_table_id === selectedTable.id || r.target_table_id === selectedTable.id).length})
+                  </button>
                 </div>
 
                 {/* Tab 1: Columns Matrix */}
@@ -410,6 +435,43 @@ export const SchemaCatalogViewer: React.FC<SchemaCatalogViewerProps> = ({
                         </div>
                       ))
                     )}
+                  </div>
+                )}
+
+                {/* Tab 3: Relationships */}
+                {activeTab === 'relationships' && (
+                  <div className="space-y-3">
+                    {(() => {
+                      const related = (snapshot?.relationships || []).filter(
+                        (r) => r.source_table_id === selectedTable.id || r.target_table_id === selectedTable.id
+                      );
+                      if (related.length === 0) {
+                        return (
+                          <p className="text-xs font-mono text-zinc-500 py-6 text-center">
+                            No foreign-key relationships detected for this table.
+                          </p>
+                        );
+                      }
+                      return related.map((r) => (
+                        <div
+                          key={r.id}
+                          className="p-3.5 rounded-none bg-zinc-950 border border-zinc-800 flex items-center justify-between font-mono text-xs"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-white font-bold">
+                              {resolveColumnLabel(r.source_table_id, r.source_column_id)}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5 text-zinc-500" />
+                            <span className="text-sky-400 font-bold">
+                              {resolveColumnLabel(r.target_table_id, r.target_column_id)}
+                            </span>
+                          </div>
+                          <span className="px-2 py-0.5 text-[10px] font-bold rounded-none bg-purple-400/10 text-purple-400 border border-purple-400/30 uppercase">
+                            {r.relationship_type} · {Math.round(r.confidence * 100)}%
+                          </span>
+                        </div>
+                      ));
+                    })()}
                   </div>
                 )}
               </>

@@ -8,6 +8,7 @@ import re
 from typing import Any, Dict
 import duckdb
 
+from .db import dispose_all_engines
 from .checkpoint import CheckpointManager
 from .ddl_executor import DDLExecutor
 from .progress_reporter import ProgressReporter
@@ -31,19 +32,33 @@ class ExecutionOrchestrator:
         source_db_urls: Dict[str, str],
         target_db_url: str,
         target_engine_type: str = "postgresql",
+        is_dry_run: bool = False,
     ):
-        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' ===")
         plan_data = plan_ast.get("plan_data", {})
+        if not is_dry_run:
+            is_dry_run = bool(plan_ast.get("is_dry_run", False) or plan_data.get("is_dry_run", False))
+
+        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}) ===")
         pre_ddl = plan_data.get("pre_migration_ddl", [])
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
 
-        # Clean up stale DuckDB staging files from previous runs (EC-20)
+        # Clean up stale DuckDB staging files from OTHER completed/abandoned jobs
+        # (EC-20). Do NOT delete a staging file belonging to THIS job_id here —
+        # if one exists, it means this job crashed mid-merge on a previous attempt,
+        # and the per-table logic further below (which checks for and resets stale
+        # checkpoints before removing it) needs to see it first, or the crash
+        # recovery / checkpoint reset logic never fires and rows get silently
+        # skipped on resume.
         tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
         if os.path.exists(tmp_dir):
             try:
                 for fname in os.listdir(tmp_dir):
-                    if fname.startswith("staging_") and fname.endswith(".duckdb"):
+                    if (
+                        fname.startswith("staging_")
+                        and not fname.startswith(f"staging_{job_id}_")
+                        and fname.endswith(".duckdb")
+                    ):
                         try:
                             os.remove(os.path.join(tmp_dir, fname))
                             logger.info(f"Cleaned up stale staging file: {fname}")
@@ -72,7 +87,10 @@ class ExecutionOrchestrator:
                 backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0,
                 total_rows=total_estimated_rows, current_stage="pre_ddl"
             )
-            DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
+            if not is_dry_run:
+                DDLExecutor.execute_ddl_list(target_db_url, pre_ddl, "Pre-Migration DDL")
+            else:
+                logger.info(f"[DRY RUN] Pre-Migration DDL skipped ({len(pre_ddl)} statements).")
 
             # Step 2: Data Extraction, AST Transformation, Merge, and Target Loading
             for idx, table_spec in enumerate(table_mappings, start=1):
@@ -100,6 +118,20 @@ class ExecutionOrchestrator:
                     os.makedirs(staging_dir, exist_ok=True)
                     staging_db_file = os.path.join(staging_dir, f"staging_{job_id}_{target_table}.duckdb")
                     if os.path.exists(staging_db_file):
+                        # A staging file already exists for this table — this means a
+                        # previous run of this job crashed mid-merge before it could
+                        # clean up. Since we are about to delete and recreate this
+                        # staging file, any per-source checkpoints that advanced past
+                        # offset 0 for this table are now stale (they'd point past
+                        # rows that no longer exist in the fresh staging DB). Reset
+                        # them so every source re-stages from the beginning, keeping
+                        # checkpoint state and staging-file state consistent.
+                        logger.warning(
+                            f"Found leftover staging file for table '{target_table}' from a previous "
+                            f"crashed run. Resetting per-source checkpoints for this table and re-staging "
+                            f"from scratch to avoid silent data loss."
+                        )
+                        CheckpointManager.clear_table_checkpoints(job_id, target_table)
                         try:
                             os.remove(staging_db_file)
                         except Exception:
@@ -138,12 +170,13 @@ class ExecutionOrchestrator:
                         if not db_url:
                             if target_db_url and any(tag in norm_id for tag in ["dst", "dest", "target"]):
                                 db_url = target_db_url
-                            elif source_db_urls:
-                                logger.warning(
-                                    f"Could not strictly match source identifier '{src_ident}' to configured sources {list(source_db_urls.keys())}. "
-                                    f"Falling back to primary source database."
+                            else:
+                                raise ValueError(
+                                    f"Could not match source identifier '{src_ident}' to any configured "
+                                    f"source database. Configured sources: {list(source_db_urls.keys())}. "
+                                    f"Check that the migration plan's identifier matches an env var like "
+                                    f"SRC_{{name}}_URL, or that the naming convention matches."
                                 )
-                                db_url = list(source_db_urls.values())[0]
 
                         src_engine = "postgresql"
                         if db_url:
@@ -195,16 +228,24 @@ class ExecutionOrchestrator:
                                 break
 
                             logger.info(f"Extracted chunk of {len(df_raw)} rows from source '{src_ident}.{src_table}' (Offset: {offset}).")
-                            df_trans, trans_errors = ASTTransformer.transform_chunk(df_raw, column_mappings)
+                            retry_seed_prefix = f"{job_id}:{target_table}:{src_ident}:{src_table}"
+                            df_trans, trans_errors = ASTTransformer.transform_chunk(
+                                df_raw, column_mappings, retry_seed_prefix=retry_seed_prefix, row_offset=offset
+                            )
                             total_failed += trans_errors
 
                             # If single source table, load directly to target (OOM-free streaming)
                             if len(source_tables) == 1:
-                                succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
-                                total_processed += (succ + fail + skip)
-                                total_successful += succ
-                                total_failed += fail
-                                total_skipped += skip
+                                if not is_dry_run:
+                                    succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, df_trans)
+                                    total_processed += (succ + fail + skip)
+                                    total_successful += succ
+                                    total_failed += fail
+                                    total_skipped += skip
+                                else:
+                                    succ = len(df_trans)
+                                    total_processed += (succ + trans_errors)
+                                    total_successful += succ
                             else:
                                 start_seq = TableMerger.append_to_duckdb_staging(staging_conn, staging_table_name, df_trans, start_seq)
 
@@ -214,11 +255,16 @@ class ExecutionOrchestrator:
                     # For multi-source merges, stream deduplicated results from DuckDB staging area in bounded batches
                     if len(source_tables) > 1 and staging_conn:
                         for chunk_df in TableMerger.stream_deduplicated_chunks(staging_conn, staging_table_name, conflict_res, chunk_size=50000):
-                            succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, chunk_df)
-                            total_processed += (succ + fail + skip)
-                            total_successful += succ
-                            total_failed += fail
-                            total_skipped += skip
+                            if not is_dry_run:
+                                succ, fail, skip = TargetWriterFactory.bulk_load(target_db_url, target_engine_type, target_table, chunk_df)
+                                total_processed += (succ + fail + skip)
+                                total_successful += succ
+                                total_failed += fail
+                                total_skipped += skip
+                            else:
+                                succ = len(chunk_df)
+                                total_processed += succ
+                                total_successful += succ
 
                 finally:
                     if staging_conn:
@@ -238,16 +284,40 @@ class ExecutionOrchestrator:
                 total_processed, total_successful, total_failed, total_skipped,
                 total_rows=total_estimated_rows, current_stage="post_ddl"
             )
-            DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+            if not is_dry_run:
+                DDLExecutor.execute_ddl_list(target_db_url, post_ddl, "Post-Migration DDL")
+            else:
+                logger.info(f"[DRY RUN] Post-Migration DDL skipped ({len(post_ddl)} statements).")
 
-            # Step 4: Mark Job Complete and Clean Checkpoints
-            CheckpointManager.clear_job_checkpoints(job_id)
+            # Step 4: Verify write success rate before declaring the job complete.
+            # Without this check, a target database that is completely unreachable
+            # (e.g. dead MongoDB target) can cause every single row to fail while
+            # the job still reports "completed" with 100% failure — this check
+            # prevents that.
+            if total_processed > 0:
+                failure_rate = total_failed / total_processed
+                if failure_rate > 0.50:
+                    raise RuntimeError(
+                        f"Migration job '{job_id}' aborted at completion check: "
+                        f"{total_failed}/{total_processed} rows failed ({failure_rate*100:.1f}%), "
+                        f"exceeding the 50% failure threshold. Target database may be unreachable "
+                        f"or schema/mapping may be misconfigured."
+                    )
+
+            # Step 5: Mark Job Complete and Clean Checkpoints
+            if not is_dry_run:
+                CheckpointManager.clear_job_checkpoints(job_id)
+                final_status = "completed"
+            else:
+                logger.info(f"[DRY RUN] Preserving checkpoints (no-op) for dry run job '{job_id}'.")
+                final_status = "dry_run_completed"
+
             ProgressReporter.report(
-                backend_url, agent_token, job_id, "completed", 100.0,
+                backend_url, agent_token, job_id, final_status, 100.0,
                 total_processed, total_successful, total_failed, total_skipped,
-                total_rows=total_estimated_rows, current_stage="completed"
+                total_rows=total_estimated_rows, current_stage=final_status
             )
-            logger.info(f"=== MIGRATION JOB '{job_id}' COMPLETED SUCCESSFULLY! (Processed: {total_processed}, Success: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
+            logger.info(f"=== MIGRATION JOB '{job_id}' ({final_status.upper()})! (Processed: {total_processed}, Would Write: {total_successful}, Failed: {total_failed}, Skipped: {total_skipped}) ===")
 
         except Exception as exc:
             err_msg = f"Migration job '{job_id}' failed: {exc}"
@@ -258,3 +328,8 @@ class ExecutionOrchestrator:
                 total_rows=total_estimated_rows, current_stage="failed", error_message=err_msg
             )
             raise
+        finally:
+            try:
+                dispose_all_engines()
+            except Exception:
+                pass

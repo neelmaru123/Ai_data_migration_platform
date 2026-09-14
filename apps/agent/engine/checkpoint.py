@@ -105,3 +105,28 @@ class CheckpointManager:
                         logger.warning(f"Could not remove checkpoint file '{fpath}': {err}")
         except Exception as exc:
             logger.warning(f"Error scanning checkpoint directory '{tmp_dir}': {exc}")
+
+    @classmethod
+    def clear_table_checkpoints(cls, job_id: str, table_name: str):
+        """
+        Removes all per-source checkpoint files for a single target table.
+        Used when a multi-source staging file was found missing/stale on resume
+        (e.g. after a crash mid-merge), so every source for that table re-stages
+        from offset 0 instead of skipping rows that no longer exist in a fresh
+        staging database.
+        """
+        tmp_dir = os.getenv("CHECKPOINT_DIR", "/tmp")
+        if not os.path.exists(tmp_dir):
+            return
+        prefix = f"checkpoint_{job_id}_{table_name}_"
+        try:
+            for fname in os.listdir(tmp_dir):
+                if fname.startswith(prefix) and fname.endswith(".json"):
+                    fpath = os.path.join(tmp_dir, fname)
+                    try:
+                        os.remove(fpath)
+                        logger.info(f"Reset stale checkpoint file for re-staging: {fname}")
+                    except Exception as err:
+                        logger.warning(f"Could not remove checkpoint file '{fpath}': {err}")
+        except Exception as exc:
+            logger.warning(f"Error scanning checkpoint directory '{tmp_dir}': {exc}")

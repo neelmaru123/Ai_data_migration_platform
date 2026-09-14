@@ -7,7 +7,7 @@ import json
 import uuid
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from jwt import PyJWTError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.modules.agents.agents_schemas import (
     AgentCreate,
     AgentDetailResponse,
     AgentDockerCommandResponse,
+    AgentFatalErrorRequest,
     AgentHeartbeat,
     AgentResponse,
     AgentUpdate,
@@ -74,6 +75,21 @@ async def get_agent_docker_command(
     return AgentService.get_agent_docker_command(agent=agent)
 
 
+@router.post("/{agent_id}/regenerate-token", response_model=AgentDetailResponse)
+async def regenerate_agent_token(
+    agent: Agent = Depends(get_verified_agent),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Regenerates this agent's API token, immediately invalidating the
+    previous one. Any currently running Docker container using the old
+    token will fail authentication until redeployed with the new token.
+    Returns the new raw token ONCE -- it cannot be retrieved again after
+    this response.
+    """
+    return await AgentService.regenerate_agent_token(session=session, agent=agent)
+
+
 @router.get("/{agent_id}", response_model=AgentDetailResponse)
 async def get_agent(
     agent: Agent = Depends(get_verified_agent),
@@ -112,6 +128,38 @@ async def agent_heartbeat_direct(
     """
     return await AgentService.process_agent_heartbeat(
         session=session, agent=current_agent, heartbeat=payload
+    )
+
+
+@router.post("/fatal-error", response_model=AgentResponse)
+async def report_agent_fatal_error(
+    payload: AgentFatalErrorRequest,
+    agent_id: Optional[uuid.UUID] = Query(None),
+    x_agent_id: Optional[str] = Header(None, alias="X-Agent-ID"),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Emergency fatal error reporting endpoint used by Docker agent when stopping
+    due to startup crashes, authentication rejection, or unhandled exceptions.
+    """
+    resolved_id: Optional[uuid.UUID] = agent_id
+    if not resolved_id and x_agent_id:
+        try:
+            resolved_id = uuid.UUID(x_agent_id.strip())
+        except (ValueError, TypeError):
+            pass
+
+    if not resolved_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="agent_id query parameter or 'X-Agent-ID' header required for fatal error reporting.",
+        )
+
+    return await AgentService.record_fatal_error(
+        session=session,
+        agent_id=resolved_id,
+        error_message=payload.error_message,
+        error_category=payload.error_category,
     )
 
 

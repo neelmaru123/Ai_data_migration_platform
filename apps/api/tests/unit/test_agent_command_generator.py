@@ -79,15 +79,15 @@ def test_command_generator_multi_source_merge():
 
     # 3. Verify Source 1 (Postgres)
     assert env_vars["SRC_LEGACY_PG_TYPE"] == "postgresql"
-    assert "postgresql://postgres:<SRC_LEGACY_PG_PASSWORD>@host.docker.internal:5432/<SRC_LEGACY_PG_NAME>" == env_vars["SRC_LEGACY_PG_URL"]
+    assert "postgresql://<SRC_LEGACY_PG_USER>:<SRC_LEGACY_PG_PASSWORD>@<SRC_LEGACY_PG_HOST>:<SRC_LEGACY_PG_PORT>/<SRC_LEGACY_PG_NAME>" == env_vars["SRC_LEGACY_PG_URL"]
 
     # 4. Verify Source 2 (MySQL)
     assert env_vars["SRC_INVENTORY_MYSQL_TYPE"] == "mysql"
-    assert "mysql+pymysql://root:<SRC_INVENTORY_MYSQL_PASSWORD>@host.docker.internal:3306/<SRC_INVENTORY_MYSQL_NAME>" == env_vars["SRC_INVENTORY_MYSQL_URL"]
+    assert "mysql+pymysql://<SRC_INVENTORY_MYSQL_USER>:<SRC_INVENTORY_MYSQL_PASSWORD>@<SRC_INVENTORY_MYSQL_HOST>:<SRC_INVENTORY_MYSQL_PORT>/<SRC_INVENTORY_MYSQL_NAME>" == env_vars["SRC_INVENTORY_MYSQL_URL"]
 
     # 5. Verify Destination (Postgres)
     assert env_vars["DEST_DWH_POSTGRES_TYPE"] == "postgresql"
-    assert "postgresql://postgres:<DEST_DWH_POSTGRES_PASSWORD>@host.docker.internal:5432/<DEST_DWH_POSTGRES_NAME>" == env_vars["DEST_DWH_POSTGRES_URL"]
+    assert "postgresql://<DEST_DWH_POSTGRES_USER>:<DEST_DWH_POSTGRES_PASSWORD>@<DEST_DWH_POSTGRES_HOST>:<DEST_DWH_POSTGRES_PORT>/<DEST_DWH_POSTGRES_NAME>" == env_vars["DEST_DWH_POSTGRES_URL"]
     assert env_vars["DEST_DB_URL"] == env_vars["DEST_DWH_POSTGRES_URL"]
 
     # 6. Verify Bash command syntax

@@ -1,13 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { InitialDataSourceCreate, ValidSourceType } from '../../types/agent';
 import {
   ArrowLeft,
   ArrowRight,
   Database,
-  FileSpreadsheet,
-  FileText,
   HardDrive,
   Server,
 } from 'lucide-react';
@@ -19,6 +17,10 @@ interface DatabaseConfigFormProps {
     agentIdentifier: string;
     sources: InitialDataSourceCreate[];
     destination: InitialDataSourceCreate;
+    // Client-side-only connection details (host/port/username/database/ssl),
+    // keyed by identifier. NEVER sent to the backend API -- only used
+    // locally by DockerCommandOutput to fill in the displayed command.
+    connectionDetailsByIdentifier: Record<string, { host: string; port: string; username: string; database: string; ssl: boolean }>;
   }) => void;
   onBack: () => void;
   isSubmitting?: boolean;
@@ -60,24 +62,6 @@ export const SUPPORTED_ENGINES: {
     hex: '#34d399',
     border: 'border-emerald-400/30',
   },
-  {
-    type: 'csv',
-    name: 'CSV File',
-    category: 'file',
-    icon: FileText,
-    color: 'bg-purple-400/10 text-purple-400',
-    hex: '#c084fc',
-    border: 'border-purple-400/30',
-  },
-  {
-    type: 'excel',
-    name: 'Excel Sheet',
-    category: 'file',
-    icon: FileSpreadsheet,
-    color: 'bg-teal-400/10 text-teal-400',
-    hex: '#2dd4bf',
-    border: 'border-teal-400/30',
-  },
 ];
 
 export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
@@ -109,6 +93,40 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
     identifier: 'dst_db_main',
   });
 
+  interface ConnectionDetails {
+    host: string;
+    port: string;
+    username: string;
+    database: string;
+    ssl: boolean;
+  }
+
+  // Local-only connection details, keyed by identifier. This state is
+  // NEVER included in the onSubmit payload sent to the backend -- it only
+  // ever gets read by DockerCommandOutput (a sibling component, wired via
+  // the parent page) to fill in the displayed docker command in the
+  // browser. Do not add these fields to InitialDataSourceCreate or to the
+  // onSubmit payload.
+  const [connectionDetails, setConnectionDetails] = useState<Record<string, ConnectionDetails>>(() => {
+    const initial: Record<string, ConnectionDetails> = {};
+    sources.forEach((s) => {
+      initial[s.identifier] = { host: '', port: '', username: '', database: '', ssl: false };
+    });
+    initial[destination.identifier] = { host: '', port: '', username: '', database: '', ssl: false };
+    return initial;
+  });
+
+  const handleConnectionDetailChange = (
+    identifier: string,
+    field: keyof ConnectionDetails,
+    value: string | boolean
+  ) => {
+    setConnectionDetails((prev) => ({
+      ...prev,
+      [identifier]: { ...(prev[identifier] || { host: '', port: '', username: '', database: '', ssl: false }), [field]: value },
+    }));
+  };
+
   const handleSourceChange = (
     index: number,
     field: keyof InitialDataSourceCreate,
@@ -126,6 +144,7 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
       agentIdentifier: agentIdentifier.trim(),
       sources,
       destination,
+      connectionDetailsByIdentifier: connectionDetails,
     });
   };
 
@@ -135,21 +154,95 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
     return found ? found.hex : '#38bdf8';
   };
 
-  // SVG layout metrics for 3-column split wires
-  const svgW = 160;
-  const cardEstimateH = 320; // Estimated height per source config card
+  // Dynamic layout measurement for source cards & SVG pipeline wires
+  const sourceCardRefs = useRef<(HTMLDivElement | null)[]>([]);
+  const sourcesContainerRef = useRef<HTMLDivElement | null>(null);
+  const middleColRef = useRef<HTMLDivElement | null>(null);
+
+  // Default fallback estimate based on current card height with connection fields
+  const cardEstimateH = 485;
   const gap = 20;
-  const cardsTotalH = sourceCount * cardEstimateH + (sourceCount - 1) * gap;
-  const totalH = Math.max(340, cardsTotalH);
-  const destY = totalH / 2;
-  const mergeX = sourceCount === 1 ? svgW : 110;
+  const fallbackTotalH = Math.max(340, sources.length * cardEstimateH + Math.max(0, sources.length - 1) * gap);
+  const fallbackDestY = Math.round(fallbackTotalH / 2);
+
+  const [measuredLayout, setMeasuredLayout] = useState<{
+    startYs: number[];
+    destY: number;
+    totalH: number;
+  } | null>(null);
+
+  const updateLayout = useCallback(() => {
+    if (!middleColRef.current || !sourcesContainerRef.current) return;
+
+    const svgRect = middleColRef.current.getBoundingClientRect();
+    const sourcesRect = sourcesContainerRef.current.getBoundingClientRect();
+
+    const startYs = sources.map((_, i) => {
+      const cardEl = sourceCardRefs.current[i];
+      if (cardEl) {
+        const cardRect = cardEl.getBoundingClientRect();
+        return Math.round(cardRect.top + cardRect.height / 2 - svgRect.top);
+      }
+      return Math.round(i * (cardEstimateH + gap) + cardEstimateH / 2);
+    });
+
+    const measuredTotalH = Math.max(340, Math.round(sourcesRect.height));
+    const measuredDestY = Math.round(measuredTotalH / 2);
+
+    setMeasuredLayout((prev) => {
+      if (
+        prev &&
+        prev.totalH === measuredTotalH &&
+        prev.destY === measuredDestY &&
+        prev.startYs.length === startYs.length &&
+        prev.startYs.every((y, idx) => Math.abs(y - startYs[idx]) <= 1)
+      ) {
+        return prev;
+      }
+      return { startYs, destY: measuredDestY, totalH: measuredTotalH };
+    });
+  }, [sources]);
+
+  useEffect(() => {
+    updateLayout();
+
+    const frameId = requestAnimationFrame(() => {
+      updateLayout();
+    });
+
+    if (typeof ResizeObserver !== 'undefined' && sourcesContainerRef.current) {
+      const ro = new ResizeObserver(() => {
+        updateLayout();
+      });
+      ro.observe(sourcesContainerRef.current);
+      sourceCardRefs.current.forEach((el) => {
+        if (el) ro.observe(el);
+      });
+      return () => {
+        cancelAnimationFrame(frameId);
+        ro.disconnect();
+      };
+    } else {
+      window.addEventListener('resize', updateLayout);
+      return () => {
+        cancelAnimationFrame(frameId);
+        window.removeEventListener('resize', updateLayout);
+      };
+    }
+  }, [updateLayout]);
+
+  const totalH = measuredLayout?.totalH ?? fallbackTotalH;
+  const destY = measuredLayout?.destY ?? fallbackDestY;
+  const svgW = 160;
+  const mergeX = sources.length === 1 ? svgW : 110;
 
   // Generate smooth organic wires matching each selected source engine's hex color
   const wires = sources.map((src, i) => {
-    const startY = i * (cardEstimateH + gap) + cardEstimateH / 2;
+    const startY =
+      measuredLayout?.startYs[i] ?? Math.round(i * (cardEstimateH + gap) + cardEstimateH / 2);
     const hex = getEngineHex(src.type);
 
-    if (sourceCount === 1 || Math.abs(startY - destY) < 1) {
+    if (sources.length === 1) {
       return {
         id: `form-wire-${i}`,
         d: `M 0 ${startY} L ${svgW} ${destY}`,
@@ -157,6 +250,17 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
         hex,
         duration: '1.2s',
         delay: '0s',
+      };
+    }
+
+    if (Math.abs(startY - destY) < 2) {
+      return {
+        id: `form-wire-${i}`,
+        d: `M 0 ${startY} L ${mergeX} ${destY}`,
+        startY,
+        hex,
+        duration: '1.2s',
+        delay: `${i * 0.15}s`,
       };
     }
 
@@ -247,12 +351,15 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
               Source Database Engines ({sourceCount})
             </div>
 
-            <div className="space-y-5">
+            <div ref={sourcesContainerRef} className="space-y-5">
               {sources.map((source, index) => {
                 const currentEngineHex = getEngineHex(source.type);
 
                 return (
                   <div
+                    ref={(el) => {
+                      sourceCardRefs.current[index] = el;
+                    }}
                     key={index}
                     className="p-5 rounded-none bg-zinc-950 border border-zinc-800 space-y-4 relative transition-all"
                     style={{ borderColor: `${currentEngineHex}50` }}
@@ -308,6 +415,60 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
                       </div>
                     </div>
 
+                    {/* Connection Details (host/port/username/database only -- password is
+                        NEVER collected here; it stays a manual placeholder the user fills
+                        into the copied command themselves, so it never touches the browser
+                        state or this form at all). */}
+                    <div className="space-y-2 pt-2 border-t border-zinc-900">
+                      <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                        Connection Details
+                      </label>
+                      <div className="grid grid-cols-3 gap-2">
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.host || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'host', e.target.value)}
+                          placeholder="Host (e.g. db.example.com)"
+                          className="col-span-2 w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.port || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'port', e.target.value)}
+                          placeholder="Port"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.username || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'username', e.target.value)}
+                          placeholder="Username"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                        <input
+                          type="text"
+                          value={connectionDetails[source.identifier]?.database || ''}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'database', e.target.value)}
+                          placeholder="Database name"
+                          className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                        />
+                      </div>
+                      <label className="flex items-center gap-2 text-[10px] font-mono text-zinc-400 pt-1">
+                        <input
+                          type="checkbox"
+                          checked={connectionDetails[source.identifier]?.ssl || false}
+                          onChange={(e) => handleConnectionDetailChange(source.identifier, 'ssl', e.target.checked)}
+                          className="accent-sky-400"
+                        />
+                        Require SSL
+                      </label>
+                      <p className="text-[9px] text-zinc-600 font-mono">
+                        Password is entered later, directly in your terminal -- never here.
+                      </p>
+                    </div>
+
                     {/* Engine Selector Tiles */}
                     <div>
                       <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400 mb-2">
@@ -343,12 +504,12 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
           </div>
 
           {/* Middle Column: Dynamic Animated Engine-Colored Wires SVG */}
-          <div className="md:col-span-2 flex flex-col justify-start items-center">
+          <div className="hidden md:flex md:col-span-2 flex-col justify-start items-center">
             <div className="text-[10px] font-mono font-bold uppercase tracking-widest text-sky-400 mb-2 h-[18px] flex items-center justify-center animate-pulse">
               Engine Streams
             </div>
 
-            <div style={{ height: `${totalH}px` }} className="w-full relative">
+            <div ref={middleColRef} style={{ height: `${totalH}px` }} className="w-full relative">
               <svg
                 style={{ height: `${totalH}px` }}
                 viewBox={`0 0 ${svgW} ${totalH}`}
@@ -523,6 +684,60 @@ export const DatabaseConfigForm: React.FC<DatabaseConfigFormProps> = ({
                     className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-blue-400 font-mono text-xs focus:outline-none focus:border-blue-400 transition-colors"
                   />
                 </div>
+              </div>
+
+              {/* Connection Details (host/port/username/database only -- password is
+                  NEVER collected here; it stays a manual placeholder the user fills
+                  into the copied command themselves, so it never touches the browser
+                  state or this form at all). */}
+              <div className="space-y-2 pt-2 border-t border-zinc-900">
+                <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-400">
+                  Connection Details
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.host || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'host', e.target.value)}
+                    placeholder="Host (e.g. db.example.com)"
+                    className="col-span-2 w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.port || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'port', e.target.value)}
+                    placeholder="Port"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.username || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'username', e.target.value)}
+                    placeholder="Username"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                  <input
+                    type="text"
+                    value={connectionDetails[destination.identifier]?.database || ''}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'database', e.target.value)}
+                    placeholder="Database name"
+                    className="w-full px-3 py-2 rounded-none bg-black border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 transition-colors font-mono"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-[10px] font-mono text-zinc-400 pt-1">
+                  <input
+                    type="checkbox"
+                    checked={connectionDetails[destination.identifier]?.ssl || false}
+                    onChange={(e) => handleConnectionDetailChange(destination.identifier, 'ssl', e.target.checked)}
+                    className="accent-sky-400"
+                  />
+                  Require SSL
+                </label>
+                <p className="text-[9px] text-zinc-600 font-mono">
+                  Password is entered later, directly in your terminal -- never here.
+                </p>
               </div>
 
               {/* Engine Selector Tiles for Destination */}
