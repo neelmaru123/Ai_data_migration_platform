@@ -398,12 +398,36 @@ class LLMPlanGeneratorService:
         llm = self._get_llm()
         parser = PydanticOutputParser(pydantic_object=TransformationPlanAST)
 
+        table_count_before = len(current_ast_dict.get("table_mappings", []))
+
         feedback_instructions = []
         if user_feedback:
             feedback_instructions.append(f"USER FEEDBACK INSTRUCTION:\n{user_feedback}")
         if validation_errors:
             err_list = "\n".join(f"- {err}" for err in validation_errors)
             feedback_instructions.append(f"STRUCTURAL VALIDATION ERRORS TO FIX:\n{err_list}")
+
+        feasibility_rules = (
+            f"\nCRITICAL FEASIBILITY & TRANSPARENCY RULES FOR REFINEMENT:\n"
+            f"1. The current plan has {table_count_before} target tables.\n"
+            f"2. Evaluate the USER FEEDBACK INSTRUCTION against the source database metadata and zero-data-loss constraints.\n"
+            f"3. If the user asks for a structural change that is IMPOSSIBLE, WOULD CAUSE DATA LOSS, or VIOLATES SCHEMA FEASIBILITY "
+            f"(such as reducing 15 source tables into 12 tables when tables have incompatible schemas and no shared keys):\n"
+            f"   - DO NOT claim that you consolidated tables if you did not actually change table_mappings!\n"
+            f"   - Set refinement_feedback.applied = false\n"
+            f"   - Set refinement_feedback.verdict = 'infeasible_rejected'\n"
+            f"   - Set refinement_feedback.explanation = a clear, detailed, and respectful technical response explaining to the user "
+            f"     exactly why their request is not possible without data loss, identifying the incompatible tables or constraints.\n"
+            f"   - Keep the safe, lossless tables in table_mappings.\n"
+            f"4. If the user's request IS feasible and safe to apply:\n"
+            f"   - Apply the requested adjustments to table_mappings and column_mappings.\n"
+            f"   - Set refinement_feedback.applied = true (or verdict = 'partially_applied' if only safe subsets were applied).\n"
+            f"   - Set refinement_feedback.explanation = a summary of the adjustments applied.\n"
+            f"5. Always set refinement_feedback.user_prompt = the user feedback text.\n"
+            f"6. Set refinement_feedback.table_count_before = {table_count_before} and table_count_after = count of updated target tables.\n"
+            f"7. Set refinement_feedback.changes_summary = bullet points describing what was changed or what constraints prevented changes.\n"
+        )
+        feedback_instructions.append(feasibility_rules)
 
         instructions_str = "\n\n".join(feedback_instructions)
 
@@ -417,7 +441,7 @@ class LLMPlanGeneratorService:
                             f"{parser.get_format_instructions()}\n\n"
                             f"Here is the database metadata context:\n{context_str}\n\n"
                             f"Here is the CURRENT TransformationPlan AST blueprint:\n```json\n{json.dumps(current_ast_dict, indent=2)}\n```\n\n"
-                            f"Apply the following refinement instructions to update and improve the TransformationPlan AST blueprint:\n"
+                            f"Apply the following refinement instructions to evaluate, update, and improve the TransformationPlan AST blueprint:\n"
                             f"{instructions_str}\n\n"
                             f"Output the updated complete TransformationPlan JSON matching the schema."
                         )
@@ -438,6 +462,36 @@ class LLMPlanGeneratorService:
                 response = llm.invoke(messages)
                 content = str(response.content)
                 result = parser.parse(content)
+
+                # Defensive fallback: guarantee refinement_feedback is populated even if model omitted it
+                table_count_after = len(result.table_mappings)
+                if result.refinement_feedback is None:
+                    from app.modules.migration_plans.migration_plans_schemas import RefinementFeedback
+                    applied = (table_count_before != table_count_after) or (user_feedback is None)
+                    verdict = "applied" if applied else "infeasible_rejected"
+                    explanation = result.ai_explanation
+                    if not applied and user_feedback:
+                        explanation = (
+                            f"The requested refinement ('{user_feedback}') could not be applied without data loss or schema incompatibilities. "
+                            f"The original {table_count_before} target tables were preserved to guarantee 100% data fidelity."
+                        )
+                    result.refinement_feedback = RefinementFeedback(
+                        applied=applied,
+                        verdict=verdict,
+                        user_prompt=user_feedback,
+                        explanation=explanation,
+                        table_count_before=table_count_before,
+                        table_count_after=table_count_after,
+                        changes_summary=result.warnings or [],
+                    )
+                else:
+                    if result.refinement_feedback.table_count_before is None:
+                        result.refinement_feedback.table_count_before = table_count_before
+                    if result.refinement_feedback.table_count_after is None:
+                        result.refinement_feedback.table_count_after = table_count_after
+                    if not result.refinement_feedback.user_prompt and user_feedback:
+                        result.refinement_feedback.user_prompt = user_feedback
+
                 logger.info(f"LLM plan refinement succeeded on attempt {attempt}.")
                 return result
             except Exception as exc:

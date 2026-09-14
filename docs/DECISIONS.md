@@ -1216,3 +1216,31 @@ Addressed three critical conversion flaws when migrating relational databases (e
 ### 4. Trade-offs & Future Considerations
 - **Nullable Foreign Keys**: When a source foreign key is `NULL` or empty, the transformer evaluates to `None` rather than generating a fallback UUID to preserve relational nullability.
 - **Target Detection**: Added target database type auto-detection in both the FastAPI service (`MigrationPlanService.create_plan_for_agent`) and the Next.js UI (`GeneratePlanAction.tsx`), ensuring plans default to the agent's target data source engine (e.g., `mongodb`).
+
+---
+
+## [2026-09-14] - AI Plan Refinement Feasibility Feedback & Transparent Response System
+
+### 1. Decision Summary
+Implemented an end-to-end transparent feedback architecture for natural language AI plan refinement prompts. When a user requests an architectural change (e.g., *"Can we do that same conversion without data loss in 12 tables?"*), the system evaluates feasibility against source schemas, enforces anti-hallucination guardrails, and renders a dedicated **AI Refinement Response Card** in the Next.js UI with prompt echo, feasibility verdict badge, table count deltas, and plain-English technical rationale.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - When users submitted refinement prompts in `/transformation-plan`, the UI only fired a transient, generic toast (`"LLM re-reviewed & refined blueprint successfully!"`) regardless of whether the requested change was feasible.
+  - If a user requested an impossible change that would cause data loss (e.g., forcing 14 distinct domain collections into 12 tables without common keys), the LLM kept all 14 tables in `table_mappings` to preserve zero data loss, but in `ai_explanation` hallucinated that it had consolidated into 12 collections.
+  - Users experienced total opacity: the blueprint remained unchanged, the toast claimed success, and no explanation was provided detailing why the requested consolidation could not be performed.
+- **Chosen Solution**:
+  1. **Structured AST Schema (`RefinementFeedback`)**: Added `refinement_feedback` to `TransformationPlanAST` in `migration_plans_schemas.py`, capturing `applied: bool`, `verdict: 'applied' | 'partially_applied' | 'infeasible_rejected'`, `user_prompt: str`, `explanation: str`, `table_count_before: int`, `table_count_after: int`, and `changes_summary: List[str]`.
+  2. **Feasibility Prompting & Anti-Hallucination Guardrails**: Updated `llm_plan_generator.refine()` with strict feasibility instructions forbidding the model from claiming it merged tables if `table_mappings` was not actually changed, requiring explicit `applied=false` and `verdict='infeasible_rejected'` with technical justification.
+  3. **Defensive Fallback Mechanism**: Added runtime defensive fallback in `refine()` so that even if an LLM output omits the feedback object, it is automatically synthesized from before/after table counts and warnings.
+  4. **Dedicated UI Component (`RefinementFeedbackCard`)**: Replaced generic toast reliance with a prominent dark cyberpunk response card above the prompt input and in version history, displaying prompt echo, status badge (`[NOT FEASIBLE — PROTECTED FROM DATA LOSS]`), table deltas (`14 → 14 Preserved`), and detailed explanation.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Rely Solely on Dynamic Toast Messages**:
+  - *Rejected*: Toast notifications disappear after a few seconds and cannot display multi-paragraph technical explanations or before/after metrics without cluttering the screen.
+- **Alternative B: Force Table Merges to Obey Prompt Despite Data Loss**:
+  - *Rejected*: Forcing unrelated tables (such as clickstream telemetry and inventory items) into shared collections causes severe schema corruption and violates the platform's zero-data-loss guarantee. Preserving lossless schemas while explaining the constraint to the user is the only architecturally sound choice.
+
+### 4. Trade-offs & Future Considerations
+- **Historical Version Backward Compatibility**: In `PlanBlueprintViewer.tsx`, added a fallback synthesizer so that plans generated prior to this schema update also display meaningful explanation cards when users inspect older version snapshots.
+

@@ -63,6 +63,16 @@ export interface TableMappingSpec {
   column_mappings: ColumnMappingSpec[];
 }
 
+export interface RefinementFeedback {
+  applied: boolean;
+  verdict: 'applied' | 'partially_applied' | 'infeasible_rejected';
+  user_prompt?: string | null;
+  explanation: string;
+  table_count_before?: number | null;
+  table_count_after?: number | null;
+  changes_summary?: string[];
+}
+
 export interface TransformationPlanAST {
   target_database_type: string;
   ai_explanation: string;
@@ -71,6 +81,7 @@ export interface TransformationPlanAST {
   table_mappings: TableMappingSpec[];
   pre_migration_ddl: string[];
   post_migration_ddl: string[];
+  refinement_feedback?: RefinementFeedback | null;
 }
 
 export interface TargetDatabaseConfig {

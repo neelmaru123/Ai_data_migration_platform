@@ -33,9 +33,18 @@
    - `PlanBlueprintViewer` fetches plan detail via `planService.getPlan(planId)` (`GET /api/v1/plans/{plan_id}`).
    - Checks active job status via `executionService.listUserExecutions()` to mount active job banner if execution is already running.
    - Renders **Execution Order Sequence Timeline** (dependency order), **Table Mapping Matrix**, and **AI Confidence Score**.
-3. **AI Plan Refinement**:
-   - User types prompt feedback -> Calls `planService.refinePlan(planId, prompt)` (`POST /api/v1/plans/{plan_id}/refine`).
-   - Updates AST dynamically.
+3. **AI Plan Refinement & Feasibility Feedback Loop**:
+   - User enters natural language prompt (e.g. *"Can we do that same conversion without data loss in 12 tables?"*) in `PlanBlueprintViewer`.
+   - Submits `planService.refinePlan(planId, prompt)` (`POST /api/v1/plans/{plan_id}/refine`).
+   - `MigrationPlanService.refine_plan()` locks plan row with `with_for_update()` and delegates to `llm_plan_generator.refine()`.
+   - LLM evaluates feasibility against source schemas and zero-data-loss rules.
+   - If infeasible or rejected (e.g., merging incompatible tables):
+     - LLM sets `refinement_feedback.applied = false`, `verdict = 'infeasible_rejected'`, and provides detailed technical explanation.
+     - Preserves the safe 14 tables in `table_mappings` to prevent data loss.
+   - If feasible:
+     - Applies changes, sets `refinement_feedback.applied = true`, and describes modifications.
+   - `MigrationPlanService` records a new `MigrationPlanVersion` capturing `refinement_feedback` and returns updated `PlanDetailResponse`.
+   - `PlanBlueprintViewer` renders `RefinementFeedbackCard` displaying prompt echo, status badge (`[NOT FEASIBLE — PROTECTED FROM DATA LOSS]`), table deltas (`14 → 14 Preserved`), and complete AI explanation.
 4. **Plan Approval**:
    - User clicks **"APPROVE MIGRATION PLAN"** -> Calls `planService.approvePlan(planId)` (`POST /api/v1/plans/{plan_id}/approve`).
    - Transition status to `COMPLETED` / `APPROVED`.

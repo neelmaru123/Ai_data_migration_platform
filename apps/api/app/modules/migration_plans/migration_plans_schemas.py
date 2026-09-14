@@ -157,6 +157,45 @@ class TableMappingSpec(BaseModel):
 
 
 # ============================================================================
+# Refinement Feedback Specification (LLM Conversational Rationale)
+# ============================================================================
+
+class RefinementFeedback(BaseModel):
+    """
+    Direct feedback and feasibility assessment from the LLM regarding user-provided refinement instructions.
+    Explains clearly whether requested structural changes were feasible or rejected to prevent data loss.
+    """
+    applied: bool = Field(
+        default=True,
+        description="Whether the user requested change was feasible and applied without data loss."
+    )
+    verdict: Literal["applied", "partially_applied", "infeasible_rejected"] = Field(
+        default="applied",
+        description="Classification of the outcome: 'applied', 'partially_applied', or 'infeasible_rejected'."
+    )
+    user_prompt: Optional[str] = Field(
+        None,
+        description="The user refinement prompt that was evaluated."
+    )
+    explanation: str = Field(
+        ...,
+        description="Direct plain-English explanation detailing whether the request was carried out, or explicitly detailing why it could not be done (e.g. why reducing to 12 tables is not possible without data loss)."
+    )
+    table_count_before: Optional[int] = Field(
+        None,
+        description="Total target tables in the plan prior to refinement."
+    )
+    table_count_after: Optional[int] = Field(
+        None,
+        description="Total target tables in the plan after refinement."
+    )
+    changes_summary: List[str] = Field(
+        default_factory=list,
+        description="Summary list of specific adjustments made or constraints evaluated."
+    )
+
+
+# ============================================================================
 # Top-Level Transformation Plan AST (LLM Output Contract)
 # ============================================================================
 
@@ -189,6 +228,10 @@ class TransformationPlanAST(BaseModel):
     post_migration_ddl: List[str] = Field(
         default_factory=list,
         description="SQL DDL statements to execute AFTER migration (CREATE INDEX, ADD CONSTRAINT, etc.)"
+    )
+    refinement_feedback: Optional[RefinementFeedback] = Field(
+        None,
+        description="Detailed conversational feedback from the LLM regarding user refinement instructions."
     )
 
 
