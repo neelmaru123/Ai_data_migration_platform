@@ -378,9 +378,11 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       .catch(() => {});
   }, [initialPlan.id]);
 
+  const isJobActive = Boolean(activeJob && ['queued', 'preparing', 'running'].includes(activeJob.status));
+
   // Open Execution Confirmation Modal
   const handleOpenExecutionModal = () => {
-    if (isApproving || isApproved || isDryRunning || isRefining || plan.status === 'refining') return;
+    if (isApproving || isJobActive || isDryRunning || isRefining || plan.status === 'refining') return;
 
     if (!plan.is_valid) {
       toast.error('Cannot execute invalid plan! Fix schema feasibility errors first.');
@@ -399,9 +401,12 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
 
     setIsApproving(true);
     try {
-      // 1. Approve Plan
-      const approved = await planService.approvePlan(plan.id);
-      setPlan(approved);
+      // 1. Approve Plan if not already approved
+      let currentPlan = plan;
+      if (plan.status !== 'approved' && plan.status !== 'completed') {
+        currentPlan = await planService.approvePlan(plan.id);
+        setPlan(currentPlan);
+      }
 
       // 2. Trigger Execution Job on Docker Agent with truncate_target option
       const job = await executionService.startPlanExecution(plan.id, {
@@ -425,7 +430,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       }
 
       toast.success('Plan approved! Data migration job queued on Docker Agent.');
-      if (onPlanUpdated) onPlanUpdated(approved);
+      if (onPlanUpdated) onPlanUpdated(currentPlan);
     } catch (err: any) {
       const msg = err.response?.data?.detail || err.message || 'Failed to execute plan.';
       if (err.response?.status === 409) {
@@ -1178,30 +1183,43 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-col sm:flex-row gap-3">
-            <input
-              type="text"
+          <div className="space-y-3">
+            <textarea
               required
+              rows={3}
               disabled={isRefining}
               value={refinementPrompt}
               onChange={(e) => setRefinementPrompt(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  if (refinementPrompt.trim() && !isRefining) {
+                    handleRefinePlan(e as any);
+                  }
+                }
+              }}
               placeholder="e.g. Map user_id to account_uuid and convert status int enum to string varchar"
-              className="flex-1 px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors disabled:opacity-50"
+              className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors disabled:opacity-50 resize-y min-h-[80px] leading-relaxed"
             />
-            <button
-              type="submit"
-              disabled={isRefining}
-              className="py-3 px-6 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 disabled:opacity-50 whitespace-nowrap font-mono inline-flex items-center gap-2"
-            >
-              {isRefining ? (
-                <>
-                  <span className="w-2 h-2 rounded-none bg-black animate-ping" />
-                  <span>Refining in Background ({refiningElapsedSec}s)...</span>
-                </>
-              ) : (
-                'Refine with LLM'
-              )}
-            </button>
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pt-1">
+              <span className="text-[10px] text-zinc-500 font-mono">
+                💡 Press <kbd className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 rounded-none text-zinc-300">Enter</kbd> to refine, <kbd className="px-1.5 py-0.5 bg-zinc-900 border border-zinc-800 rounded-none text-zinc-300">Shift + Enter</kbd> for new line
+              </span>
+              <button
+                type="submit"
+                disabled={isRefining}
+                className="py-2.5 px-6 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider transition-colors shadow-lg shadow-sky-950/50 disabled:opacity-50 whitespace-nowrap font-mono inline-flex items-center gap-2 self-end sm:self-auto"
+              >
+                {isRefining ? (
+                  <>
+                    <span className="w-2 h-2 rounded-none bg-black animate-ping" />
+                    <span>Refining in Background ({refiningElapsedSec}s)...</span>
+                  </>
+                ) : (
+                  'Refine with LLM'
+                )}
+              </button>
+            </div>
           </div>
 
           {isRefining && (
@@ -1231,7 +1249,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           <button
             type="button"
             onClick={handleDryRun}
-            disabled={isDryRunning || isApproving || isRefining || plan.status === 'refining'}
+            disabled={isDryRunning || isApproving || isJobActive || isRefining || plan.status === 'refining'}
             className="py-3.5 px-6 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all border border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 shadow-lg disabled:opacity-50"
           >
             {isDryRunning ? 'Simulating Dry Run...' : '⚡ Run Dry Run (Simulation)'}
@@ -1241,14 +1259,24 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           <button
             type="button"
             onClick={handleOpenExecutionModal}
-            disabled={isApproving || isApproved || isDryRunning || isRefining || plan.status === 'refining'}
+            disabled={isApproving || isJobActive || isDryRunning || isRefining || plan.status === 'refining'}
             className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
-              isApproved
-                ? 'bg-emerald-500 text-black cursor-default'
+              isJobActive
+                ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed border border-zinc-700'
+                : isApproved
+                ? 'bg-emerald-500 hover:bg-emerald-400 text-black shadow-emerald-950/50 hover:scale-[1.01]'
                 : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
             } disabled:opacity-50`}
           >
-            {isApproved ? 'PLAN APPROVED ✓' : isApproving ? 'Executing on Agent...' : isRefining || plan.status === 'refining' ? 'REFINEMENT IN PROGRESS...' : 'APPROVE & EXECUTE MIGRATION'}
+            {isJobActive
+              ? 'EXECUTION IN PROGRESS...'
+              : isApproving
+              ? 'Executing on Agent...'
+              : isRefining || plan.status === 'refining'
+              ? 'REFINEMENT IN PROGRESS...'
+              : isApproved
+              ? '⚡ EXECUTE MIGRATION'
+              : 'APPROVE & EXECUTE MIGRATION'}
           </button>
         </div>
       </div>

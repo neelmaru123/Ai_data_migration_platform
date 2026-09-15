@@ -17,6 +17,17 @@ export const executionService = {
   },
 
   /**
+   * Cancel an active migration or dry-run execution job
+   */
+  async cancelExecution(jobId: string, reason?: string): Promise<ExecutionJobResponse> {
+    const response = await apiClient.post<ExecutionJobResponse>(
+      `/executions/${jobId}/cancel`,
+      { reason }
+    );
+    return response.data;
+  },
+
+  /**
    * Fetch real-time progress details of a specific execution job by ID
    */
   async getExecutionDetails(jobId: string): Promise<ExecutionJobResponse> {

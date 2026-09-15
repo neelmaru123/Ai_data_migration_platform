@@ -665,7 +665,7 @@ def start_heartbeat_thread(
     version: str,
     interval: int,
     stop_event: threading.Event,
-    heartbeat_config: "HeartbeatConfig",
+    heartbeat_config: Optional["HeartbeatConfig"] = None,
 ) -> threading.Thread:
     """
     Launches a dedicated daemon background thread that sends periodic heartbeats
@@ -675,6 +675,11 @@ def start_heartbeat_thread(
       - RESUME_ACTIVE_MODE: restores 20-sec interval when a new job is detected
       - SHUTDOWN          : sets stop_event to trigger graceful container exit (Option A)
     """
+    if heartbeat_config is None:
+        heartbeat_config = HeartbeatConfig()
+        heartbeat_config._interval = interval
+        heartbeat_config.ACTIVE_INTERVAL = interval
+
     def _run() -> None:
         logger.info(f"Background heartbeat loop started (initial interval: {heartbeat_config.current}s).")
         while not stop_event.is_set():

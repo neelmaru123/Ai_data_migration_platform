@@ -15,6 +15,11 @@ class ExecutionStartRequest(BaseModel):
     truncate_target: bool = Field(default=False, description="Clean wipe/drop all existing tables in target database before executing DDL and migration")
 
 
+class ExecutionCancelRequest(BaseModel):
+    """Optional request payload when cancelling/resetting an active execution job."""
+    reason: Optional[str] = Field(default=None, description="Optional cancellation reason or explanation")
+
+
 class ExecutionProgressUpdate(BaseModel):
     """Progress metrics payload sent periodically by Docker Agent."""
     status: str = Field(..., examples=["running", "completed", "failed", "ddl_executing", "dry_run_completed"])

@@ -5,6 +5,8 @@ Unit tests for PostgreSQL to MongoDB migration fixes:
 3. MigrationPlanValidator automatic FK type synchronization when parent PK is UUID
 """
 
+import sys
+from pathlib import Path
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,8 +14,18 @@ import polars as pl
 import pytest
 from bson import Decimal128
 
-from apps.agent.engine.transformers.ast_transformer import ASTTransformer
-from apps.agent.engine.writers.target_writer import _sanitize_rows_for_target
+REPO_ROOT = Path(__file__).resolve().parents[3]
+AGENT_DIR = REPO_ROOT / "apps" / "agent"
+if str(AGENT_DIR) not in sys.path:
+    sys.path.insert(0, str(AGENT_DIR))
+
+try:
+    from engine.transformers.ast_transformer import ASTTransformer
+    from engine.writers.target_writer import _sanitize_rows_for_target
+except ImportError:
+    from apps.agent.engine.transformers.ast_transformer import ASTTransformer
+    from apps.agent.engine.writers.target_writer import _sanitize_rows_for_target
+
 from app.modules.migration_plans.migration_plans_engine.migration_plans_validator import MigrationPlanValidator
 
 

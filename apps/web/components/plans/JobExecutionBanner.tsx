@@ -19,6 +19,9 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
   const [logs, setLogs] = useState<string[]>([]);
   const [jobHistory, setJobHistory] = useState<ExecutionJobResponse[]>([]);
   const [isRetrying, setIsRetrying] = useState<boolean>(false);
+  const [isCancelling, setIsCancelling] = useState<boolean>(false);
+  const [showCancelModal, setShowCancelModal] = useState<boolean>(false);
+  const [cancelReason, setCancelReason] = useState<string>('');
   const [isDiagnosing, setIsDiagnosing] = useState<boolean>(false);
   const [copiedJobId, setCopiedJobId] = useState<boolean>(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -40,6 +43,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
 
   const status = (job.status || 'queued').toLowerCase();
   const isDryRunCompleted = status === 'dry_run_completed';
+  const isCancelled = status === 'cancelled';
   const isRunning =
     status === 'running' ||
     status === 'pending' ||
@@ -177,6 +181,28 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
     }
   };
 
+  // Handle Job Cancellation & Agent Release
+  const handleCancelJob = async () => {
+    if (isCancelling || !job.id) return;
+    setIsCancelling(true);
+    try {
+      const updated = await executionService.cancelExecution(job.id, cancelReason.trim() || 'Cancelled by user from web console.');
+      setJob(updated);
+      setShowCancelModal(false);
+      setLogs((prev) => [
+        ...prev,
+        `[${new Date().toLocaleTimeString()}] Execution cancelled by user. Docker Agent unassigned & released.`
+      ]);
+      toast.success('Execution cancelled! Migration plan is now unlocked for new runs.');
+      if (onJobUpdated) onJobUpdated(updated);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail || err?.message || 'Failed to cancel execution.';
+      toast.error(`Cancellation Error: ${detail}`);
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
   // Handle AI Error Diagnosis Request
   const handleTriggerDiagnosis = async () => {
     if (isDiagnosing || !job.id) return;
@@ -210,7 +236,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
 
   const getCurrentStepIndex = () => {
     if (isCompleted) return 3;
-    if (isFailed) return -1;
+    if (isFailed || isCancelled) return -1;
     const stage = (job.current_stage || '').toLowerCase();
     if (stage.includes('pre_ddl')) return 0;
     if (stage.includes('streaming') || stage.includes('data')) return 1;
@@ -239,10 +265,12 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               className={`text-[10px] font-bold tracking-widest px-2.5 py-1 rounded-none uppercase border flex items-center gap-1.5 shadow-sm ${
                 isDryRunCompleted
                   ? 'bg-amber-400/15 text-amber-300 border-amber-400/50 shadow-[0_0_12px_rgba(251,191,36,0.25)]'
-                  : isCompleted
+                  : isRealCompleted
                   ? 'bg-emerald-400/15 text-emerald-400 border-emerald-400/40 shadow-[0_0_12px_rgba(52,211,153,0.25)]'
                   : isFailed
                   ? 'bg-rose-500/15 text-rose-400 border-rose-500/40 shadow-[0_0_12px_rgba(244,63,94,0.25)]'
+                  : isCancelled
+                  ? 'bg-zinc-800/80 text-zinc-300 border-zinc-600 shadow-[0_0_12px_rgba(161,161,170,0.15)]'
                   : 'bg-sky-400/15 text-sky-400 border-sky-400/40 animate-pulse'
               }`}
             >
@@ -250,10 +278,12 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
                 className={`w-1.5 h-1.5 rounded-none ${
                   isDryRunCompleted
                     ? 'bg-amber-400'
-                    : isCompleted
+                    : isRealCompleted
                     ? 'bg-emerald-400'
                     : isFailed
                     ? 'bg-rose-500'
+                    : isCancelled
+                    ? 'bg-zinc-400'
                     : 'bg-sky-400 animate-ping'
                 }`}
               />
@@ -295,7 +325,7 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               <div className="w-16 h-2 bg-zinc-900 border border-zinc-800 overflow-hidden">
                 <div
                   className={`h-full transition-all duration-500 ${
-                    isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400'
+                    isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : isCancelled ? 'bg-zinc-500' : 'bg-sky-400'
                   }`}
                   style={{ width: `${progressPercent}%` }}
                 />
@@ -347,13 +377,26 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               <span>Open Live Monitor</span>
             </Link>
 
+            {/* Cancel Execution Button for Active Running Jobs */}
+            {isRunning && (
+              <button
+                type="button"
+                onClick={() => setShowCancelModal(true)}
+                disabled={isCancelling}
+                className="h-10 px-4 rounded-none bg-zinc-900 hover:bg-rose-950/60 text-rose-400 hover:text-rose-300 text-xs font-bold uppercase tracking-wider border border-rose-500/40 hover:border-rose-400 transition-all font-mono inline-flex items-center gap-1.5 shadow-sm"
+              >
+                <span>🛑</span>
+                <span>{isCancelling ? 'Cancelling...' : 'Cancel Execution'}</span>
+              </button>
+            )}
+
             {/* Execute For Real Secondary Button (Dry Run) */}
             {isDryRun && (
               <button
                 type="button"
                 onClick={handleExecuteForReal}
-                disabled={isExecutingReal}
-                className="h-10 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider border border-emerald-400 shadow-md hover:shadow-emerald-500/20 transition-all font-mono inline-flex items-center gap-1.5"
+                disabled={isExecutingReal || isRunning}
+                className="h-10 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider border border-emerald-400 shadow-md hover:shadow-emerald-500/20 transition-all font-mono inline-flex items-center gap-1.5 disabled:opacity-50"
               >
                 <span>⚡</span>
                 <span>{isExecutingReal ? 'Queuing Real Migration...' : 'Execute For Real'}</span>
@@ -369,6 +412,19 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
                 <span>+</span>
                 <span>Create New Migration</span>
               </Link>
+            )}
+
+            {/* Re-run Button for Cancelled Jobs */}
+            {isCancelled && (
+              <button
+                type="button"
+                onClick={handleRetryJob}
+                disabled={isRetrying}
+                className="h-10 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider border border-sky-400 shadow-md transition-all font-mono inline-flex items-center gap-1.5"
+              >
+                <span>⚡</span>
+                <span>{isRetrying ? 'Starting...' : isDryRun ? 'Re-run Dry Run' : 'Re-run Migration'}</span>
+              </button>
             )}
 
             {/* Active Retry / Resume Button for Failed Jobs */}
@@ -422,10 +478,41 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
             <button
               type="button"
               onClick={handleExecuteForReal}
-              disabled={isExecutingReal}
-              className="py-2 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider font-mono shadow-md whitespace-nowrap"
+              disabled={isExecutingReal || isRunning}
+              className="py-2 px-4 rounded-none bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold uppercase tracking-wider font-mono shadow-md whitespace-nowrap disabled:opacity-50"
             >
               {isExecutingReal ? 'Starting Real Run...' : '⚡ Execute For Real'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* CANCELLED JOB BANNER */}
+      {isCancelled && (
+        <div className="p-5 bg-zinc-950/80 border border-zinc-700 text-zinc-300 font-mono text-xs space-y-3 shadow-md animate-fadeIn">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 font-bold">
+            <span className="flex items-center gap-2 text-zinc-400 uppercase text-xs tracking-wider">
+              <span className="w-2.5 h-2.5 bg-zinc-500 rounded-none" />
+              JOB CANCELLED / RESET BY USER
+            </span>
+            <span className="text-[9px] px-2 py-0.5 bg-zinc-800 text-zinc-400 border border-zinc-600 uppercase font-bold tracking-wider">
+              PLAN UNLOCKED ✓
+            </span>
+          </div>
+          <p className="text-[11px] text-zinc-400 font-sans leading-relaxed">
+            {job.error_message || 'This execution job was cancelled. The Docker Agent and migration plan have been released.'}
+          </p>
+          <div className="pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-t border-zinc-800">
+            <span className="text-[11px] text-zinc-400 font-mono">
+              You can immediately start a new dry run or full migration below without conflicts.
+            </span>
+            <button
+              type="button"
+              onClick={handleRetryJob}
+              disabled={isRetrying}
+              className="py-2 px-4 rounded-none bg-sky-400 hover:bg-sky-300 text-black text-xs font-bold uppercase tracking-wider font-mono shadow-md whitespace-nowrap"
+            >
+              {isRetrying ? 'Starting Run...' : isDryRun ? '⚡ Re-run Dry Run' : '⚡ Re-run Migration'}
             </button>
           </div>
         </div>
@@ -464,8 +551,17 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
         <div className="flex items-center justify-between text-xs font-bold font-mono">
           <span className="text-zinc-300 uppercase flex items-center gap-2">
             <span
-              className={`w-2 h-2 rounded-none ${isCompleted ? 'bg-emerald-400' : isFailed ? 'bg-rose-500' : 'bg-sky-400 animate-ping'
-                }`}
+              className={`w-2 h-2 rounded-none ${
+                isDryRunCompleted
+                  ? 'bg-amber-400'
+                  : isCompleted
+                  ? 'bg-emerald-400'
+                  : isFailed
+                  ? 'bg-rose-500'
+                  : isCancelled
+                  ? 'bg-zinc-500'
+                  : 'bg-sky-400 animate-ping'
+              }`}
             />
             {isDryRunCompleted
               ? '✓ Dry Run Simulation Completed (No Data Was Written)'
@@ -473,6 +569,8 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
               ? '✓ Target Database Insertion Completed'
               : isFailed
               ? '🚨 Target Insertion Failed'
+              : isCancelled
+              ? '🛑 Execution Cancelled by User'
               : `Processing Table: ${job.current_table || 'Initializing...'} (${job.current_stage || 'data_streaming'})`}
           </span>
           <span className="text-sky-400 font-extrabold">{progressPercent}%</span>
@@ -656,6 +754,78 @@ export const JobExecutionBanner: React.FC<JobExecutionBannerProps> = ({
           )}
         </div>
       </div>
+
+      {/* Cancellation Confirmation Modal */}
+      {showCancelModal && (
+        <div
+          onClick={() => setShowCancelModal(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md animate-fadeIn"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md bg-zinc-950 border border-rose-500/50 p-6 space-y-5 shadow-[0_0_50px_rgba(244,63,94,0.3)] font-mono relative overflow-hidden"
+          >
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-rose-500 via-amber-400 to-rose-500" />
+            
+            <div className="flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div className="flex items-center gap-2 text-rose-400 font-bold uppercase text-xs tracking-wider">
+                <span className="w-2.5 h-2.5 bg-rose-500 animate-ping rounded-none" />
+                Abort / Cancel Execution Job
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCancelModal(false)}
+                className="text-zinc-500 hover:text-white text-base font-bold transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-zinc-200 font-sans leading-relaxed">
+                Are you sure you want to cancel this {isDryRun ? 'Dry Run simulation' : 'Live Migration'} job?
+              </p>
+              <div className="p-3 bg-rose-950/30 border border-rose-900/60 text-rose-300 text-[11px] space-y-1">
+                <p className="font-bold">⚠️ Notice:</p>
+                <p className="text-zinc-400 font-sans leading-relaxed">
+                  Cancelling will halt in-flight ETL processing, unassign the Docker Agent, and immediately unlock this migration plan so you can start a new run without conflicts.
+                </p>
+              </div>
+              <div className="space-y-1 pt-1">
+                <label className="text-[10px] uppercase font-bold text-zinc-400 block">
+                  Optional Reason (Audit Log):
+                </label>
+                <input
+                  type="text"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="e.g., Docker container stopped or parameter change"
+                  className="w-full px-3 py-2 bg-black border border-zinc-800 focus:border-rose-400 focus:outline-none text-zinc-200 text-xs font-mono"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-zinc-800">
+              <button
+                type="button"
+                onClick={() => setShowCancelModal(false)}
+                className="px-4 py-2 bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border border-zinc-700 text-xs font-bold uppercase transition-colors"
+              >
+                Keep Running
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelJob}
+                disabled={isCancelling}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white border border-rose-400 text-xs font-bold uppercase shadow-[0_0_15px_rgba(244,63,94,0.4)] flex items-center gap-1.5 transition-all"
+              >
+                <span>🛑</span>
+                <span>{isCancelling ? 'Cancelling...' : 'Confirm Cancel'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -591,8 +591,15 @@ class ASTTransformer:
                     uuid_list = [_deterministic_fallback_uuid(retry_seed_prefix, row_offset + i) for i in range(len(transformed_df))]
                     transformed_df = transformed_df.with_columns(pl.Series("id", uuid_list))
 
+                def _clean_objects(dframe: pl.DataFrame) -> pl.DataFrame:
+                    for col_n, dt in dframe.schema.items():
+                        if dt == pl.Object:
+                            dframe = dframe.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+                    return dframe
+
                 available_targets = [c for c in keep_columns if c in transformed_df.columns]
-                return transformed_df.select(available_targets), row_errors
+                res_df = transformed_df.select(available_targets) if available_targets else transformed_df
+                return _clean_objects(res_df), row_errors
 
             except Exception as exc:
                 logger.warning(
@@ -605,7 +612,11 @@ class ASTTransformer:
                     df = df.with_columns(pl.Series("id", uuid_list))
 
                 available_targets = [c for c in keep_columns if c in df.columns]
-                return df.select(available_targets) if available_targets else df, row_errors
+                fallback_df = df.select(available_targets) if available_targets else df
+                for col_n, dt in fallback_df.schema.items():
+                    if dt == pl.Object:
+                        fallback_df = fallback_df.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+                return fallback_df, row_errors
 
         # Passthrough: ensure 'id' exists even with no expressions
         if "id" in keep_columns and "id" not in df.columns:
@@ -613,4 +624,8 @@ class ASTTransformer:
             df = df.with_columns(pl.Series("id", uuid_list))
 
         available_targets = [c for c in keep_columns if c in df.columns]
-        return df.select(available_targets) if available_targets else df, row_errors
+        pass_df = df.select(available_targets) if available_targets else df
+        for col_n, dt in pass_df.schema.items():
+            if dt == pl.Object:
+                pass_df = pass_df.with_columns(pl.col(col_n).cast(pl.Utf8, strict=False))
+        return pass_df, row_errors

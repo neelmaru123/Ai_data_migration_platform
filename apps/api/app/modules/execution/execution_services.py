@@ -355,6 +355,78 @@ class ExecutionService:
         return job
 
     @staticmethod
+    async def cancel_execution_job(
+        session: AsyncSession,
+        user_id: uuid.UUID,
+        job_id: uuid.UUID,
+        reason: Optional[str] = None,
+    ) -> MigrationJob:
+        """
+        Cancels an active ('queued', 'preparing', 'running') execution job.
+        Frees the migration plan for subsequent runs and resets the assigned Docker Agent status.
+        """
+        stmt = (
+            select(MigrationJob)
+            .join(MigrationPlan, MigrationJob.migration_plan_id == MigrationPlan.id)
+            .where(MigrationJob.id == job_id, MigrationPlan.user_id == user_id)
+        )
+        res = await session.execute(stmt)
+        job = res.scalar_one_or_none()
+        if not job:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Execution job '{job_id}' not found or access denied.",
+            )
+
+        if job.status not in ["queued", "preparing", "running"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot cancel execution job with status '{job.status}'. Only active jobs (queued, preparing, running) can be cancelled.",
+            )
+
+        now = datetime.now(timezone.utc)
+        job.status = "cancelled"
+        job.completed_at = now
+        job.current_stage = "cancelled"
+        job.error_message = reason or "Execution cancelled by user."
+
+        # Reset assigned Docker Agent status to online
+        if job.agent_id:
+            stmt_agent = select(Agent).where(Agent.id == job.agent_id)
+            res_agent = await session.execute(stmt_agent)
+            agent_obj = res_agent.scalar_one_or_none()
+            if agent_obj:
+                if agent_obj.status in ["busy", "offline", "error"]:
+                    agent_obj.status = "online"
+                agent_obj.idle_since = now
+
+            # Broadcast cancellation event via WebSocket
+            await manager.broadcast_to_agent(
+                str(job.agent_id),
+                {
+                    "event_type": "EXECUTION_PROGRESS",
+                    "data": {
+                        "job_id": str(job.id),
+                        "status": "cancelled",
+                        "progress": job.progress,
+                        "processed_rows": job.processed_rows,
+                        "successful_rows": job.successful_rows,
+                        "failed_rows": job.failed_rows,
+                        "current_stage": "cancelled",
+                        "error_message": job.error_message,
+                    },
+                    "job_id": str(job.id),
+                    "status": "cancelled",
+                    "error_message": job.error_message,
+                },
+            )
+
+        await session.commit()
+        await session.refresh(job)
+        logger.info(f"Execution job '{job.id}' was cancelled by user '{user_id}'. Reason: {job.error_message}")
+        return job
+
+    @staticmethod
     async def list_jobs_for_user(
         session: AsyncSession, user_id: uuid.UUID
     ) -> List[MigrationJob]:
@@ -393,6 +465,10 @@ class ExecutionService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Execution job '{job_id}' not found or access denied for this agent.",
             )
+
+        # If job was already cancelled by the user, return cancelled status immediately without overwriting
+        if job.status == "cancelled":
+            return job
 
         now = datetime.now(timezone.utc)
         if update.status == "running" and job.started_at is None:
@@ -436,9 +512,6 @@ class ExecutionService:
                     agent_obj.error_category = "JOB_EXECUTION_FAILURE"
                     agent_obj.last_error_at = now
                     agent_obj.idle_since = now
-
-        await session.commit()
-        await session.refresh(job)
 
         await session.commit()
         await session.refresh(job)

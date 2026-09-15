@@ -365,12 +365,12 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
               <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
                 Custom AI Guidance / Tuning Instructions (Optional)
               </label>
-              <input
-                type="text"
+              <textarea
+                rows={2}
                 value={customInstructions}
                 onChange={(e) => setCustomInstructions(e.target.value)}
                 placeholder="e.g. Prefer UUID primary keys, map created_on to created_at, convert enum ints to text"
-                className="w-full px-4 py-2.5 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
+                className="w-full px-4 py-2.5 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors resize-y min-h-[50px] leading-relaxed"
               />
             </div>
           </div>

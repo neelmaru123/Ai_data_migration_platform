@@ -663,30 +663,32 @@
 5. **Post-Migration Metadata Re-Sync**:
    - Automatically re-runs `sync_metadata_snapshots` so the control plane UI reflects the newly created tables and row counts.
 
-## 3. Impact & Delta Analysis (AI Modifications)
-- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py)
-  - Added multi-engine `_ensure_database_exists` (Postgres, MySQL, Mongo).
-  - Added `get_existing_tables_and_counts()` for live pre-flight table count inspection.
-  - Added `clean_wipe_target_database()` for safe cascaded table drops.
-- **[MODIFIED]**: [`apps/agent/metadata_engine.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/metadata_engine.py)
-  - Invokes `_ensure_database_exists` before connecting to target databases during introspection.
-- **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py)
-  - Added Step 0 target database check, live table count warning, and clean wipe execution.
-- **[MODIFIED]**: [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py)
-  - Passes `truncate_target` from task payload to orchestrator.
-  - Re-syncs metadata snapshot upon migration completion.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py)
-  - Added `truncate_target` column to `MigrationJob`.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_schemas.py)
-  - Added `truncate_target` to `ExecutionStartRequest`, `AgentTaskItemResponse`, and `ExecutionJobResponse`.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py)
-  - Persists `truncate_target` on `MigrationJob`.
-- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py)
-  - Passes `truncate_target` to `create_execution_job` and serializes in `poll_agent_tasks`.
-- **[MODIFIED]**: [`apps/web/types/execution.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/execution.ts) & [`apps/web/services/executionService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/executionService.ts)
-  - Added `truncate_target` option to `startPlanExecution` and interfaces.
-- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx)
-  - Added Pre-Migration Execution Check Safety Modal with target DB info, explicit clean wipe agreement checkbox, and data warning.
+## 4. Execution Flow — Job Cancellation & Deadlock Reset Feature
+
+### Entry Points:
+- **UI**: "Cancel Execution" button in `JobExecutionBanner.tsx` on `/transformation-plan?planId=...` or `/execution?jobId=...`.
+- **API**: `POST /api/v1/executions/{id}/cancel`
+
+### Step-by-Step Sequence:
+1. **User Cancellation Trigger**:
+   - During an active run (`running`, `queued`, `preparing`), user clicks **"Cancel Execution"** on `JobExecutionBanner`.
+   - Opens confirmation modal with warning and optional audit reason input.
+   - User confirms cancellation -> calls `executionService.cancelExecution(job.id, reason)`.
+2. **Control Plane Processing (`ExecutionService.cancel_execution_job`)**:
+   - Authenticates ownership of the plan.
+   - Validates that `job.status` is in `["queued", "preparing", "running"]`.
+   - Transitions `MigrationJob.status = "cancelled"`, sets `completed_at = now`, and records error message / reason.
+   - If assigned agent was `"busy"`, resets `agent.status = "online"` and updates `agent.idle_since = now`.
+   - Emits real-time WebSocket event `EXECUTION_PROGRESS` / `JOB_CANCELLED` to all connected clients.
+   - Rejects future agent progress reports for this job from reverting status to `"running"`.
+3. **Agent Halting (Graceful ETL Exit)**:
+   - When the Docker Agent next calls `ProgressReporter.report`, the response body contains `{"status": "cancelled"}`.
+   - `_report_progress` in `apps/agent/engine/orchestrator.py` raises `JobCancelledException`.
+   - Orchestrator catches `JobCancelledException`, logs graceful cancellation, disposes database connection pools, and halts execution cleanly without logging a failure.
+4. **Instant Plan Re-Execution**:
+   - The migration plan is immediately unlocked.
+   - Action controls in `PlanBlueprintViewer.tsx` are enabled: user can immediately click **"⚡ Run Dry Run (Simulation)"** or **"⚡ Execute Migration"** without encountering `409 Conflict`.
+
 
 
 

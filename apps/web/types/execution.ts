@@ -19,6 +19,10 @@ export interface ExecutionStartOptions {
   truncate_target?: boolean;
 }
 
+export interface ExecutionCancelRequest {
+  reason?: string;
+}
+
 export interface ExecutionJobResponse {
   id: string;
   migration_plan_id: string;

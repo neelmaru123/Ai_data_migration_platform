@@ -134,13 +134,36 @@ class SourceConnectorFactory:
                 if not docs:
                     return pl.DataFrame(), False, last_pk_val
 
-                next_pk = str(docs[-1]["_id"]) if "_id" in docs[-1] else last_pk_val
+                from decimal import Decimal
+                from bson import ObjectId, Decimal128
+                import json
 
-                for d in docs:
-                    if "_id" in d:
-                        d["_id"] = str(d["_id"])
+                def _sanitize_doc(d: dict) -> dict:
+                    cleaned = {}
+                    for k, v in d.items():
+                        if k == "_id":
+                            cleaned["_id"] = str(v)
+                        elif isinstance(v, (Decimal128, Decimal)):
+                            try:
+                                cleaned[k] = float(v.to_decimal()) if hasattr(v, "to_decimal") else float(v)
+                            except Exception:
+                                cleaned[k] = str(v)
+                        elif isinstance(v, ObjectId):
+                            cleaned[k] = str(v)
+                        elif isinstance(v, (bytes, bytearray)):
+                            try:
+                                cleaned[k] = v.decode("utf-8")
+                            except Exception:
+                                cleaned[k] = str(v)
+                        elif isinstance(v, (dict, list)):
+                            cleaned[k] = json.dumps(v, default=str)
+                        else:
+                            cleaned[k] = v
+                    return cleaned
 
-                df = pl.DataFrame(docs)
+                next_pk = str(docs[-1]["_id"]) if (docs and "_id" in docs[-1]) else last_pk_val
+                cleaned_docs = [_sanitize_doc(d) for d in docs]
+                df = pl.DataFrame(cleaned_docs)
                 has_more = len(df) == chunk_size
                 return df, has_more, next_pk
             except Exception as exc:

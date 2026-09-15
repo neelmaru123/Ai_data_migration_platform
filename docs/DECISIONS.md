@@ -1396,3 +1396,60 @@ Implemented an automated **Target Database Auto-Creation** system across all thr
 ### 4. Trade-offs & Future Considerations
 - **Permissions Requirement**: Auto-creating databases requires the configured user in `DEST_*_URL` to have `CREATEDB` privilege on PostgreSQL or `CREATE` privilege on MySQL. If the user account lacks these privileges, a descriptive notice is logged and fallback to manual creation is maintained.
 
+---
+
+## [2026-09-15] - Execution Job Cancellation & Reset Feature (User Control)
+
+### 1. Decision Summary
+Implemented a full-stack **Job Cancellation & Reset Feature** allowing users to cancel or reset an active (`queued`, `preparing`, `running`) data migration or dry-run execution job directly from the web console. This eliminates execution deadlocks when Docker containers are killed, stopped, or disconnected mid-migration and enables immediate re-runs without encountering `409 Conflict`.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Previously, if a Docker agent container was killed (`docker stop` / `docker rm`) during a running dry-run or live migration, the job stayed in `running` status in the PostgreSQL database until the backend watchdog timer (5 minutes) expired.
+  - The plan execution API strictly rejects new execution attempts with HTTP 409 Conflict whenever an active job exists. Users were completely blocked and unable to restart execution or run a dry run.
+- **Chosen Solution**:
+  1. **Backend Cancel Endpoint (`POST /api/v1/executions/{id}/cancel`)**:
+     - Requires user ownership of the associated migration plan.
+     - Validates that the job is in an active state (`queued`, `preparing`, `running`).
+     - Transitions `MigrationJob.status = "cancelled"`, sets `completed_at = now`, `current_stage = "cancelled"`, and records cancellation reason.
+     - Resets the assigned Docker Agent status to `"online"` and updates `idle_since = now`.
+     - Broadcasts real-time `EXECUTION_PROGRESS` / `JOB_CANCELLED` WebSocket event to subscribed frontend clients.
+     - Protects subsequent agent progress reports from overwriting `cancelled` status.
+  2. **Docker Agent Cancellation Detection**:
+     - `ProgressReporter.report` reads HTTP response payload.
+     - If the response indicates `status == "cancelled"`, `ExecutionOrchestrator` raises `JobCancelledException`, halting in-flight ETL processing cleanly without reporting a failure.
+  3. **Frontend Cancellation UX**:
+     - Added an interactive **"Cancel Execution"** button with a safety confirmation modal in `JobExecutionBanner.tsx`.
+     - Added a dedicated **Cancelled State Banner** with an immediate **"Re-run Migration / Dry Run"** action.
+     - Updated `PlanBlueprintViewer.tsx` to ensure action controls are unlocked whenever no active job is running.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Relying Exclusively on Backend Timeout Watchdog**:
+  - *Rejected*: A 5-minute timeout creates severe user friction and forces developers to wait idly after stopping a container. Users need immediate on-demand control to cancel and re-run jobs.
+- **Alternative B: Allowing Arbitrary Overwrite of Running Jobs on Execute**:
+  - *Rejected*: Blindly replacing running jobs without explicit cancellation risks running concurrent duplicate migration streams against the same target database if the original container is still active.
+
+### 4. Trade-offs & Future Considerations
+- In-flight batches currently writing to the target database at the exact moment of cancellation will complete their single batch transaction, while subsequent batches are halted immediately. Clean wipe or upsert mode ensures data consistency on subsequent runs.
+
+---
+
+## [2026-09-15] - Unit Test Suite Alignment & Dead Code Removal
+
+### 1. Decision Summary
+Fixed three discrepancies identified during a full verification sweep:
+1. **Removed Dead Code**: Eliminated duplicate `session.commit()` and `session.refresh(job)` calls in `execution_services.py:update_job_progress()`, saving an unnecessary database round-trip per heartbeat/progress update.
+2. **Alembic Test Chain Synchronization**: Updated `test_alembic_migrations.py` to recognize migration head `c9f0a2b3456e` (Migration 012 - `truncate_target` support) and verify strict linear descent through the migration graph.
+3. **Agent Test Harness Mocking & Sys.Path Isolation**:
+   - Made `heartbeat_config` parameter optional in `start_heartbeat_thread()` with automatic default fallback.
+   - Updated `test_bug_decouple_agent_heartbeats.py` to initialize and pass `HeartbeatConfig`.
+   - Updated `MockMongoClient` in `test_bug_mongo_keyset_pagination.py` to mock `.admin.command('ping')` required by the resilient connection handshake.
+   - Configured sys.path resolution in `test_bug_deterministic_retry_uuids.py` and `test_mongo_relational_uuid_fk_and_types.py` for flawless test execution from any working directory.
+
+### 2. Verification Results
+- Backend unit tests: **98 / 98 tests passing (100%)**.
+- Agent unit tests: **2 / 2 tests passing (100%)**.
+- Frontend Web App: Next.js 14 production build compiled with 0 errors.
+
+
+
