@@ -7,7 +7,7 @@ export const executionService = {
    */
   async startPlanExecution(
     planId: string,
-    options?: { chunk_size?: number; is_dry_run?: boolean }
+    options?: { chunk_size?: number; is_dry_run?: boolean; truncate_target?: boolean }
   ): Promise<ExecutionJobResponse> {
     const response = await apiClient.post<ExecutionJobResponse>(
       `/plans/${planId}/execute`,

@@ -103,6 +103,7 @@ class ExecutionService:
         user_id: uuid.UUID,
         plan_id: uuid.UUID,
         is_dry_run: bool = False,
+        truncate_target: bool = False,
     ) -> MigrationJob:
         # Check plan existence and ownership
         stmt_plan = select(MigrationPlan).where(
@@ -180,10 +181,7 @@ class ExecutionService:
                 agent_name = agent.name if agent else "Assigned Agent"
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=(
-                        f"Cannot start migration: Assigned Docker Agent '{agent_name}' is OFFLINE! "
-                        f"Please start your local Docker Agent container first."
-                    ),
+                    detail=f"Cannot execute plan: {agent_name} is currently offline or unreachable. Ensure the agent Docker container is actively running on the host.",
                 )
 
         # Reset idle_since: agent is now active with a new job
@@ -212,6 +210,7 @@ class ExecutionService:
             agent_id=plan.agent_id,
             status="queued",
             is_dry_run=is_dry_run,
+            truncate_target=truncate_target,
             total_rows=0,
             processed_rows=0,
             successful_rows=0,

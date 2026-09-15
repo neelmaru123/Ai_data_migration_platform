@@ -586,4 +586,108 @@
 - **[MODIFIED]**: [`docs/EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/EXECUTION_FLOW.md)
   - Documented complete sequence for async plan generation, detached coroutine, and Next.js polling.
 
+---
+
+# Execution Flow — Target Database Engine Locking & Zero Divergence
+
+## 1. Entry Point
+- **Component**: [`GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) rendered on `/sources` and `/profiling`.
+- **Backend Service**: `start_async_generation()` and `execute_generation_core()` in [`migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py).
+
+## 2. Step-by-Step Execution Sequence
+1. **Agent Metadata & Target Data Source Resolution**:
+   - `GeneratePlanAction` fetches the agent's attached data sources via `agentService.getAgent(agentId)`.
+   - Locates target DataSource: `agentData.data_sources.find(ds => ds.role === 'target' || ds.role === 'both')`.
+   - Extracts `targetDs.type` (e.g., `'postgresql'`) and `targetDs.identifier` (e.g., `'dst_db_23'`).
+2. **Read-Only Target Engine Presentation**:
+   - Eliminates the selectable `<select>` dropdown.
+   - Renders a locked status badge: `{targetDs.type.toUpperCase()} (Relational) • {targetDs.identifier}` accompanied by `[🔒 Locked by Agent]`.
+   - Prevents the user from accidentally selecting an incompatible target engine.
+3. **Backend Unconditional Binding**:
+   - When `planService.startGeneration(agentId, targetConfig)` dispatches to `POST /api/v1/plans/generate-async`, `start_async_generation()` and `execute_generation_core()` inspect `agent.data_sources`.
+   - Unconditionally binds `target_db_type = target_ds.type.lower()` and updates `target_config.database_type`.
+   - Overrides any legacy, default, or mismatched client parameter.
+4. **Dialect-Accurate DDL & AST Generation**:
+   - The AI Planning Engine receives the true target dialect (`postgresql`).
+   - Generates dialect-valid DDL (`TIMESTAMPTZ` instead of `DATETIME`, PostgreSQL primary keys, JSONB types).
+   - Docker Agent executes DDL matching its physical target database container with zero runtime dialect errors.
+
+---
+
+# Execution Flow — Target Database Auto-Creation & Clean Wipe Safety System
+
+## 1. Entry Point
+- **Frontend Trigger**: "APPROVE & EXECUTE MIGRATION" button in [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx).
+- **Agent Initialization**: `sync_metadata_snapshots` in [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py).
+- **Backend API**: `POST /api/v1/plans/{plan_id}/execute` in [`execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py).
+
+## 2. Step-by-Step Execution Sequence
+
+### Phase 1: Target Database Auto-Creation (Multi-Engine)
+1. **Introspection & Boot Check**:
+   - During Docker Agent boot or periodic metadata sync, `AgentMetadataEngine.introspect_database()` detects target/destination databases (`DEST_*_URL`).
+   - Invokes `DDLExecutor._ensure_database_exists(sync_url)`.
+2. **Dialect-Specific Provisioning**:
+   - **PostgreSQL**: Connects to `/postgres` with `AUTOCOMMIT`, checks `SELECT 1 FROM pg_database WHERE datname = :dbname`, and issues `CREATE DATABASE "{dbname}"` if missing.
+   - **MySQL**: Connects to `/mysql` and issues `CREATE DATABASE IF NOT EXISTS \`{dbname}\``.
+   - **MongoDB**: Connects and verifies the database namespace ping.
+3. **Empty Snapshot Registration**:
+   - The agent successfully inspects the new, empty database and registers an empty snapshot payload (`total_tables: 0, total_rows: 0`) in the control plane database without failing with connection errors.
+
+### Phase 2: Pre-Flight Safety Confirmation in Web UI
+1. **User Clicks "APPROVE & EXECUTE MIGRATION"**:
+   - Opens the Pre-Migration Execution Check modal instead of immediately firing execution.
+2. **Clean Wipe Agreement Checkbox**:
+   - User can check *"Clean Wipe Target Database (Delete & Drop Existing Tables)"*.
+   - Explicit agreement text warns of permanent, irreversible data loss.
+3. **Warning When Clean Wipe Unselected**:
+   - If Clean Wipe is unchecked and destination tables contain data, displays amber warning alerting the user that incoming records will be appended with `ON CONFLICT DO NOTHING`.
+4. **Dispatch**:
+   - Submits `POST /api/v1/plans/{plan_id}/execute` with `{ truncate_target: true/false }`.
+
+### Phase 3: Agent Clean Wipe & Execution
+1. **Agent Polls Task**:
+   - `GET /api/v1/agents/tasks` returns `truncate_target` flag.
+2. **Pre-Flight Inspection**:
+   - In `ExecutionOrchestrator.run_job()`, queries live table counts via `DDLExecutor.get_existing_tables_and_counts()`.
+3. **Clean Wipe Branch**:
+   - If `truncate_target == True`:
+     - Calls `DDLExecutor.clean_wipe_target_database()`.
+     - PostgreSQL: Drops all public schema tables with `CASCADE`.
+     - MySQL: Disables foreign key checks, drops all tables, re-enables checks.
+     - MongoDB: Drops all collections.
+     - Reports progress stage `target_clean_wipe`.
+4. **Pre-Migration DDL & Streaming**:
+   - Executes fresh `CREATE TABLE` DDL statements.
+   - Streams transformed data into clean target tables.
+5. **Post-Migration Metadata Re-Sync**:
+   - Automatically re-runs `sync_metadata_snapshots` so the control plane UI reflects the newly created tables and row counts.
+
+## 3. Impact & Delta Analysis (AI Modifications)
+- **[MODIFIED]**: [`apps/agent/engine/ddl_executor.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/ddl_executor.py)
+  - Added multi-engine `_ensure_database_exists` (Postgres, MySQL, Mongo).
+  - Added `get_existing_tables_and_counts()` for live pre-flight table count inspection.
+  - Added `clean_wipe_target_database()` for safe cascaded table drops.
+- **[MODIFIED]**: [`apps/agent/metadata_engine.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/metadata_engine.py)
+  - Invokes `_ensure_database_exists` before connecting to target databases during introspection.
+- **[MODIFIED]**: [`apps/agent/engine/orchestrator.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/engine/orchestrator.py)
+  - Added Step 0 target database check, live table count warning, and clean wipe execution.
+- **[MODIFIED]**: [`apps/agent/main.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/main.py)
+  - Passes `truncate_target` from task payload to orchestrator.
+  - Re-syncs metadata snapshot upon migration completion.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_models.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_models.py)
+  - Added `truncate_target` column to `MigrationJob`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_schemas.py)
+  - Added `truncate_target` to `ExecutionStartRequest`, `AgentTaskItemResponse`, and `ExecutionJobResponse`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_services.py)
+  - Persists `truncate_target` on `MigrationJob`.
+- **[MODIFIED]**: [`apps/api/app/modules/execution/execution_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/execution/execution_routes.py)
+  - Passes `truncate_target` to `create_execution_job` and serializes in `poll_agent_tasks`.
+- **[MODIFIED]**: [`apps/web/types/execution.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/execution.ts) & [`apps/web/services/executionService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/executionService.ts)
+  - Added `truncate_target` option to `startPlanExecution` and interfaces.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx)
+  - Added Pre-Migration Execution Check Safety Modal with target DB info, explicit clean wipe agreement checkbox, and data warning.
+
+
+
 

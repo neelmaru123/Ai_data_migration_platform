@@ -40,7 +40,11 @@ async def start_plan_execution(
     Queues a MigrationJob record and notifies the assigned Docker Agent.
     """
     return await ExecutionService.create_execution_job(
-        session=session, user_id=current_user.id, plan_id=plan_id, is_dry_run=body.is_dry_run
+        session=session,
+        user_id=current_user.id,
+        plan_id=plan_id,
+        is_dry_run=body.is_dry_run,
+        truncate_target=body.truncate_target,
     )
 
 
@@ -97,6 +101,7 @@ async def poll_agent_tasks(
             migration_plan_id=job.migration_plan_id,
             status=job.status,
             is_dry_run=job.is_dry_run,
+            truncate_target=job.truncate_target,
             created_at=job.created_at,
         )
         for job in jobs

@@ -15,34 +15,256 @@ class DDLExecutor:
 
     @staticmethod
     def _ensure_database_exists(db_url: str):
-        """Ensures target SQL database exists before executing DDL."""
+        """Ensures target database exists across PostgreSQL, MySQL, and MongoDB before introspection or DDL execution."""
+        from urllib.parse import urlparse
+        if not db_url or not db_url.strip():
+            return
+
+        db_url_lower = db_url.lower()
+
+        # 1. MongoDB Target Database Verification / Creation
+        if "mongo" in db_url_lower or db_url.startswith("mongodb://") or db_url.startswith("mongodb+srv://"):
+            try:
+                import importlib
+                pymongo = importlib.import_module("pymongo")
+                clean_url = db_url.split("?")[0]
+                db_name = clean_url.rsplit("/", 1)[-1] if "/" in clean_url else "target_db"
+                if not db_name or db_name.startswith("mongodb"):
+                    db_name = "target_db"
+                client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=5000)
+                client.admin.command('ping')
+                # Access database namespace so it is registered
+                _ = client[db_name]
+                logger.info(f"Target MongoDB database '{db_name}' verified and ready.")
+            except Exception as mongo_exc:
+                logger.warning(f"Notice during MongoDB target database verification: {mongo_exc}")
+            return
+
+        # 2. SQLite Target Database (file-based: automatically created)
+        if "sqlite" in db_url_lower:
+            return
+
+        # 3. PostgreSQL & MySQL SQL Target Databases
         try:
             engine = _get_engine(db_url)
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
         except Exception as exc:
             exc_str = str(exc)
-            if "1049" in exc_str or "Unknown database" in exc_str or "does not exist" in exc_str:
-                from urllib.parse import urlparse
+            if (
+                "1049" in exc_str
+                or "Unknown database" in exc_str
+                or "does not exist" in exc_str
+                or "database" in exc_str.lower()
+            ):
                 parsed = urlparse(db_url)
                 db_name = parsed.path.lstrip('/')
                 if not db_name:
                     return
                 try:
-                    if "mysql" in db_url.lower():
+                    if "mysql" in db_url_lower:
                         root_url = db_url.replace(f"/{db_name}", "/mysql")
                         root_engine = _get_engine(root_url)
-                        with root_engine.begin() as conn:
+                        with root_engine.connect() as conn:
                             conn.execute(text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
+                            try:
+                                conn.commit()
+                            except Exception:
+                                pass
                         logger.info(f"Auto-created missing MySQL target database '{db_name}'.")
-                    elif "postgres" in db_url.lower():
+                    elif "postgres" in db_url_lower:
                         root_url = db_url.replace(f"/{db_name}", "/postgres")
                         root_engine = _get_engine(root_url)
                         with root_engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
-                            conn.execute(text(f'CREATE DATABASE "{db_name}"'))
-                        logger.info(f"Auto-created missing PostgreSQL target database '{db_name}'.")
+                            # Verify if database already exists before creating
+                            chk_res = conn.execute(
+                                text("SELECT 1 FROM pg_database WHERE datname = :dbname"),
+                                {"dbname": db_name},
+                            )
+                            if not chk_res.scalar():
+                                conn.execute(text(f'CREATE DATABASE "{db_name}"'))
+                                logger.info(f"Auto-created missing PostgreSQL target database '{db_name}'.")
                 except Exception as create_exc:
                     logger.warning(f"Could not auto-create target database '{db_name}': {create_exc}")
+
+    @staticmethod
+    def get_existing_tables_and_counts(db_url: str, engine_type: str = "postgresql") -> List[dict]:
+        """
+        Inspects the target database live to find all existing user tables/collections and their row counts.
+        """
+        results: List[dict] = []
+        if not db_url:
+            return results
+
+        clean_type = (engine_type or "postgresql").lower().strip()
+
+        # MongoDB Collection Inspection
+        if clean_type in ("mongodb", "mongo") or "mongo" in db_url.lower():
+            try:
+                import importlib
+                pymongo = importlib.import_module("pymongo")
+                clean_url = db_url.split("?")[0]
+                db_name = clean_url.rsplit("/", 1)[-1] if "/" in clean_url else "target_db"
+                client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=4000)
+                db = client[db_name]
+                for coll_name in db.list_collection_names():
+                    if coll_name.startswith("system."):
+                        continue
+                    try:
+                        cnt = db[coll_name].count_documents({})
+                    except Exception:
+                        cnt = db[coll_name].estimated_document_count()
+                    results.append({"table_name": coll_name, "row_count": cnt})
+            except Exception as exc:
+                logger.warning(f"Could not inspect existing MongoDB collections: {exc}")
+            return results
+
+        # SQL Target Databases (PostgreSQL, MySQL, SQLite)
+        try:
+            engine = _get_engine(db_url)
+            with engine.connect() as conn:
+                if "postgres" in clean_type or "postgres" in db_url.lower():
+                    stmt = text("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                        ORDER BY table_name;
+                    """)
+                    tbl_rows = conn.execute(stmt).fetchall()
+                    for r in tbl_rows:
+                        t_name = r[0]
+                        try:
+                            c_res = conn.execute(text(f'SELECT COUNT(*) FROM "{t_name}"'))
+                            cnt = c_res.scalar() or 0
+                        except Exception:
+                            cnt = 0
+                        results.append({"table_name": t_name, "row_count": cnt})
+
+                elif "mysql" in clean_type or "mysql" in db_url.lower():
+                    from urllib.parse import urlparse
+                    db_name = urlparse(db_url).path.lstrip('/')
+                    stmt = text("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = :db_name AND table_type = 'BASE TABLE'
+                        ORDER BY table_name;
+                    """)
+                    tbl_rows = conn.execute(stmt, {"db_name": db_name}).fetchall()
+                    for r in tbl_rows:
+                        t_name = r[0]
+                        try:
+                            c_res = conn.execute(text(f'SELECT COUNT(*) FROM `{t_name}`'))
+                            cnt = c_res.scalar() or 0
+                        except Exception:
+                            cnt = 0
+                        results.append({"table_name": t_name, "row_count": cnt})
+
+                elif "sqlite" in clean_type or "sqlite" in db_url.lower():
+                    stmt = text("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")
+                    tbl_rows = conn.execute(stmt).fetchall()
+                    for r in tbl_rows:
+                        t_name = r[0]
+                        try:
+                            c_res = conn.execute(text(f'SELECT COUNT(*) FROM "{t_name}"'))
+                            cnt = c_res.scalar() or 0
+                        except Exception:
+                            cnt = 0
+                        results.append({"table_name": t_name, "row_count": cnt})
+
+        except Exception as exc:
+            logger.warning(f"Could not inspect existing target tables: {exc}")
+
+        return results
+
+    @staticmethod
+    def clean_wipe_target_database(db_url: str, engine_type: str = "postgresql") -> List[str]:
+        """
+        Completely drops all existing tables or collections in the target database.
+        Returns the list of dropped table/collection names.
+        """
+        dropped_tables: List[str] = []
+        if not db_url:
+            return dropped_tables
+
+        clean_type = (engine_type or "postgresql").lower().strip()
+
+        # 1. MongoDB: Drop collections
+        if clean_type in ("mongodb", "mongo") or "mongo" in db_url.lower():
+            try:
+                import importlib
+                pymongo = importlib.import_module("pymongo")
+                clean_url = db_url.split("?")[0]
+                db_name = clean_url.rsplit("/", 1)[-1] if "/" in clean_url else "target_db"
+                client = pymongo.MongoClient(db_url, serverSelectionTimeoutMS=5000)
+                db = client[db_name]
+                for coll_name in db.list_collection_names():
+                    if coll_name.startswith("system."):
+                        continue
+                    db.drop_collection(coll_name)
+                    dropped_tables.append(coll_name)
+                    logger.info(f"[Clean Wipe] Dropped MongoDB collection '{coll_name}'.")
+            except Exception as exc:
+                logger.error(f"Error during MongoDB target clean wipe: {exc}")
+                raise RuntimeError(f"Clean wipe failed for MongoDB target: {exc}")
+            return dropped_tables
+
+        # 2. SQL Databases (PostgreSQL, MySQL, SQLite)
+        DDLExecutor._ensure_database_exists(db_url)
+        engine = _get_engine(db_url)
+
+        try:
+            if "postgres" in clean_type or "postgres" in db_url.lower():
+                with engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
+                    fetch_stmt = text("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = 'public' AND table_type = 'BASE TABLE';
+                    """)
+                    rows = conn.execute(fetch_stmt).fetchall()
+                    for r in rows:
+                        t_name = r[0]
+                        conn.execute(text(f'DROP TABLE IF EXISTS "{t_name}" CASCADE;'))
+                        dropped_tables.append(t_name)
+                        logger.info(f"[Clean Wipe] Dropped PostgreSQL table '{t_name}' CASCADE.")
+
+            elif "mysql" in clean_type or "mysql" in db_url.lower():
+                from urllib.parse import urlparse
+                db_name = urlparse(db_url).path.lstrip('/')
+                with engine.connect() as conn:
+                    conn.execute(text("SET FOREIGN_KEY_CHECKS = 0;"))
+                    fetch_stmt = text("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = :db_name AND table_type = 'BASE TABLE';
+                    """)
+                    rows = conn.execute(fetch_stmt, {"db_name": db_name}).fetchall()
+                    for r in rows:
+                        t_name = r[0]
+                        conn.execute(text(f'DROP TABLE IF EXISTS `{t_name}`;'))
+                        dropped_tables.append(t_name)
+                        logger.info(f"[Clean Wipe] Dropped MySQL table '{t_name}'.")
+                    conn.execute(text("SET FOREIGN_KEY_CHECKS = 1;"))
+                    try:
+                        conn.commit()
+                    except Exception:
+                        pass
+
+            elif "sqlite" in clean_type or "sqlite" in db_url.lower():
+                with engine.begin() as conn:
+                    conn.execute(text("PRAGMA foreign_keys = OFF;"))
+                    rows = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';")).fetchall()
+                    for r in rows:
+                        t_name = r[0]
+                        conn.execute(text(f'DROP TABLE IF EXISTS "{t_name}";'))
+                        dropped_tables.append(t_name)
+                        logger.info(f"[Clean Wipe] Dropped SQLite table '{t_name}'.")
+                    conn.execute(text("PRAGMA foreign_keys = ON;"))
+
+        except Exception as exc:
+            logger.error(f"Error during target database clean wipe: {exc}")
+            raise RuntimeError(f"Clean wipe failed for target database: {exc}")
+
+        return dropped_tables
 
     @staticmethod
     def _sanitize_ddl_statement(stmt: str, db_url: str) -> str:

@@ -33,12 +33,13 @@ class ExecutionOrchestrator:
         target_db_url: str,
         target_engine_type: str = "postgresql",
         is_dry_run: bool = False,
+        truncate_target: bool = False,
     ):
         plan_data = plan_ast.get("plan_data", {})
         if not is_dry_run:
             is_dry_run = bool(plan_ast.get("is_dry_run", False) or plan_data.get("is_dry_run", False))
 
-        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}) ===")
+        logger.info(f"=== STARTING LOCAL ETL EXECUTION FOR JOB '{job_id}' (Dry Run: {is_dry_run}, Clean Wipe: {truncate_target}) ===")
         pre_ddl = plan_data.get("pre_migration_ddl", [])
         post_ddl = plan_data.get("post_migration_ddl", [])
         table_mappings = plan_data.get("table_mappings", [])
@@ -82,6 +83,30 @@ class ExecutionOrchestrator:
                 total_estimated_rows += int(st.get("row_count", 0) or 0)
 
         try:
+            # Step 0: Ensure Target Database Exists & Live Pre-Flight Check / Clean Wipe
+            if not is_dry_run and target_db_url:
+                DDLExecutor._ensure_database_exists(target_db_url)
+                existing_tables = DDLExecutor.get_existing_tables_and_counts(target_db_url, target_engine_type)
+                if existing_tables:
+                    existing_summary = ", ".join(f"{t['table_name']} ({t['row_count']} rows)" for t in existing_tables)
+                    if truncate_target:
+                        logger.warning(
+                            f"=== CLEAN WIPE TARGET DATABASE REQUESTED ===\n"
+                            f"Dropping all {len(existing_tables)} existing table(s) in target database: {existing_summary}"
+                        )
+                        ProgressReporter.report(
+                            backend_url, agent_token, job_id, "running", 5.0, 0, 0, 0, 0,
+                            total_rows=total_estimated_rows, current_stage="target_clean_wipe"
+                        )
+                        dropped = DDLExecutor.clean_wipe_target_database(target_db_url, target_engine_type)
+                        logger.info(f"Clean wipe complete. Dropped target tables: {dropped}")
+                    else:
+                        logger.warning(
+                            f"=== TARGET DATABASE CONTAINS EXISTING DATA ===\n"
+                            f"Existing tables detected: {existing_summary}\n"
+                            f"User did not select Clean Wipe. Proceeding with APPEND mode (ON CONFLICT DO NOTHING)."
+                        )
+
             # Step 1: Pre-Migration DDL
             ProgressReporter.report(
                 backend_url, agent_token, job_id, "running", 10.0, 0, 0, 0, 0,

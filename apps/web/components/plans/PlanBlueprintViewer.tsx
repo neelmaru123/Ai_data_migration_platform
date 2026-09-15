@@ -24,6 +24,7 @@ import {
 } from './PlanReadinessSignals';
 import RefinementFeedbackCard from './RefinementFeedbackCard';
 import { RefinementFeedback } from '../../types/migrationPlan';
+import { AlertTriangle, Trash2, Database, ShieldAlert } from 'lucide-react';
 import toast from 'react-hot-toast';
 
 interface PlanBlueprintViewerProps {
@@ -42,6 +43,10 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
   const [isEditing, setIsEditing] = useState<boolean>(false);
   const [editableAst, setEditableAst] = useState<TransformationPlanAST>(initialPlan.plan_data);
   const [isSavingEdits, setIsSavingEdits] = useState<boolean>(false);
+
+  // Target DB Clean Wipe & Safety Confirmation Modal State
+  const [showExecutionConfirmModal, setShowExecutionConfirmModal] = useState<boolean>(false);
+  const [truncateTarget, setTruncateTarget] = useState<boolean>(false);
 
   // Version History State
   const [versions, setVersions] = useState<PlanVersionListItem[]>([]);
@@ -373,9 +378,9 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       .catch(() => {});
   }, [initialPlan.id]);
 
-  // Handle Plan Approval & Agent Job Dispatch
-  const handleApproveAndExecute = async () => {
-    if (isApproving) return;
+  // Open Execution Confirmation Modal
+  const handleOpenExecutionModal = () => {
+    if (isApproving || isApproved || isDryRunning || isRefining || plan.status === 'refining') return;
 
     if (!plan.is_valid) {
       toast.error('Cannot execute invalid plan! Fix schema feasibility errors first.');
@@ -383,17 +388,33 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
       return;
     }
 
+    setTruncateTarget(false);
+    setShowExecutionConfirmModal(true);
+  };
+
+  // Handle Confirmed Plan Approval & Agent Job Dispatch
+  const handleApproveAndExecute = async () => {
+    if (isApproving) return;
+    setShowExecutionConfirmModal(false);
+
     setIsApproving(true);
     try {
       // 1. Approve Plan
       const approved = await planService.approvePlan(plan.id);
       setPlan(approved);
 
-      // 2. Trigger Execution Job on Docker Agent
-      const job = await executionService.startPlanExecution(plan.id);
+      // 2. Trigger Execution Job on Docker Agent with truncate_target option
+      const job = await executionService.startPlanExecution(plan.id, {
+        truncate_target: truncateTarget,
+      });
       setActiveJob(job);
 
-      if (job.target_tables_with_existing_data && job.target_tables_with_existing_data.length > 0) {
+      if (truncateTarget) {
+        toast('Clean Wipe Enabled: Target database tables will be dropped before writing.', {
+          icon: '🧹',
+          duration: 6000,
+        });
+      } else if (job.target_tables_with_existing_data && job.target_tables_with_existing_data.length > 0) {
         const tableList = job.target_tables_with_existing_data
           .map((t) => `${t.table_name} (${t.existing_row_count} rows)`)
           .join(', ');
@@ -1219,7 +1240,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           {/* Real Approve & Execute Button */}
           <button
             type="button"
-            onClick={handleApproveAndExecute}
+            onClick={handleOpenExecutionModal}
             disabled={isApproving || isApproved || isDryRunning || isRefining || plan.status === 'refining'}
             className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
               isApproved
@@ -1231,6 +1252,131 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Execution Confirmation & Target Safety Modal */}
+      {showExecutionConfirmModal && (
+        <div
+          onClick={() => setShowExecutionConfirmModal(false)}
+          className="fixed inset-0 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 z-50 animate-fadeIn"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="p-6 sm:p-8 rounded-none bg-zinc-950 border border-zinc-800 w-full max-w-2xl flex flex-col space-y-6 shadow-[0_0_50px_rgba(0,0,0,0.9)] relative overflow-hidden font-mono"
+          >
+            {/* Top Accent Line */}
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-amber-500 via-sky-400 to-rose-500" />
+
+            <div className="flex items-start justify-between border-b border-zinc-800/80 pb-4">
+              <div className="space-y-1">
+                <span className="text-[10px] font-bold tracking-widest px-2.5 py-0.5 uppercase bg-amber-500/10 text-amber-400 border border-amber-500/30">
+                  PRE-MIGRATION EXECUTION CHECK
+                </span>
+                <h3 className="text-lg sm:text-xl font-extrabold uppercase tracking-wide text-white font-sans mt-1">
+                  Confirm Plan Approval & Execution
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowExecutionConfirmModal(false)}
+                className="text-zinc-500 hover:text-white p-1 transition-colors text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Target Database Details */}
+            <div className="p-4 bg-black border border-zinc-800 space-y-2 text-xs">
+              <div className="flex items-center justify-between text-zinc-400">
+                <span>Target Database Engine:</span>
+                <span className="text-white font-bold uppercase text-sky-400">
+                  {(plan.target_config?.database_type || 'postgresql').toUpperCase()} ({plan.target_config?.database_type?.toLowerCase() === 'mongodb' ? 'NoSQL Document' : 'Relational'})
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-zinc-400">
+                <span>Target Database Destination:</span>
+                <span className="text-white font-bold">
+                  {plan.target_config?.identifier || 'Target Database'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-zinc-400">
+                <span>Target Table Mappings:</span>
+                <span className="text-zinc-300">
+                  {ast.table_mappings?.length || 0} table(s) ({ast.table_mappings?.map((m) => m.target_table_name).join(', ')})
+                </span>
+              </div>
+            </div>
+
+            {/* Truncate / Clean Wipe Target Database Option */}
+            <div className="space-y-3">
+              <label
+                onClick={() => setTruncateTarget(!truncateTarget)}
+                className={`flex items-start gap-3.5 p-4 border cursor-pointer select-none transition-all ${
+                  truncateTarget
+                    ? 'bg-rose-950/20 border-rose-500/60 shadow-[0_0_20px_rgba(244,63,94,0.15)]'
+                    : 'bg-black border-zinc-800 hover:border-zinc-700'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={truncateTarget}
+                  onChange={(e) => setTruncateTarget(e.target.checked)}
+                  className="mt-1 w-4 h-4 rounded-none accent-rose-500 cursor-pointer"
+                />
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold uppercase text-white font-sans tracking-wide">
+                      Clean Wipe Target Database (Delete & Drop Existing Tables)
+                    </span>
+                    {truncateTarget && (
+                      <span className="px-1.5 py-0.2 text-[9px] font-bold uppercase bg-rose-500/20 text-rose-400 border border-rose-500/40">
+                        DESTRUCTIVE
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-400 font-sans leading-relaxed">
+                    By checking this box, you explicitly agree that the Docker Agent will inspect the target database and <strong className="text-rose-400">permanently DROP / DELETE all existing tables</strong> before running DDL and data streaming.
+                  </p>
+                </div>
+              </label>
+
+              {/* Warning Banner when Truncate is NOT selected */}
+              {!truncateTarget && (
+                <div className="p-3.5 bg-amber-950/30 border border-amber-500/40 text-amber-300 text-[11px] font-sans leading-relaxed space-y-1 animate-fadeIn">
+                  <div className="flex items-center gap-2 font-bold font-mono uppercase text-amber-400 text-xs">
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                    Target Database Warning
+                  </div>
+                  <p>
+                    Target databases should ideally be empty for a clean migration. If you leave Clean Wipe unchecked and the target database contains existing data, new records will be appended and conflicting primary keys will be skipped according to conflict resolution policies.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Actions */}
+            <div className="flex items-center justify-end gap-3 pt-2 border-t border-zinc-800/80">
+              <button
+                type="button"
+                onClick={() => setShowExecutionConfirmModal(false)}
+                className="py-2.5 px-5 rounded-none bg-zinc-900 hover:bg-zinc-800 text-zinc-300 hover:text-white text-xs font-bold uppercase tracking-wider border border-zinc-800 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleApproveAndExecute}
+                className={`py-2.5 px-6 rounded-none text-xs font-bold uppercase tracking-wider font-mono transition-all shadow-lg ${
+                  truncateTarget
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-950/50'
+                    : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50'
+                }`}
+              >
+                {truncateTarget ? 'Wipe & Execute Migration' : 'Confirm & Execute Migration'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* JSON AST Modal */}
       {showJsonModal && (

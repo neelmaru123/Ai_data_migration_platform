@@ -342,22 +342,26 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div className="space-y-2">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="space-y-2 md:col-span-1">
               <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
                 Target Database Engine
               </label>
-              <select
-                value={targetType}
-                onChange={(e) => setTargetType(e.target.value)}
-                className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs focus:outline-none focus:border-sky-400 font-mono transition-colors"
-              >
-                <option value="mongodb">MongoDB (NoSQL Document)</option>
-                <option value="postgresql">PostgreSQL (Relational)</option>
-                <option value="mysql">MySQL (Relational)</option>
-              </select>
+              <div className="w-full px-4 py-2.5 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs font-mono flex items-center justify-between">
+                <span className="font-bold text-sky-400">
+                  {targetType.toUpperCase()}
+                  <span className="text-zinc-400 font-normal ml-1.5">
+                    {targetType.toLowerCase() === 'mongodb' ? '(NoSQL Document)' : '(Relational)'}
+                  </span>
+                </span>
+                <span className="text-[10px] uppercase font-mono px-2 py-0.5 rounded-none bg-zinc-900 border border-zinc-700 text-zinc-400 flex items-center gap-1">
+                  <Lock className="w-2.5 h-2.5 text-amber-400" />
+                  Fixed by Agent
+                </span>
+              </div>
             </div>
-            <div className="space-y-2 sm:col-span-2">
+
+            <div className="space-y-2 md:col-span-2">
               <label className="block text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
                 Custom AI Guidance / Tuning Instructions (Optional)
               </label>
@@ -366,7 +370,7 @@ export const GeneratePlanAction: React.FC<GeneratePlanActionProps> = ({ agentId 
                 value={customInstructions}
                 onChange={(e) => setCustomInstructions(e.target.value)}
                 placeholder="e.g. Prefer UUID primary keys, map created_on to created_at, convert enum ints to text"
-                className="w-full px-4 py-3 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
+                className="w-full px-4 py-2.5 rounded-none bg-zinc-950 border border-zinc-800 text-white text-xs placeholder-zinc-600 focus:outline-none focus:border-sky-400 font-sans transition-colors"
               />
             </div>
           </div>

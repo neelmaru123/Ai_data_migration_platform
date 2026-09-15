@@ -348,13 +348,17 @@ class MigrationPlanService:
             session, agent
         )
 
-        target_db_type = target_config.database_type
         target_ds = next(
             (ds for ds in (agent.data_sources or []) if ds.role in ("target", "both") and ds.type),
             None,
         )
-        if target_ds and (not target_db_type or target_db_type.lower() == "postgresql"):
+        if target_ds:
             target_db_type = target_ds.type.lower()
+            target_config.database_type = target_db_type
+            if not target_config.identifier:
+                target_config.identifier = target_ds.identifier
+        else:
+            target_db_type = (target_config.database_type or "postgresql").lower()
             target_config.database_type = target_db_type
 
         custom_instructions = target_config.custom_instructions
@@ -524,13 +528,17 @@ class MigrationPlanService:
                 detail="No metadata snapshots found for any of this agent's data sources. Run the Docker Agent first to collect metadata before generating a plan.",
             )
 
-        target_db_type = target_config.database_type
         target_ds = next(
             (ds for ds in (agent.data_sources or []) if ds.role in ("target", "both") and ds.type),
             None,
         )
-        if target_ds and (not target_db_type or target_db_type.lower() == "postgresql"):
+        if target_ds:
             target_db_type = target_ds.type.lower()
+            target_config.database_type = target_db_type
+            if not target_config.identifier:
+                target_config.identifier = target_ds.identifier
+        else:
+            target_db_type = (target_config.database_type or "postgresql").lower()
             target_config.database_type = target_db_type
 
         # Create placeholder MigrationPlan record in DB

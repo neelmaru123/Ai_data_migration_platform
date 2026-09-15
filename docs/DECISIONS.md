@@ -1334,3 +1334,65 @@ Extended the asynchronous background execution model to the initial AI migration
 
 ### 4. Trade-offs & Future Considerations
 - **Fast Failover & Status Recovery**: If an exception occurs in the detached background coroutine, a dedicated recovery session automatically sets `plan.status = "draft_failed"` with error details, allowing the user to view the failure diagnosis and retry cleanly.
+
+---
+
+## [2026-09-15] - Target Database Engine Locking & Elimination of Frontend Engine Selection Divergence
+
+### 1. Decision Summary
+Eliminated the editable `<select>` dropdown for "Target Database Engine" in [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) and replaced it with a read-only locked target database display badge (`Locked by Agent 🔒`). In [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py), both `start_async_generation` and `execute_generation_core` now unconditionally enforce `target_db_type = target_ds.type.lower()` from the agent's attached target `DataSource` (`role in ('target', 'both')`), completely preventing any accidental mismatch between the AI's blueprint SQL dialect and the Docker Agent's physical target database container.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - In earlier iterations, `GeneratePlanAction.tsx` included a `<select>` dropdown offering `MongoDB`, `PostgreSQL`, and `MySQL`.
+  - However, an Agent's destination database is **physically fixed at registration time** in the container startup command (e.g. `DEST_DST_DB_23_TYPE="postgresql"`, `DEST_DST_DB_23_URL=...`).
+  - If a user selected a different engine (e.g. `MySQL`) on the Plan Generation page, the AI generated MySQL-specific DDL syntax (`created_at DATETIME`, `updated_at DATETIME`), but the Docker Agent attempted to execute that DDL on its configured **PostgreSQL** database, causing immediate fatal crashes:
+    `psycopg2.errors.UndefinedObject: type "datetime" does not exist`.
+- **Chosen Solution**:
+  1. **Frontend Read-Only Locked Display**: `GeneratePlanAction.tsx` auto-detects `targetDs` from `agentData.data_sources` and renders a clean, locked badge: `POSTGRESQL (Relational) • dst_db_23 [🔒 Locked by Agent]`. The user cannot accidentally select an incompatible database engine.
+  2. **Backend Unconditional Binding**: In `migration_plans_services.py`, whenever an agent has an attached target data source, `target_db_type` is unconditionally set to `target_ds.type.lower()`, overriding any stale or rogue client payload parameter.
+  3. **Zero Runtime Engine Drift**: Guarantees that the AI planning engine strictly generates DDL and AST transformation rules matching the exact database engine the Docker container is connected to.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Permitting Target Engine Switching with Dynamic Container Reconfiguration**:
+  - *Rejected*: Docker agents run as isolated external processes on the user's infrastructure. Changing target engines dynamically requires stopping the container, updating environment variables, and re-authenticating network credentials. Agents must be 1:1 bound to their configured target database.
+- **Alternative B: Relying Exclusively on Agent DDL Sanitizer Post-Processing**:
+  - *Rejected*: Sanitizing DDL in the agent as a band-aid does not solve the root cause. If the AI believes the target is MongoDB or MySQL, it alters primary key generation, JSON flattening strategies, and column casts throughout the entire AST. The target engine must be correct from the moment the blueprint is planned.
+
+### 4. Trade-offs & Future Considerations
+- If a user wishes to migrate data into a different target database (e.g., from PostgreSQL to MongoDB instead of PostgreSQL), they simply register a new Agent with MongoDB as the target, preserving clear container boundaries and security isolation.
+
+---
+
+## [2026-09-15] - Target Database Auto-Creation & Clean Wipe (Truncate/Drop) Safety System
+
+### 1. Decision Summary
+Implemented an automated **Target Database Auto-Creation** system across all three supported database engines (**PostgreSQL**, **MySQL**, and **MongoDB**) combined with an **Execution Confirmation & Clean Wipe (Truncate/Drop) Safety Modal** and live target data warning system. If a user pastes or configures a target database name that does not physically exist on the destination server, the Docker Agent detects its absence and automatically provisions it (`CREATE DATABASE` on PostgreSQL/MySQL, or namespace initialization on MongoDB) during both metadata introspection and migration execution. Furthermore, before starting a migration, users are presented with a pre-flight safety dialog where they can explicitly consent to a destructive **Clean Wipe** (`DROP TABLE ... CASCADE` / `FOREIGN_KEY_CHECKS = 0; DROP TABLE` / `drop_collection()`). If Clean Wipe is left unchecked and the target database contains existing tables or records, prominent warnings are displayed in the Web UI and logged by the Agent engine.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Previously, specifying a new target database name (e.g. for a second migration run to keep prior migration records intact) caused Docker Agent metadata introspection or DDL execution to throw fatal connection errors (`database "..." does not exist` on PostgreSQL or error `1049` on MySQL) unless the database had been manually created beforehand by a DBA.
+  - Additionally, if a user re-ran a migration into an existing database that already contained tables, the Docker Agent defaulted to appending rows with `ON CONFLICT DO NOTHING`. This caused confusion when primary keys conflicted or when users wanted a fresh, clean dataset without manual database cleanup scripts.
+- **Chosen Solution**:
+  1. **Multi-Engine Auto-Creation (`DDLExecutor._ensure_database_exists`)**:
+     - **PostgreSQL**: Connects to the root maintenance database (`/postgres`), checks `SELECT 1 FROM pg_database WHERE datname = :dbname`, and executes `CREATE DATABASE "{dbname}"` with `AUTOCOMMIT`.
+     - **MySQL**: Connects to `/mysql` with autocommit and executes `CREATE DATABASE IF NOT EXISTS \`{dbname}\``.
+     - **MongoDB**: Connects and verifies the database namespace via ping.
+     - Automatically invoked during both Agent metadata introspection (`metadata_engine.py`) and job execution (`orchestrator.py`).
+  2. **Clean Wipe Execution Safety Policy (`truncate_target: bool`)**:
+     - Propagated through `ExecutionStartRequest`, `MigrationJob(truncate_target=...)`, `AgentTaskItemResponse`, and `ExecutionOrchestrator.run_job()`.
+     - When enabled, `DDLExecutor.clean_wipe_target_database()` drops all existing tables/collections before executing pre-migration DDL.
+  3. **Explicit User Consent & Warning Modal in UI**:
+     - Replaces direct one-click execution with an interactive pre-flight modal in `PlanBlueprintViewer.tsx`.
+     - Requires checking an explicit agreement box: *"Clean Wipe Target Database (Delete & Drop Existing Tables)"* with a destructive warning banner.
+     - When left unchecked, displays an amber advisory warning: *"Target database should ideally be empty ... new records will be appended and conflicting primary keys skipped."*
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Cloud Control Plane Direct Database Creation**:
+  - *Rejected*: Violates zero-credential isolation. The cloud backend does not have access to customer host network or database passwords. Only the local Docker Agent possesses socket reachability to the destination database.
+- **Alternative B: Automatic Unconditional Truncate on Every Migration**:
+  - *Rejected*: Highly dangerous. Automatically wiping databases without explicit user consent could destroy production records or unintended tables. Destructive drops MUST require explicit opt-in confirmation.
+
+### 4. Trade-offs & Future Considerations
+- **Permissions Requirement**: Auto-creating databases requires the configured user in `DEST_*_URL` to have `CREATEDB` privilege on PostgreSQL or `CREATE` privilege on MySQL. If the user account lacks these privileges, a descriptive notice is logged and fallback to manual creation is maintained.
+
