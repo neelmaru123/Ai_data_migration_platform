@@ -689,7 +689,56 @@
    - The migration plan is immediately unlocked.
    - Action controls in `PlanBlueprintViewer.tsx` are enabled: user can immediately click **"⚡ Run Dry Run (Simulation)"** or **"⚡ Execute Migration"** without encountering `409 Conflict`.
 
+---
 
+## 5. Execution Flow — Transformation Blueprint 3-Tab Progressive Disclosure Workflow
 
+### Entry Points:
+- **UI Route**: [`apps/web/app/transformation-plan/page.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/app/transformation-plan/page.tsx)
+- **URL Syntax**: `/transformation-plan?planId={plan_id}&tab={overview|mappings|execute}`
+- **Default Fallback**: `tab=overview`
 
+### Step-by-Step Sequence:
 
+#### 1. Tab Bar Navigation & Routing
+- `PlanTabBar.tsx` reads current query parameter `?tab=...` via `useSearchParams()`.
+- On tab click, updates URL query parameters via `router.push('/transformation-plan?planId=...&tab=...')` without reloading the page.
+- Renders dynamic badges: table count `[14]` on Mappings tab, readiness pill `[Ready]` / `[Issues]` on Overview, and `[Running]` / `[Blocked]` on Execute tab.
+
+#### 2. Tab 1: Overview & Strategy (`PlanOverviewTab.tsx`)
+1. **AI Feasibility Signals**: Computes 4 readiness vectors (Schema, Type, Relationship, Data Conflict Risk) via `computePlanReadiness()`.
+2. **Plain Language Summary**: Displays human-readable narrative explaining table count, merge operations, and primary key re-keying.
+3. **AI Execution Strategy**: Explains architectural decisions (e.g. why tables were kept separate or merged).
+4. **Validation Diagnostics**: If schema feasibility errors exist, displays error cards with a 1-click **"Revert to Last Valid Version"** action button.
+5. **AI Prompt Refinement**: Provides natural language textarea to refine the blueprint with background polling (survives page refresh).
+6. **Version History Timeline**: Visual list of all previous generation and refinement versions with 1-click snapshot preview and rollback buttons.
+
+#### 3. Tab 2: Table Mapping Workspace (`PlanTableMappingsTab.tsx`)
+1. **Search & Filter Controls**:
+   - Live text search across target table names, source tables, and column names.
+   - Type filter (`direct_copy`, `merge`, `split_target`).
+   - Readiness filter (`optimal`, `warning`, `critical`).
+2. **View Mode Switching**:
+   - Matrix View: Interactive accordions with status-colored left borders (`emerald` for optimal, `amber` for warning, `rose` for critical).
+   - Pipeline Diagram View: Interactive graph rendered by `PlanDiagramViewer.tsx`.
+3. **Inline Blueprint AST Editing**:
+   - Toggling **"Edit Blueprint AST"** turns destination columns, data types, SQL expressions, constant values, and conflict resolution keys into editable inputs.
+   - Saving dispatches `PUT /api/v1/plans/{plan_id}` and triggers immediate backend re-validation.
+
+#### 4. Tab 3: Execution Control & Monitoring (`PlanExecuteTab.tsx`)
+1. **Readiness Gate**:
+   - If `!plan.is_valid`, blocks execution buttons and displays a prominent warning card with a direct link back to Overview diagnostics.
+2. **Target Database Overview**: Summarizes target dialect, destination identifier, and table counts.
+3. **Live Job Execution Banner (`JobExecutionBanner.tsx`)**:
+   - Automatically loads active running job or most recent completed/failed run.
+   - Shows progress bars, real-time stage logs, and background AI diagnosis synthesis on failure.
+4. **Approve & Execute Actions**:
+   - **Dry Run**: Queues simulation run on Docker agent without modifying target database.
+   - **Execute Migration**: Opens safety confirmation modal with optional **Clean Wipe** (`truncate_target`) checkbox before dispatching execution.
+
+### Impact & Delta Analysis:
+- **[NEW]**: [`PlanTabBar.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanTabBar.tsx) — URL-synced sticky tab navigation.
+- **[NEW]**: [`PlanOverviewTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanOverviewTab.tsx) — High-level strategy, readiness signals, AI refinement, and version history.
+- **[NEW]**: [`PlanTableMappingsTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanTableMappingsTab.tsx) — Searchable/filterable schema mapping matrix and AST editor.
+- **[NEW]**: [`PlanExecuteTab.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanExecuteTab.tsx) — Execution readiness gate, job banner, dry run, and execution dispatch.
+- **[MODIFIED]**: [`PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) — Refactored to act as central state and business logic orchestrator.

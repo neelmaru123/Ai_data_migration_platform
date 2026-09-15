@@ -1452,4 +1452,35 @@ Fixed three discrepancies identified during a full verification sweep:
 - Frontend Web App: Next.js 14 production build compiled with 0 errors.
 
 
+---
 
+## [2026-09-15] - Transformation Plan Page UX Redesign & 3-Tab Architecture
+
+### 1. Decision Summary
+Redesigned the `/transformation-plan` page from a flat, vertically unrolled 10+ section stack into a modular **3-Tab Progressive Disclosure Architecture** (`Overview & Strategy`, `Table Mappings`, `Execute & Monitor`) with URL query synchronization (`?tab=overview|mappings|execute`), table search/filter controls, and status-colored visual indicators.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - The previous transformation plan page displayed the plan header, 4 readiness cards, plain language summary, AI execution strategy narrative, validation diagnostics, refinement cards, refinement form, version history, execution pipeline, table mapping matrix accordions, and execution banner all in one continuous scrolling page.
+  - This created severe cognitive overload, making it difficult for users to review blueprints systematically or quickly locate schema mapping details.
+- **Chosen Solution**:
+  1. **3-Tab Architecture**:
+     - **Tab 1: Overview & Strategy (`overview`)**: Houses high-level readiness signals (4-vector scorecard), plain language summary, AI strategy narrative, validation diagnostics, LLM prompt refinement form, and visual version history timeline.
+     - **Tab 2: Table Mappings (`mappings`)**: Dedicated workspace for schema inspection and editing. Includes full-text search, type filtering (`direct_copy`, `merge`, `split_target`), readiness filtering (`optimal`, `warning`, `critical`), Matrix/Diagram view toggle, global inline AST editing mode, and status-colored left border accordions.
+     - **Tab 3: Execute & Monitor (`execute`)**: Focused execution control room with pre-flight readiness gate, target database configuration overview, live Docker Agent execution banner with AI failure diagnosis, Dry Run simulation, Clean Wipe confirmation modal, and execution dispatch.
+  2. **URL-Based State Synchronization**:
+     - Tab navigation is synchronized with the URL query parameter `?tab=overview|mappings|execute` via Next.js App Router `useRouter` and `useSearchParams`.
+     - Enables bookmarking, direct navigation from external alerts, and browser back/forward history support while preserving other query parameters like `planId`.
+  3. **Preserved Existing Behaviors**:
+     - Global edit toggle (`isEditing`) maintained for comprehensive blueprint editing.
+     - Automatic retrieval of active or most recent job retained in the Execute tab.
+     - Breadcrumb navigation kept above the sticky tab bar.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Modal-Based Workflows**:
+  - *Rejected*: Hiding table mappings or execution inside popup dialogs makes complex multi-column editing cumbersome and prevents deep linking.
+- **Alternative B: Pure Client-Side State (No URL Sync)**:
+  - *Rejected*: Without URL query parameters, refreshing the page or navigating back would lose the user's active tab context.
+
+### 4. Trade-offs & Future Considerations
+- Modularization into dedicated tab components (`PlanTabBar`, `PlanOverviewTab`, `PlanTableMappingsTab`, `PlanExecuteTab`) decouples UI rendering while `PlanBlueprintViewer` remains the central state orchestrator. Future enhancements can add per-table diff previews when comparing versions.
