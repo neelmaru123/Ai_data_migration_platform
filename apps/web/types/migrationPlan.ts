@@ -99,6 +99,46 @@ export interface PlanRefineRequest {
   user_feedback: string;
 }
 
+export interface PlanGenerationJobResponse {
+  task_id: string;
+  agent_id: string;
+  plan_id: string;
+  status: 'processing';
+  message: string;
+}
+
+export interface PlanGenerationStatusResponse {
+  task_id: string | null;
+  agent_id: string;
+  plan_id?: string | null;
+  status: 'idle' | 'processing' | 'completed' | 'failed';
+  target_database_type?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  elapsed_seconds?: number | null;
+  error?: string | null;
+  plan?: PlanDetailResponse | null;
+}
+
+export interface PlanRefinementJobResponse {
+  task_id: string;
+  plan_id: string;
+  status: 'processing';
+  message: string;
+}
+
+export interface PlanRefinementStatusResponse {
+  task_id: string | null;
+  plan_id: string;
+  status: 'idle' | 'processing' | 'completed' | 'failed';
+  user_prompt?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  elapsed_seconds?: number | null;
+  error?: string | null;
+  plan?: PlanDetailResponse | null;
+}
+
 export interface PlanValidationResultResponse {
   is_valid: boolean;
   errors: string[];

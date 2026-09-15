@@ -447,3 +447,143 @@
 - **[NEW]**: [`apps/agent/tests/test_ast_transformer.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/agent/tests/test_ast_transformer.py)
   - Unit tests verifying `_source_origin` population and fallback values.
 
+---
+
+# Execution Flow — Asynchronous AI Plan Refinement Background Execution
+
+## 1. Entry Point
+- **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L205`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L205)
+- **Trigger**: User inputs a natural language prompt (e.g., *"Convert status int enum to string varchar"*) in [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx) and submits the form.
+
+## 2. Step-by-Step Execution Sequence
+1. **Frontend Dispatch**:
+   - `handleRefinePlan()` in [`PlanBlueprintViewer.tsx:L270`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx#L270) invokes `planService.startRefinement(plan.id, promptText)`.
+   - UI immediately sets `isRefining = true`, records prompt echo, initializes elapsed timer at 0s, and displays the cyber-dark Refinement Progress Banner.
+2. **API Ingestion & Immediate 202 Accepted**:
+   - `POST /api/v1/plans/{plan_id}/refine-async` executes `refine_migration_plan_async()` in [`migration_plans_routes.py:L205`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L205).
+   - Validates ownership, ensures plan is not locked by an active migration job, and verifies plan is not already in `status == 'refining'` (rejects duplicates with `409 Conflict`).
+   - Registers entry in `RefinementTaskManager`, transitions `plan.status = 'refining'`, commits, launches detached coroutine `asyncio.create_task(_run_plan_refinement_background())`, and returns `202 Accepted` with `task_id` in ~200ms.
+3. **Detached Background Coroutine Execution**:
+   - `_run_plan_refinement_background()` opens a fresh `AsyncSessionLocal()` in [`migration_plans_services.py:L130`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py#L130).
+   - Calls `MigrationPlanService.execute_refinement_core()`:
+     - Eagerly loads agent and data source metadata snapshots.
+     - Formats serialization context string.
+     - Spawns thread pool worker `asyncio.to_thread(llm_plan_generator.refine, ...)` with a 360-second timeout.
+     - Feasibility validator runs against target schema and source columns.
+     - Generates and persists new `MigrationPlanVersion` record (e.g., v2 `llm_refinement`).
+     - Updates `plan.plan_data`, `plan.is_valid`, and sets `plan.status = 'edited'` (or `'invalid_edits'`).
+     - Commits changes to PostgreSQL.
+   - `RefinementTaskManager.complete_task()` stores completed plan DTO in memory.
+4. **Client Polling & Browser Refresh Resilience**:
+   - Every 2.0 seconds, `PlanBlueprintViewer.tsx` polls `GET /api/v1/plans/{plan_id}/refine/status`.
+   - If the user reloads the page (F5), `plan.status === 'refining'` is detected on mount, re-arming the polling loop and restoring the banner with the elapsed timer.
+5. **Hot-Reload on Completion**:
+   - Poller receives `status: 'completed'` with the updated `PlanDetailResponse`.
+   - Disables `isRefining`, updates React state (`plan`, `editableAst`), displays success toast (or feasibility alert), re-fetches version history, and smoothly scrolls to `RefinementFeedbackCard`.
+
+## 3. Impact & Delta Analysis (AI Modifications)
+- **[NEW]**: [`apps/api/tests/unit/test_plan_refine_async.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_plan_refine_async.py)
+  - Full end-to-end integration test of async 202 launch, polling status, background execution, and version creation.
+- **[MODIFIED]**: [`apps/api/app/core/config.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/core/config.py)
+  - Raised `LLM_TIMEOUT_SECONDS` from `180.0` to `360.0`.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_schemas.py)
+  - Added `PlanRefinementJobResponse` and `PlanRefinementStatusResponse` DTOs.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py)
+  - Implemented `RefinementTaskManager`, detached coroutine `_run_plan_refinement_background()`, `start_async_refinement()`, and `get_refinement_status()`.
+  - Added refining conflict check to `approve_plan()`.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py)
+  - Added `POST /{plan_id}/refine-async` (202) and `GET /{plan_id}/refine/status` (200).
+- **[MODIFIED]**: [`apps/web/types/migrationPlan.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/migrationPlan.ts)
+  - Added `PlanRefinementJobResponse` and `PlanRefinementStatusResponse` TypeScript interfaces.
+- **[MODIFIED]**: [`apps/web/services/planService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/planService.ts)
+  - Added `startRefinement()` and `getRefinementStatus()`.
+- **[MODIFIED]**: [`apps/web/components/plans/PlanBlueprintViewer.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/plans/PlanBlueprintViewer.tsx)
+  - Added polling `useEffect` (survives F5 refresh), live cyber-dark refinement banner with timer, prompt echo, and conflict prevention on approve buttons.
+
+---
+
+# Execution Flow — Asynchronous AI Initial Plan Generation Background Execution
+
+## 1. Entry Point
+- **File**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py:L114`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py#L114)
+- **Trigger**: User configures target database dialect and optional instructions in [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx) and clicks **"GENERATE AI MIGRATION PLAN"**.
+
+## 2. Step-by-Step Execution Sequence
+
+### Phase 1: Frontend Ingestion & Immediate 202 Launch
+1. **User Action**:
+   - User reviews schema catalog on `/sources?agentId=...` or `/profiling?agentId=...`.
+   - Clicks **"GENERATE AI MIGRATION PLAN"** in `GeneratePlanAction.tsx`.
+2. **Client Dispatch**:
+   - `handleGenerate()` calls `planService.startGeneration(agentId, { target_database_type, custom_instructions })`.
+   - UI immediately sets `isGenerating = true`, initializes `generatingElapsedSec = 0`, and renders the cyber-dark Generation Progress Banner with animated spinner and stage indicators.
+   - The button state changes to `disabled` with dynamic text: `"Constructing AI Blueprint AST ({generatingElapsedSec}s)..."`.
+3. **API Validation & Immediate 202 Accepted**:
+   - `POST /api/v1/plans/generate-async` handles the request in `migration_plans_routes.py`.
+   - Validates agent ownership (`agent.user_id == current_user.id`).
+   - Checks dual-layer concurrency lock:
+     - Memory: `GenerationTaskManager.is_running(agent.id)` (rejects duplicate in-flight requests with `409 Conflict`).
+     - Database: `SELECT MigrationPlan WHERE agent_id = :id AND status = 'generating'` (rejects stale/duplicate jobs with `409 Conflict`).
+   - Persists a placeholder `MigrationPlan` record upfront with `status = "generating"`, `is_valid = False`, and `plan_data = {}`.
+   - Registers entry in `GenerationTaskManager` (`task_id = f"gen_{uuid.uuid4().hex[:12]}"`).
+   - Launches detached background task: `asyncio.create_task(_run_plan_generation_background(plan_id, agent.id, target_config_dict))`.
+   - Returns HTTP `202 Accepted` with `PlanGenerationJobResponse` containing `task_id`, `agent_id`, `plan_id`, and `status = "processing"` in ~200ms.
+
+### Phase 2: Detached Background Blueprint Generation
+1. **Isolated Database Session**:
+   - `_run_plan_generation_background()` opens a dedicated `AsyncSessionLocal()`, completely detached from the caller HTTP connection and immune to browser client disconnects.
+2. **Core Generation Execution (`execute_generation_core`)**:
+   - Gathers introspected metadata snapshots from all linked source data sources (filtering out target-only databases).
+   - Validates that source schema tables and columns are present.
+   - Invokes LLM generator via thread worker: `asyncio.to_thread(llm_plan_generator.generate, ...)` with a 360-second timeout.
+   - Receives raw JSON blueprint AST from Gemini and validates schema feasibility via `MigrationPlanValidator.validate()`.
+   - Automatically synchronizes primary key types and foreign key references (e.g. UUIDv5 alignment for relational-to-Mongo or relational-to-Postgres migrations).
+   - Updates the existing `MigrationPlan` record: `plan.plan_data = plan_ast_dict`, `plan.is_valid = True`, `plan.status = "draft"`.
+   - Creates the initial version snapshot: `MigrationPlanVersion(plan_id=plan.id, version_number=1, plan_data=plan_ast_dict, change_summary="Initial AI migration blueprint generated")`.
+   - Commits the transaction to PostgreSQL.
+   - Marks task complete in `GenerationTaskManager.complete_task()`.
+3. **Error Handling & Failure State**:
+   - If an unhandled exception or LLM timeout occurs, catches error, marks `plan.status = "draft_failed"`, commits the rollback status, and sets `GenerationTaskManager.fail_task()`.
+
+### Phase 3: Client Polling & Browser Refresh Resilience
+1. **Mount-Time Active Job Detection**:
+   - On initial render or browser reload (`F5`), `useEffect` in `GeneratePlanAction.tsx` queries `planService.getGenerationStatus(agentId)` (`GET /api/v1/plans/agent/{agent_id}/generation-status`).
+   - If the backend returns `status === 'processing'` or the agent has a plan with `status === 'generating'`, the UI seamlessly restores:
+     - Sets `isGenerating = true`.
+     - Synchronizes `generatingElapsedSec` to `statusResponse.elapsed_seconds`.
+     - Keeps the generation button disabled and displays the cyber-dark progress banner.
+2. **Periodic Polling Loop**:
+   - Runs a 2.0-second `setInterval` polling `GET /api/v1/plans/agent/{agent_id}/generation-status`.
+   - Updates `generatingElapsedSec` timer on every tick.
+3. **Automatic Navigation on Completion**:
+   - Once the server responds with `status: "completed"`, `GeneratePlanAction.tsx` disables `isGenerating`.
+   - Clears the polling interval and immediately navigates via `router.push(f"/transformation-plan?planId={status.plan_id}")`.
+   - The user seamlessly lands on the Plan Blueprint Viewer with the completed AI blueprint, version history (v1), and readiness metrics.
+
+## 3. Impact & Delta Analysis (AI Modifications)
+- **[NEW]**: [`apps/api/tests/unit/test_plan_generate_async.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/tests/unit/test_plan_generate_async.py)
+  - Unit and integration tests covering 202 Accepted async plan generation, 409 Conflict duplicate guards, polling endpoint status progression, and initial v1 plan version persistence.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_schemas.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_schemas.py)
+  - Added `PlanGenerationJobResponse` and `PlanGenerationStatusResponse` DTO models.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_services.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_services.py)
+  - Added `GenerationTaskManager` in-memory thread-safe concurrency manager.
+  - Refactored core blueprint generation into `execute_generation_core()`.
+  - Added `start_async_generation()` with upfront `MigrationPlan(status="generating")` database record.
+  - Added detached background coroutine `_run_plan_generation_background()`.
+  - Added `get_generation_status()` with memory cache and database fallback.
+  - Preserved synchronous `create_plan_for_agent()` for backward compatibility.
+- **[MODIFIED]**: [`apps/api/app/modules/migration_plans/migration_plans_routes.py`](file:///d:/GitHub/Ai_data_migration_platform/apps/api/app/modules/migration_plans/migration_plans_routes.py)
+  - Added `POST /api/v1/plans/generate-async` (HTTP 202).
+  - Added `GET /api/v1/plans/agent/{agent_id}/generation-status` (HTTP 200).
+- **[MODIFIED]**: [`apps/web/types/migrationPlan.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/types/migrationPlan.ts)
+  - Added `PlanGenerationJobResponse` and `PlanGenerationStatusResponse` TypeScript interfaces.
+- **[MODIFIED]**: [`apps/web/services/planService.ts`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/services/planService.ts)
+  - Added `startGeneration(agentId, targetConfig)` and `getGenerationStatus(agentId)`.
+- **[MODIFIED]**: [`apps/web/components/profiling/GeneratePlanAction.tsx`](file:///d:/GitHub/Ai_data_migration_platform/apps/web/components/profiling/GeneratePlanAction.tsx)
+  - Implemented mount-time status detection, 2s polling interval, elapsed seconds counter, disabled button state, cyber-dark progress banner, and auto-redirect to `/transformation-plan?planId=...`.
+- **[MODIFIED]**: [`docs/DECISIONS.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/DECISIONS.md)
+  - Added ADR: `[2026-09-15] - Asynchronous AI Initial Plan Generation with Refresh Resilience & Concurrency Locks`.
+- **[MODIFIED]**: [`docs/EXECUTION_FLOW.md`](file:///d:/GitHub/Ai_data_migration_platform/docs/EXECUTION_FLOW.md)
+  - Documented complete sequence for async plan generation, detached coroutine, and Next.js polling.
+
+

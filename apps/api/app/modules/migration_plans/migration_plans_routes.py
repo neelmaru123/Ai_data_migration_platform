@@ -13,8 +13,12 @@ from app.modules.agents.agents_dependencies import hash_agent_token
 from app.modules.agents.agents_models import Agent
 from app.modules.migration_plans.migration_plans_schemas import (
     PlanDetailResponse,
+    PlanGenerationJobResponse,
     PlanGenerationRequest,
+    PlanGenerationStatusResponse,
     PlanRefineRequest,
+    PlanRefinementJobResponse,
+    PlanRefinementStatusResponse,
     PlanResponse,
     PlanValidationResultResponse,
     PlanVersionDetailResponse,
@@ -87,6 +91,48 @@ async def generate_migration_plan(
         session=session, agent=agent, target_config=payload.target_config
     )
     return _to_plan_detail_response(plan)
+
+
+@router.post(
+    "/generate-async",
+    response_model=PlanGenerationJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def generate_migration_plan_async(
+    payload: PlanGenerationRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Initiate asynchronous AI Migration Plan generation via detached background task (returns 202 Accepted).
+    """
+    agent = await _get_agent_for_user(payload.agent_id, current_user, session)
+    task_id, plan_id = await MigrationPlanService.start_async_generation(
+        session=session, agent=agent, target_config=payload.target_config
+    )
+    return PlanGenerationJobResponse(
+        task_id=task_id,
+        agent_id=agent.id,
+        plan_id=plan_id,
+        status="processing",
+        message="AI plan generation started in background",
+    )
+
+
+@router.get(
+    "/agent/{agent_id}/generation-status",
+    response_model=PlanGenerationStatusResponse,
+)
+async def get_agent_generation_status(
+    agent_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """
+    Check the status of an ongoing or recently completed background plan generation for an agent.
+    """
+    await _get_agent_for_user(agent_id, current_user, session)
+    return await MigrationPlanService.get_generation_status(session, agent_id)
 
 
 @router.get("", response_model=List[PlanResponse])
@@ -201,6 +247,61 @@ async def refine_migration_plan(
         )
     refined = await MigrationPlanService.refine_plan(session, plan, payload.user_feedback)
     return _to_plan_detail_response(refined)
+
+
+@router.post(
+    "/{plan_id}/refine-async",
+    response_model=PlanRefinementJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refine_migration_plan_async(
+    plan_id: uuid.UUID,
+    payload: PlanRefineRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Refine migration plan asynchronously via background task (returns 202 Accepted)."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to refine this migration plan.",
+        )
+    task_id = await MigrationPlanService.start_async_refinement(
+        session, plan, payload.user_feedback
+    )
+    return PlanRefinementJobResponse(
+        task_id=task_id,
+        plan_id=plan.id,
+        status="processing",
+        message="AI plan refinement started in background",
+    )
+
+
+@router.get("/{plan_id}/refine/status", response_model=PlanRefinementStatusResponse)
+async def get_refinement_status(
+    plan_id: uuid.UUID,
+    current_user: User = Depends(get_current_active_user),
+    session: AsyncSession = Depends(get_db),
+):
+    """Get current status and elapsed time of an ongoing or completed plan refinement."""
+    plan = await MigrationPlanService.get_plan_by_id(session, plan_id)
+    if not plan:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Migration plan '{plan_id}' not found.",
+        )
+    if plan.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to inspect this migration plan.",
+        )
+    return await MigrationPlanService.get_refinement_status(session, plan)
 
 
 @router.post("/{plan_id}/validate", response_model=PlanValidationResultResponse)

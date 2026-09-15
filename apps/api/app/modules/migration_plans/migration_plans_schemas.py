@@ -317,3 +317,48 @@ class PlanVersionDetailResponse(PlanVersionListItem):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class PlanRefinementJobResponse(BaseModel):
+    """Response returned immediately when an async refinement task is queued (HTTP 202)."""
+    task_id: str
+    plan_id: uuid.UUID
+    status: str = "processing"
+    message: str = "AI plan refinement started in the background."
+
+
+class PlanRefinementStatusResponse(BaseModel):
+    """Status of an in-flight or completed background refinement task."""
+    task_id: Optional[str] = None
+    plan_id: uuid.UUID
+    status: str = "idle"  # idle, processing, completed, failed
+    user_prompt: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    elapsed_seconds: Optional[float] = None
+    error: Optional[str] = None
+    plan: Optional[PlanDetailResponse] = None
+
+
+class PlanGenerationJobResponse(BaseModel):
+    """Response returned immediately when an async plan generation task is queued (HTTP 202)."""
+    task_id: str
+    agent_id: uuid.UUID
+    plan_id: uuid.UUID
+    status: str = "processing"
+    message: str = "AI plan generation started in the background."
+
+
+class PlanGenerationStatusResponse(BaseModel):
+    """Status of an in-flight or completed background plan generation task for an agent."""
+    task_id: Optional[str] = None
+    agent_id: uuid.UUID
+    plan_id: Optional[uuid.UUID] = None
+    status: str = "idle"  # idle, processing, completed, failed
+    target_database_type: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    elapsed_seconds: Optional[float] = None
+    error: Optional[str] = None
+    plan: Optional[PlanDetailResponse] = None
+
+

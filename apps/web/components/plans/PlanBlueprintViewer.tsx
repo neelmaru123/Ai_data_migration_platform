@@ -109,11 +109,19 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
 
   // Refinement Prompt State
   const [refinementPrompt, setRefinementPrompt] = useState<string>('');
-  const [isRefining, setIsRefining] = useState<boolean>(false);
+  const [isRefining, setIsRefining] = useState<boolean>(initialPlan.status === 'refining');
+  const [refiningPromptEcho, setRefiningPromptEcho] = useState<string>('');
+  const [refiningElapsedSec, setRefiningElapsedSec] = useState<number>(0);
   const [showJsonModal, setShowJsonModal] = useState<boolean>(false);
   const [expandedTable, setExpandedTable] = useState<string | null>(
     initialPlan.plan_data?.table_mappings?.[0]?.target_table_name || null
   );
+
+  React.useEffect(() => {
+    if (initialPlan.status === 'refining') {
+      setIsRefining(true);
+    }
+  }, [initialPlan.status]);
 
   const isHistoricalPreview = previewVersionDetail !== null;
   const ast = isHistoricalPreview
@@ -221,64 +229,120 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
     }
   };
 
-  // Handle Natural Language AI Plan Refinement (LLM Re-review)
+  // Polling effect when isRefining is active (survives browser refresh)
+  React.useEffect(() => {
+    if (!isRefining) return;
+
+    let isMounted = true;
+
+    const checkStatus = async () => {
+      try {
+        const res = await planService.getRefinementStatus(plan.id);
+        if (!isMounted) return;
+
+        if (res.status === 'processing') {
+          if (res.user_prompt) setRefiningPromptEcho(res.user_prompt);
+          if (typeof res.elapsed_seconds === 'number') {
+            setRefiningElapsedSec(Math.round(res.elapsed_seconds));
+          }
+        } else if (res.status === 'completed') {
+          setIsRefining(false);
+          if (res.plan) {
+            setPlan(res.plan);
+            setEditableAst(res.plan.plan_data);
+
+            const feedback = res.plan.plan_data?.refinement_feedback;
+            if (feedback && (feedback.verdict === 'infeasible_rejected' || !feedback.applied)) {
+              toast('LLM Evaluated Request: Refinement not feasible without data loss. See AI analysis below.', {
+                icon: '⚠️',
+                duration: 6000,
+                style: {
+                  background: '#18181b',
+                  color: '#fbbf24',
+                  border: '1px solid rgba(251, 191, 36, 0.4)',
+                  fontFamily: 'monospace',
+                  fontSize: '12px',
+                },
+              });
+            } else if (res.plan.is_valid) {
+              toast.success('LLM re-reviewed & refined blueprint successfully!');
+            } else {
+              toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert below.');
+              scrollToDiagnostics();
+            }
+            await fetchVersions();
+            if (onPlanUpdated) onPlanUpdated(res.plan);
+
+            setTimeout(() => {
+              const el = document.getElementById('ai-refinement-feedback-card');
+              if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }, 150);
+          }
+        } else if (res.status === 'failed') {
+          setIsRefining(false);
+          const errorMsg = res.error || 'Refinement failed.';
+          toast.error(`Refinement Error: ${errorMsg}`);
+          try {
+            const freshPlan = await planService.getPlan(plan.id);
+            if (isMounted) {
+              setPlan(freshPlan);
+              setEditableAst(freshPlan.plan_data);
+              if (onPlanUpdated) onPlanUpdated(freshPlan);
+            }
+          } catch {
+            // ignore
+          }
+        } else {
+          // If server reports idle but UI was refining, verify with server plan
+          const freshPlan = await planService.getPlan(plan.id);
+          if (isMounted && freshPlan.status !== 'refining') {
+            setIsRefining(false);
+            setPlan(freshPlan);
+            setEditableAst(freshPlan.plan_data);
+            await fetchVersions();
+            if (onPlanUpdated) onPlanUpdated(freshPlan);
+          }
+        }
+      } catch {
+        // network hiccup, will retry next interval
+      }
+    };
+
+    checkStatus();
+    const intervalId = setInterval(checkStatus, 2000);
+    const tickerId = setInterval(() => {
+      setRefiningElapsedSec((prev) => prev + 1);
+    }, 1000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+      clearInterval(tickerId);
+    };
+  }, [isRefining, plan.id, fetchVersions, onPlanUpdated]);
+
+  // Handle Natural Language AI Plan Refinement (Asynchronous Detached Coroutine)
   const handleRefinePlan = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!refinementPrompt.trim() || isRefining) return;
+    const promptText = refinementPrompt.trim();
+    if (!promptText || isRefining) return;
 
     setIsRefining(true);
+    setRefiningPromptEcho(promptText);
+    setRefiningElapsedSec(0);
+    setRefinementPrompt('');
+
     try {
-      const updated = await planService.refinePlan(plan.id, refinementPrompt.trim());
-      setPlan(updated);
-      setEditableAst(updated.plan_data);
-      setRefinementPrompt('');
-
-      const feedback = updated.plan_data?.refinement_feedback;
-      if (feedback && (feedback.verdict === 'infeasible_rejected' || !feedback.applied)) {
-        toast('LLM Evaluated Request: Refinement not feasible without data loss. See AI analysis below.', {
-          icon: '⚠️',
-          duration: 6000,
-          style: {
-            background: '#18181b',
-            color: '#fbbf24',
-            border: '1px solid rgba(251, 191, 36, 0.4)',
-            fontFamily: 'monospace',
-            fontSize: '12px',
-          },
-        });
-      } else if (updated.is_valid) {
-        toast.success('LLM re-reviewed & refined blueprint successfully!');
-      } else {
-        toast.error('LLM refinement generated schema feasibility errors! Review diagnostic alert below.');
-        scrollToDiagnostics();
-      }
-      await fetchVersions();
-      if (onPlanUpdated) onPlanUpdated(updated);
-
-      setTimeout(() => {
-        const el = document.getElementById('ai-refinement-feedback-card');
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }, 150);
+      await planService.startRefinement(plan.id, promptText);
+      setPlan((prev) => ({ ...prev, status: 'refining' }));
+      toast.success('AI plan refinement running in background. Polling for results...', {
+        icon: '🚀',
+        duration: 4000,
+      });
     } catch (err: any) {
-      const msg = err.response?.data?.detail || err.message || 'Failed to refine plan.';
-      toast.error(`Refinement Error: ${msg}`);
-      
-      const errDetails = err.response?.data?.detail;
-      const errorList = typeof errDetails === 'string' ? [errDetails] : ['Requested LLM refinement is not feasible with available database schemas.'];
-      setPlan((prev) => ({
-        ...prev,
-        is_valid: false,
-        status: 'invalid_edits',
-        validation_errors: {
-          is_valid: false,
-          errors: errorList,
-          warnings: [],
-          explanation: `LLM Refinement could not be completed: ${msg}`,
-        },
-      }));
-      scrollToDiagnostics();
-    } finally {
       setIsRefining(false);
+      const msg = err.response?.data?.detail || err.message || 'Failed to start refinement.';
+      toast.error(`Refinement Error: ${msg}`);
     }
   };
 
@@ -701,6 +765,48 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
         </div>
       )}
 
+      {/* Active AI Refinement Progress Banner */}
+      {isRefining && (
+        <div className="p-5 rounded-none bg-zinc-950 border border-sky-400/50 space-y-3 font-mono shadow-[0_0_25px_rgba(56,189,248,0.15)] relative overflow-hidden animate-fadeIn">
+          <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-sky-400 via-indigo-500 to-sky-400 animate-pulse" />
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-9 h-9 rounded-none bg-sky-400/10 border border-sky-400/40 flex items-center justify-center text-sky-400">
+                <svg className="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                </svg>
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h4 className="text-xs font-mono font-bold text-white uppercase tracking-wider">
+                    AI Blueprint Refinement in Progress
+                  </h4>
+                  <span className="px-2 py-0.5 text-[10px] font-mono font-bold rounded-none bg-sky-400/20 text-sky-300 border border-sky-400/40">
+                    {refiningElapsedSec}s elapsed
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400 font-sans mt-0.5">
+                  {refiningPromptEcho
+                    ? `Evaluating feedback: "${refiningPromptEcho}"`
+                    : 'Analyzing multi-database schemas and re-evaluating transformation AST in background...'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 text-right">
+              <span className="w-2 h-2 rounded-none bg-sky-400 animate-ping" />
+              <span className="text-[11px] text-sky-400 font-mono font-bold uppercase tracking-wider">
+                PROCESSING (BACKGROUND POLLING 2S)
+              </span>
+            </div>
+          </div>
+          <div className="text-[11px] text-zinc-500 font-mono border-t border-zinc-900 pt-2 flex items-center justify-between">
+            <span>You may refresh or navigate away — your refinement task continues executing on the server without interruption.</span>
+            <span className="text-zinc-400">LLM Timeout: 360s</span>
+          </div>
+        </div>
+      )}
+
       {/* Live Agent Execution Progress Banner (if active or recently run) */}
       {activeJob && (
         <JobExecutionBanner
@@ -1069,7 +1175,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
               {isRefining ? (
                 <>
                   <span className="w-2 h-2 rounded-none bg-black animate-ping" />
-                  <span>Re-reviewing with LLM...</span>
+                  <span>Refining in Background ({refiningElapsedSec}s)...</span>
                 </>
               ) : (
                 'Refine with LLM'
@@ -1081,7 +1187,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
             <div className="flex items-center gap-2 text-xs text-sky-400 font-mono animate-pulse pt-1">
               <span className="w-2 h-2 rounded-none bg-sky-400 animate-ping" />
               <span>
-                LLM is re-evaluating schemas and applying your refinement instructions... (May take 30–60s for complex databases)
+                LLM background task is actively running ({refiningElapsedSec}s elapsed). The blueprint will automatically update upon completion.
               </span>
             </div>
           )}
@@ -1104,7 +1210,7 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           <button
             type="button"
             onClick={handleDryRun}
-            disabled={isDryRunning || isApproving}
+            disabled={isDryRunning || isApproving || isRefining || plan.status === 'refining'}
             className="py-3.5 px-6 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all border border-amber-400/50 bg-amber-400/10 hover:bg-amber-400/20 text-amber-300 shadow-lg disabled:opacity-50"
           >
             {isDryRunning ? 'Simulating Dry Run...' : '⚡ Run Dry Run (Simulation)'}
@@ -1114,14 +1220,14 @@ export const PlanBlueprintViewer: React.FC<PlanBlueprintViewerProps> = ({
           <button
             type="button"
             onClick={handleApproveAndExecute}
-            disabled={isApproving || isApproved || isDryRunning}
+            disabled={isApproving || isApproved || isDryRunning || isRefining || plan.status === 'refining'}
             className={`py-3.5 px-8 rounded-none text-xs font-bold font-mono uppercase tracking-wider transition-all shadow-lg ${
               isApproved
                 ? 'bg-emerald-500 text-black cursor-default'
                 : 'bg-sky-400 hover:bg-sky-300 text-black shadow-sky-950/50 hover:scale-[1.01]'
             } disabled:opacity-50`}
           >
-            {isApproved ? 'PLAN APPROVED ✓' : isApproving ? 'Executing on Agent...' : 'APPROVE & EXECUTE MIGRATION'}
+            {isApproved ? 'PLAN APPROVED ✓' : isApproving ? 'Executing on Agent...' : isRefining || plan.status === 'refining' ? 'REFINEMENT IN PROGRESS...' : 'APPROVE & EXECUTE MIGRATION'}
           </button>
         </div>
       </div>

@@ -1272,3 +1272,65 @@ Implemented automatic data lineage stamping in the Docker Agent execution engine
 - **Resilience**: Even if a user's custom plan uses non-standard transformation types for `_source_origin`, the transformer intercepts the target column name and guarantees a valid string literal.
 
 
+---
+
+## [2026-09-15] - Asynchronous AI Plan Refinement with Detached Coroutines & Resilient Polling
+
+### 1. Decision Summary
+Transitioned the AI migration plan natural language refinement workflow from a blocking synchronous HTTP request to a resilient, asynchronous background execution model (`POST /plans/{plan_id}/refine-async` returning `202 Accepted` in ~200ms). Refinement runs inside a detached asyncio background coroutine (`asyncio.create_task`) with its own isolated `AsyncSessionLocal()`, thread pool delegation (`asyncio.to_thread`), and an expanded 360-second timeout window. The Next.js UI features state persistence across browser reloads (F5), 2-second HTTP polling (`GET /plans/{plan_id}/refine/status`), a prominent cyber-dark progress banner with prompt echo and live elapsed seconds timer, automatic plan hot-reloading upon completion, and strict conflict guards (`409 Conflict`) preventing race conditions during active refinement.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - LLM plan refinement against complex multi-source schemas (e.g., 14 enterprise tables across PostgreSQL, MySQL, and MongoDB) can take 200–240 seconds.
+  - The previous synchronous architecture held a single HTTP connection open for the entire duration. Browsers, API gateways, reverse proxies, or load balancers timed out after 180 seconds (`504 Gateway Timeout` or `ERR_CONNECTION_RESET`), aborting the request.
+  - If a user navigated away or refreshed the browser (`F5`), the browser client aborted the socket. Even if the backend completed, the user returned to an un-updated plan with no indicator of progress or completion.
+- **Chosen Solution**:
+  1. **Asynchronous Detached Coroutine Architecture**: The frontend dispatches `POST /api/v1/plans/{plan_id}/refine-async`, which marks `plan.status = "refining"`, registers a task in `RefinementTaskManager`, commits the transaction, spawns `asyncio.create_task(_run_plan_refinement_background())`, and immediately responds with `202 Accepted`.
+  2. **Isolated Database Session Lifecycle**: The background coroutine runs with a fresh, independent `AsyncSessionLocal()`, ensuring that database transactions are fully isolated and not bound to the ephemeral lifecycle of the incoming HTTP request.
+  3. **Thread-Safe In-Memory & Database State Tracking (`RefinementTaskManager`)**: Tracks task ID, status (`processing`, `completed`, `failed`), prompt text, start timestamp, elapsed time, and serialized results with `asyncio.Lock` concurrency protection and safe TTL eviction.
+  4. **Frontend Resilience Across Page Reloads**: In `PlanBlueprintViewer.tsx`, on mount or page refresh, if `plan.status === 'refining'`, the component activates `isRefining = true` and launches a 2.0s polling interval against `GET /plans/{plan_id}/refine/status`.
+  5. **Rich Cyber-Dark Progress Banner**: Renders an animated gradient progress banner displaying the prompt echo, elapsed seconds timer, and live status badge.
+  6. **Zero Regression for Synchronous Callers**: Synchronous route `POST /plans/{plan_id}/refine` is 100% preserved for legacy callers and backward compatibility.
+- **Why This Library / Technology**:
+  - **FastAPI Native `asyncio.create_task` + `asyncio.to_thread`**: Avoids introducing heavy external worker dependencies (like Celery / Redis worker daemons) that can crash or fail to start in developer local setups.
+  - **SQLAlchemy 2.0 Async Session (`AsyncSessionLocal`)**: Eagerly loads all agent data sources (`selectinload(MigrationPlan.agent).selectinload(Agent.data_sources)`) without `MissingGreenlet` errors.
+  - **HTTP Polling (2.0s)**: Simple, rock-solid, reconnect-free mechanism that survives full browser page refreshes, tab closures, and network reconnections.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Heavyweight Celery / Redis Worker Daemon Process**:
+  - *Rejected*: Requires running and maintaining a separate worker process daemon (`celery -A app.worker worker`) and broker. If the daemon process is not running or Redis goes down, all refinement calls silently hang or fail.
+- **Alternative B: WebSockets / Server-Sent Events (SSE)**:
+  - *Rejected*: WebSocket connections terminate when a user presses F5 or navigates between pages, requiring complex reconnect backoff, reconnection tokens, missed-message buffering, and duplicate event handlers. HTTP polling with server-side DB/memory state achieves identical latency with zero state fragility.
+- **Alternative C: Keeping Synchronous Requests with Infinite HTTP Timeout**:
+  - *Rejected*: Gateway timeouts (NGINX, Cloudflare, AWS ALB, Chrome) aggressively drop idle HTTP connections after 100–180 seconds. Long-polling/blocking HTTP requests are fundamentally unviable for 3+ minute LLM executions.
+
+### 4. Trade-offs & Future Considerations
+- **Single-Node In-Memory Cache**: `RefinementTaskManager` stores active job metadata in Python process memory. In a multi-replica horizontal backend deployment, requests across replicas would require a shared Redis key-value store. However, `plan.status = 'refining'` in PostgreSQL guarantees that even without Redis, any replica knows the plan is currently refining.
+- **Conflict Prevention**: Plans in `status == 'refining'` reject concurrent refinements (`409 Conflict`) and reject execution approvals (`409 Conflict`), eliminating race conditions.
+
+---
+
+## [2026-09-15] - Asynchronous AI Initial Plan Generation with Refresh Resilience & Concurrency Locks
+
+### 1. Decision Summary
+Extended the asynchronous background execution model to the initial AI migration plan generation workflow (`POST /plans/generate-async` returning `202 Accepted` in ~200ms). Initial generation runs inside a detached background coroutine (`_run_plan_generation_background`) using an isolated `AsyncSessionLocal()`, LangGraph StateGraph engine with direct LLM fallback, and dual-layer concurrency locking (`GenerationTaskManager` + database `status == 'generating'`). In `GeneratePlanAction.tsx`, on-mount status checks allow the user to refresh the page (`F5`) or navigate away: the "GENERATE AI MIGRATION PLAN" button remains disabled with live elapsed ticker, a cyber-dark progress banner details the multi-stage pipeline, and 2-second HTTP polling (`GET /plans/agent/{agent_id}/generation-status`) automatically redirects to `/transformation-plan?planId=...` once the blueprint is persisted.
+
+### 2. Why This Approach? (Rationale)
+- **Problem Being Solved**:
+  - Initial plan generation across multi-engine sources involves extensive schema graph analysis, topological dependency sorting, and LLM code synthesis that can take 45–90 seconds.
+  - Previously, `createPlan()` executed as a blocking synchronous HTTP request (`POST /plans/generate`). If the user refreshed the page or closed the tab, the HTTP socket dropped, the frontend lost the plan redirect, and duplicate clicks attempted to invoke parallel LLM generation passes against the same database metadata.
+- **Chosen Solution**:
+  1. **Immediate 202 Accepted & Upfront Plan Registration**: `POST /plans/generate-async` persists an initial `MigrationPlan` entity with `status = "generating"`, registers the task in `GenerationTaskManager`, commits the transaction, spawns `asyncio.create_task()`, and returns `202 Accepted` with `plan_id` and `task_id`.
+  2. **Dual-Layer Concurrency Lock**: Rejects duplicate generation requests for the same agent with `409 Conflict` both via in-memory task tracking (`GenerationTaskManager.is_running`) and database-level query (`MigrationPlan.status == 'generating'`).
+  3. **Browser Refresh Resilience**: When `GeneratePlanAction.tsx` mounts on `/sources?agentId=...`, `checkAgentExecutionState()` calls `planService.getGenerationStatus(agentId)`. If `processing`, it immediately restores `isGenerating = true`, restores the elapsed seconds timer, disables the button, renders the progress banner, and activates the 2s polling loop.
+  4. **Automatic Redirection**: When status becomes `completed`, the poller receives the generated plan ID and performs `router.push('/transformation-plan?planId=' + id)`.
+  5. **100% Backward Compatibility**: Synchronous route `POST /plans/generate` is completely preserved for legacy callers and existing test suites.
+
+### 3. Alternatives Considered & Rejected
+- **Alternative A: Client-Side LocalStorage Job Caching**:
+  - *Rejected*: LocalStorage is brittle, per-browser, cleared on privacy resets, and invisible to backend concurrency guards. Server-side tracking in PostgreSQL and `GenerationTaskManager` ensures any browser or device viewing the agent sees the identical active generation state.
+- **Alternative B: WebSockets / Event Streams**:
+  - *Rejected*: Sockets disconnect on F5 page reloads and require complex reconnection protocols. 2.0s HTTP polling provides zero-maintenance reliability across network drops and browser refreshes.
+
+### 4. Trade-offs & Future Considerations
+- **Fast Failover & Status Recovery**: If an exception occurs in the detached background coroutine, a dedicated recovery session automatically sets `plan.status = "draft_failed"` with error details, allowing the user to view the failure diagnosis and retry cleanly.
